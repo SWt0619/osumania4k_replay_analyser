@@ -37,6 +37,22 @@
   window.API = {
     fileToBase64,
 
+    // 在线补音频：失败是常态（镜像缺图、网络不通、用户关了开关），
+    // 所以这里不抛异常，把结果原样交给调用方去决定怎么提示。
+    async fetchAudio(session) {
+      try {
+        const res = await fetch("/api/audio-fetch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: session }),
+        });
+        const data = await res.json();
+        return data && typeof data === "object" ? data : { ok: false, error: "返回格式异常" };
+      } catch (e) {
+        return { ok: false, error: (e && e.message) || "网络错误" };
+      }
+    },
+
     // 用 XHR 上传：能拿到"已经发出去多少字节"，卡在上传阶段时一眼能看出来。
     // 25 秒超时：正常分析 1~2 秒就完，超时基本等于「POST 体被吞了」，调用方会自动改走分片通道。
     analyzeUpload(payload, onProgress, onXhr) {

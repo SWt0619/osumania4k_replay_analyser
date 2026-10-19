@@ -1032,7 +1032,9 @@
     }
     state.audioBroken = false;
     if (!data.session || !data.media || !data.media.audio) {
-      note.textContent = "这首谱面没找到音频文件，回放会用虚拟时钟播放（没有声音）.";
+      note.hidden = false;
+      note.textContent = "本地没找到音频，正在尝试在线补一份…";
+      fetchAudioOnline(data);
       return;
     }
     const audio = document.createElement("audio");
@@ -1052,6 +1054,36 @@
     applyVolume();
     // 默认不显示任何提示：这句「音频按绝对时间对齐…」对用户没信息量
     note.hidden = true;
+  }
+
+  // 本地没有音频时补一份：服务端按谱面 MD5 去镜像站取 .osz，只把音频留下。
+  // 不阻塞界面——补到了就把播放器接上，补不到就退回虚拟时钟。
+  let audioFetching = false;
+  async function fetchAudioOnline(data) {
+    const note = $("audioNote");
+    if (!data || !data.session || audioFetching) return;
+    audioFetching = true;
+    const res = await window.API.fetchAudio(data.session);
+    audioFetching = false;
+    if (res && res.ok) {
+      data.media = data.media || {};
+      data.media.audio = true;
+      const from = res.source === "cache" ? "本地缓存"
+        : res.source === "local" ? "本地曲库"
+        : (res.source || "镜像站");
+      window.UI.toast("已补上音频（来源：" + from + "）");
+      setupAudio(data);
+      return;
+    }
+    if (!note) return;
+    note.hidden = false;
+    if (res && res.disabled) {
+      note.textContent = "本地没找到音频，在线补音频已关闭；回放会用虚拟时钟播放（没有声音）。";
+    } else {
+      note.textContent = "本地没找到音频，在线补也没成功"
+        + (res && res.error ? "（" + res.error + "）" : "")
+        + "，回放会用虚拟时钟播放（没有声音）。";
+    }
   }
 
   // ---------------------------------------------------------------- 导入流程

@@ -27,6 +27,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from app import paths  # noqa: E402
+from app.core import audio_fetch  # noqa: E402
 from app.core.analyze import AnalyzeError, analyze, set_msd_cache_path  # noqa: E402
 from app.core.beatmap import parse_osu_file  # noqa: E402
 from app.core.library import default_songs_roots, get_library, set_cache_path  # noqa: E402
@@ -151,7 +152,8 @@ class SessionStore:
         self._items: dict[str, dict] = {}
         self._lock = threading.Lock()
 
-    def create(self, payload: dict, audio: str, background: str, note_skin: dict | None = None) -> str:
+    def create(self, payload: dict, audio: str, background: str, note_skin: dict | None = None,
+               beatmap_path: str = "", beatmap_md5: str = "") -> str:
         sid = "%x%04x" % (int(time.time() * 1000), int(time.time_ns()) % 0xFFFF)
         skin = note_skin or {"columns": [], "lnBody": "", "lnTail": ""}
         now = time.time()
@@ -163,6 +165,9 @@ class SessionStore:
                 "noteImages": list(skin.get("columns") or []),
                 "lnBody": skin.get("lnBody") or "",
                 "lnTail": skin.get("lnTail") or "",
+                # 留着谱面路径与 MD5：本地找不到音频时，靠它们去镜像站补一份
+                "beatmapPath": beatmap_path or "",
+                "beatmapMd5": beatmap_md5 or "",
                 "created": now,
             }
             for k in [k for k, v in self._items.items() if now - v["created"] > self.TTL_SECONDS]:
@@ -175,6 +180,15 @@ class SessionStore:
     def get(self, sid: str) -> dict | None:
         with self._lock:
             return self._items.get(sid)
+
+    def set_audio(self, sid: str, path: str) -> bool:
+        """把后来补到的音频挂回会话：媒体路由是按会话取路径的，改这里就生效。"""
+        with self._lock:
+            item = self._items.get(sid)
+            if not item:
+                return False
+            item["audio"] = path
+            return True
 
 
 SESSIONS = SessionStore()
@@ -400,7 +414,13 @@ class _AnalysisApiMixin:
         payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root)
         audio, background, note_skin = _resolve_media(payload, beatmap_path, songs_root)
 
-        sid = SESSIONS.create(payload, audio, background, note_skin)
+        # 谱面路径要在这里定下来：上传回放时 beatmap_path 是空的，真正的路径是
+        # analyze 内部按 MD5 从曲库解析出来的。不把它解析出来存进会话，
+        # 后面「在线补音频」就拿不到 .osu，也就读不出图集 id。
+        resolved_bm = beatmap_path or _resolve_bm(payload, songs_root)
+        sid = SESSIONS.create(payload, audio, background, note_skin,
+                              beatmap_path=resolved_bm or "",
+                              beatmap_md5=(payload.get("replay") or {}).get("beatmapMd5") or "")
         payload["session"] = sid
         cols = note_skin.get("columns") or []
         payload["media"] = {
@@ -412,6 +432,48 @@ class _AnalysisApiMixin:
             "lnTail": ("/api/media/%s/lntail" % sid) if note_skin.get("lnTail") else None,
         }
         return self._json(payload)
+
+    # ---- 在线补音频 -----------------------------------------------------------
+    # 只在 lazer 里下载过的谱面，音频和谱面各自按内容哈希存放、彼此没有关联信息，
+    # 本地永远配不上音频。这里按谱面信息去镜像站取一次 .osz，只把音频留下。
+    def _audio_fetch(self):
+        req = _parse_json(self._read_body())
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+        sid = (req.get("session") or "").strip()
+        sess = SESSIONS.get(sid)
+        if not sess:
+            return self._error("会话已过期，请重新分析", 404)
+        if sess.get("audio"):
+            return self._json({"ok": True, "already": True, "source": "local",
+                               "url": "/api/media/%s/audio" % sid})
+        if not audio_fetch.is_enabled(CACHE_DIR):
+            return self._json({"ok": False, "disabled": True, "error": "在线补音频已关闭"})
+
+        md5 = (sess.get("beatmapMd5") or "").strip()
+        log("[audio] 尝试补音频 %s …" % (md5[:8] or "(无 MD5)"))
+        try:
+            result = audio_fetch.fetch_audio(sess.get("beatmapPath") or "", md5, CACHE_DIR,
+                                             force=bool(req.get("force")))
+        except Exception as e:  # noqa: BLE001
+            log("[audio] 异常：%s" % e)
+            return self._json({"ok": False, "error": "补音频时出错：%s" % e})
+
+        if result.get("ok"):
+            SESSIONS.set_audio(sid, result["path"])
+            result["url"] = "/api/media/%s/audio" % sid
+            log("[audio] 已补上：%s（%s）" % (os.path.basename(result["path"]), result.get("source")))
+        else:
+            log("[audio] 没补到：%s" % result.get("error"))
+        return self._json(result)
+
+    def _audio_pref(self):
+        req = _parse_json(self._read_body()) or {}
+        if "enabled" in req:
+            audio_fetch.set_enabled(CACHE_DIR, bool(req.get("enabled")))
+            log("[audio] 在线补音频 = %s" % audio_fetch.is_enabled(CACHE_DIR))
+        return self._json({"ok": True, "enabled": audio_fetch.is_enabled(CACHE_DIR),
+                           "stats": audio_fetch.stats(CACHE_DIR)})
 
     def _beatmap_search(self):
         # 搜索是"边打边搜"的：请求体坏掉时退回空查询，比弹一个错更不打扰
@@ -645,6 +707,10 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
                 return self._beatmap_meta()
             if path == "/api/analyze-local":
                 return self._analyze_local()
+            if path == "/api/audio-fetch":
+                return self._audio_fetch()
+            if path == "/api/audio-pref":
+                return self._audio_pref()
             if path == "/api/echo":
                 body = self._read_body()
                 return self._json({"ok": True, "received": len(body), "echo": body[:64].decode("utf-8", "replace")})
@@ -755,6 +821,11 @@ def _resolve_media(payload: dict, beatmap_path: str | None, songs_root: str | No
             audio = get_library(songs_root).find_audio(bm_path)
         except Exception:  # noqa: BLE001
             audio = ""
+        if not audio:
+            # 曲库里没有，但之前在线补过一份的话，直接拿来用 —— 第二次打开这张图
+            # 就不需要再走一次「先无声、再等前端补」的来回
+            md5 = (payload.get("replay") or {}).get("beatmapMd5") or ""
+            audio = audio_fetch.cached_audio(CACHE_DIR, md5) or ""
         if not audio:
             log("[analyze] 没找到音频：谱面目录 %s 里没有同捆音频文件" % os.path.dirname(bm_path))
 

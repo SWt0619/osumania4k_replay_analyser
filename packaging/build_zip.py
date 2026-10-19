@@ -15,6 +15,13 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 NAME = "osumania_replay_analyser"
+
+sys.path.insert(0, HERE)
+try:
+    from build_launcher import SRC_DIR, START_NAME, STOP_NAME
+except Exception:  # noqa: BLE001
+    SRC_DIR = os.path.join(HERE, "launcher")
+    START_NAME, STOP_NAME = "启动分析器.exe", "停止分析器.exe"
 SKIP_DIRS = {"__pycache__", "dist", "build", ".git", ".venv", "node_modules", "_cache", "_tools"}
 # 回放、谱面、日志、本地配置一律不进压缩包：这些只可能是跑程序时产生的本机数据
 SKIP_EXT = {".pyc", ".pyo", ".osr", ".osu", ".osz", ".osb", ".osk", ".log", ".env"}
@@ -37,10 +44,28 @@ def should_skip(path: str) -> bool:
     return False
 
 
+def launcher_stale() -> str:
+    """两个小启动器是不是落后于源码了？返回原因，空前缀表示没问题。
+
+    这一关是为了别把「改了停止器却忘了重编译」的包发出去 —— 那种包能启动、
+    却停不下来服务，而且从文件名和版本号上完全看不出来。
+    """
+    for src, exe in (("Launcher.cs", START_NAME), ("Stopper.cs", STOP_NAME)):
+        src_path = os.path.join(SRC_DIR, src)
+        exe_path = os.path.join(ROOT, exe)
+        if not os.path.isfile(exe_path):
+            return "%s 还没编译出来" % exe
+        if os.path.isfile(src_path) and os.path.getmtime(exe_path) < os.path.getmtime(src_path):
+            return "%s 比 %s 旧（改完没重新编译）" % (exe, src)
+    return ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(ROOT, "dist"))
     ap.add_argument("--no-launcher", action="store_true", help="跳过启动器编译（exe 已经编好时用）")
+    ap.add_argument("--allow-stale-launcher", action="store_true",
+                    help="即使启动器比源码旧也照打（只在明确知道后果时用）")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
@@ -50,10 +75,18 @@ def main() -> int:
         print("编译启动器……")
         built = subprocess.run([sys.executable, launcher_script], cwd=ROOT)
         if built.returncode != 0:
-            print("提醒：启动器没编译成功（返回码 %s），zip 里将没有 exe 入口。"
+            print("提醒：启动器没编译成功（返回码 %s）。"
                   % built.returncode)
             print("     先确认系统里有 .NET Framework 自带的 csc.exe（在 %WINDIR% 下的 Microsoft.NET 目录里）。")
         print("")
+
+    stale = launcher_stale()
+    if stale and not args.allow_stale_launcher:
+        print("[中止] " + stale)
+        print("       包里的 exe 会和源码对不上（比如改了停止器却没重编译，那个包能启动却停不下来）。")
+        print("       先跑： python packaging\\build_launcher.py  然后再打包。")
+        print("       确实要照打：加 --allow-stale-launcher")
+        return 3
 
     if not os.path.isfile(os.path.join(ROOT, "python", "python.exe")):
         print("提醒：python\\python.exe 不存在，打出来的 zip 将不带内置运行时。")

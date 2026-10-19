@@ -12,6 +12,7 @@
 - **键型分类**：包含om4k 14 类键型stream、jumpstream、handstream、jack、trill、anchor 等（目前开发测试时发现部分键形判定不准，后续还需优化算法）
 - **跟曲重放**：播放谱面原声并对齐下落式音符，支持 0.5×~1.5× 变速、只看失误、两路回放并排对比、点选失误物件直接看原因。
 - **难度与段位**：调用 Etterna 的 MinaCalc 算 MSD 难度分与七维雷达图，可以参考Reform段位的MSD大致判断谱面难度
+- **音频在线补齐**：只在 lazer 里下载过的谱面本地没有音频，程序会按谱面记的图集 id 去 [sayobot](https://www.sayobot.cn) 等镜像站取一次谱面包，只留下音频并缓存，下次直接复用
 - **总体评价**：等级、一句话结论、分段表现、左右手对比、最吃亏的键型、稳定上限，以及几条具体建议和「修掉最容易改的那几击能打到多少」。
 - **纯本地、免安装**：只监听 `127.0.0.1`，便携版自带 Python 运行时，不装任何东西，也不用担心网络。
 - （注：本应用的分析算法是通过分析几十名玩家的160个回放得出的，可能存在样本量偏小的问题，欢迎提出优化意见）
@@ -20,7 +21,7 @@
 
 ### 使用便携版 zip（推荐）
 
-1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.0.0-win64.zip`。
+1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.1.0-win64.zip`。
 2. 解压到任意位置。
 3. 双击 `启动分析器.exe`。它会静默起服务，不弹任何窗口。
 4. 浏览器会打开 `http://127.0.0.1:8806/`。端口被占用时程序会自动往后找一个空的。
@@ -119,6 +120,7 @@
 3. **启发式归因**：四类的边界在真实数据里会重叠（尤其「能力 + 节奏」双重），所以每条结论都带可信度，可信度低时请当成「两种都有可能」。
 4. **谱面版本对不上**（比如谱面后来被更新过）时 MD5 会查不到，程序会在「本次数据」里如实标注。
 5. **提示「数据不完整 / 解压失败」**：多半是游戏还在往 `.osr` 里写的时候就把文件拖进来了。等游戏完全退出再拖一次即可。
+6. **音频不在本地时会联网补一份**：只在 lazer 里下载过的谱面，音频和谱面各自按内容哈希存放、彼此没有关联信息，本地配不上音频。这时程序会读谱面里记的图集 id，去 **[sayobot](https://www.sayobot.cn)**（小夜镜像站）取一次 `.osz`；国内优先 sayobot，取不到再依次试 nerinyan、catboy。取回后只把 `AudioFilename` 指向的那个文件存进 `app\_cache\audio\`，其余全部丢弃，下次打开同一张图直接用缓存。请求串行、两次之间至少隔 2 秒，失败会记账并在 7 天后才重试。**这需要联网，并且会把图集 id 发给镜像站**；不希望联网的话，在 `app\_cache\config.json` 里写 `{"autoFetchAudio": false}` 即可，但会导致回放没有音乐。
 
 ## 性能与排错
 
@@ -145,6 +147,7 @@ app/
     osu_dirs.py        曲库/导出/文件库的默认路径
     skin.py            读 osu! 皮肤素材（长条贴图等）
     analyze.py         串起来，输出一份 JSON
+    audio_fetch.py     本地没有音频时去镜像站补（只留音频，其余丢弃）
   web/                 前端（原生 JS，零依赖、零构建）
   _cache/              曲库索引缓存、端口号、server.log
 python/                内置的 Python 3.13 运行时（Windows x64，免安装）
@@ -161,3 +164,4 @@ _replays/              备用通道：把回放放这里，页面里点文件名
 
 - [ppy/osu](https://github.com/ppy/osu)：判定窗口口径、测试回放与 ScoreV1 计分公式的依据。
 - [Etterna](https://github.com/etternagame/etterna)：使用其 MinaCalc 计算 MSD 难度。
+- [sayobot](https://www.sayobot.cn)：谱面镜像站。本地没有音频时，程序从这里下载谱面包并只保留音频（见「注意事项」第 6 条）。备用镜像：[nerinyan](https://nerinyan.moe)、[catboy](https://catboy.best)。

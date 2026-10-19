@@ -7,6 +7,8 @@
 // 逻辑与旧的 停止分析器.vbs 一致，只是换成 exe，不再走脚本宿主。
 
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Management;
 using System.Runtime.InteropServices;
 
@@ -24,8 +26,7 @@ static class Stopper
     [STAThread]
     static int Main(string[] args)
     {
-        int killed = 0;
-        int failed = 0;
+        List<int> pids = new List<int>();
 
         try
         {
@@ -46,19 +47,8 @@ static class Stopper
                 if (!isOurs) continue;
                 if (cmdline.IndexOf("python", StringComparison.Ordinal) < 0) continue;
 
-                // InvokeMethod 在 ManagementObject 上，基类没有
-                ManagementObject proc = mo as ManagementObject;
-                if (proc == null) continue;
-
-                try
-                {
-                    proc.InvokeMethod("Terminate", null);
-                    killed++;
-                }
-                catch
-                {
-                    failed++;
-                }
+                try { pids.Add(Convert.ToInt32(mo["ProcessId"])); }
+                catch { }
             }
 
             procs.Dispose();
@@ -70,8 +60,37 @@ static class Stopper
             return 2;
         }
 
+        // 先枚举完再动手：一边遍历 WMI 结果一边杀进程，容易在半路把枚举搞乱。
+        //
+        // 结束进程用 Process.Kill()（底层 TerminateProcess），不用 WMI 的 Terminate：
+        // 实测在同一台机器上，ManagementObject.InvokeMethod("Terminate") 会抛
+        // InvalidOperationException（"对象的当前状态使该操作无效"），CIM 通道却正常。
+        // 既然 .NET 的 Process API 更直接也更稳，就别再绕 WMI。
+        int killed = 0;
+        int failed = 0;
+        foreach (int pid in pids)
+        {
+            if (pid == Process.GetCurrentProcess().Id) continue;
+            try
+            {
+                Process proc = Process.GetProcessById(pid);
+                proc.Kill();
+                proc.WaitForExit(3000);
+                killed++;
+            }
+            catch (ArgumentException)
+            {
+                // 枚举到结束之间进程自己退了：算它停住了
+                killed++;
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
         if (killed == 0 && failed == 0) Box("现在没有在跑的分析器服务。", MB_ICONINFO);
-        else if (failed > 0) Box("已停止 " + killed + " 个服务进程，" + failed + " 个没能结束（可能在别的用户下运行，试试以管理员身份打开）。", MB_ICONINFO);
+        else if (failed > 0) Box("已停止 " + killed + " 个服务进程，" + failed + " 个没能结束（权限不足时试试右键以管理员身份打开）。", MB_ICONINFO);
         else Box("已停止 " + killed + " 个服务进程。", MB_ICONINFO);
 
         return 0;
