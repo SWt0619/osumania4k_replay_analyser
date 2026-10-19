@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osumania_replay_analyser · mania 回放分析</title>
+<link rel="stylesheet" href="/static/css/app.css?v=__ASSET_V__">
+</head>
+<body>
+
+<!-- 背景光斑 -->
+<div class="bg-blobs" aria-hidden="true">
+  <span class="blob blob-a"></span>
+  <span class="blob blob-b"></span>
+  <span class="blob blob-c"></span>
+</div>
+
+<!-- ============ 顶栏 ============ -->
+<header class="topbar glass">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+      <defs>
+        <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#22d3ee"/>
+        </linearGradient>
+      </defs>
+      <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="none" stroke="url(#brandGrad)" stroke-width="1.6"/>
+      <rect x="6" y="9" width="2.6" height="7" rx="1.3" fill="url(#brandGrad)"/>
+      <rect x="10.7" y="5.5" width="2.6" height="7" rx="1.3" fill="url(#brandGrad)"/>
+      <rect x="15.4" y="11" width="2.6" height="7" rx="1.3" fill="url(#brandGrad)"/>
+    </svg>
+    <div class="brand-text">
+      <strong>osumania_replay_analyser</strong>
+      <span class="brand-sub">mania 回放分析</span>
+    </div>
+  </div>
+
+  <div class="track-info" id="trackInfo">
+    <span class="track-title" id="trackTitle">还没有载入回放</span>
+    <span class="track-sub" id="trackSub">拖入 .osr 文件开始</span>
+  </div>
+
+  <div class="topbar-actions">
+    <div class="chip" id="libChip" title="osu! 曲库状态">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+      <span id="libChipText">曲库…</span>
+    </div>
+    <button class="icon-btn" id="btnImport" title="导入回放（.osr）">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+    </button>
+    <button class="icon-btn" id="btnHelp" title="使用说明 / 数据来源">
+      <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.2 2.4c-.6.2-.9.7-.9 1.3v.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.05" fill="currentColor"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ============ 主区 ============ -->
+<main class="shell">
+
+  <!-- 左：图标导航 -->
+  <nav class="rail glass" id="rail" aria-label="页面切换">
+    <button class="rail-btn is-active" data-tab="overview" title="总览">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M4 13h4v7H4zM10 4h4v16h-4zM16 9h4v11h-4z" fill="currentColor" opacity=".9"/></svg>
+    </button>
+    <button class="rail-btn" data-tab="timeline" title="时间轴">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M3 17l4-5 3 3 4-7 3 4 4-6" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="rail-btn" data-tab="errors" title="失误清单">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M12 4.5 21 19H3l9-14.5Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/><path d="M12 10v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1" fill="currentColor"/></svg>
+    </button>
+    <button class="rail-btn" data-tab="replay" title="回放">
+      <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M10 8.8v6.4l5.2-3.2L10 8.8Z" fill="currentColor"/></svg>
+    </button>
+    <button class="rail-btn" data-tab="chart" title="谱面难度（MSD）">
+      <svg viewBox="0 0 24 24" class="ico">
+        <path d="M12 3.2 19.6 7.6v8.8L12 20.8 4.4 16.4V7.6Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round" opacity=".55"/>
+        <path d="M12 7.6 16.2 10v4L12 16.4 7.8 14v-4Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
+        <circle cx="12" cy="12" r="1.4" fill="currentColor"/>
+      </svg>
+    </button>
+    <span class="rail-sep"></span>
+    <button class="rail-btn" data-tab="details" title="细节数据">
+      <svg viewBox="0 0 24 24" class="ico"><path d="M5 6h14M5 12h14M5 18h9" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>
+    </button>
+  </nav>
+
+  <!-- 右：内容 -->
+  <section class="content" id="content">
+
+    <!-- 空状态 -->
+    <div class="empty glass" id="emptyState">
+      <div class="empty-art" aria-hidden="true">
+        <svg viewBox="0 0 120 90">
+          <defs>
+            <linearGradient id="emptyGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#22d3ee"/>
+            </linearGradient>
+          </defs>
+          <rect x="14" y="14" width="92" height="62" rx="10" fill="none" stroke="url(#emptyGrad)" stroke-width="1.5" stroke-dasharray="6 6"/>
+          <rect x="30" y="40" width="7" height="22" rx="3.5" fill="url(#emptyGrad)" opacity=".85"/>
+          <rect x="46" y="30" width="7" height="32" rx="3.5" fill="url(#emptyGrad)" opacity=".65"/>
+          <rect x="62" y="46" width="7" height="16" rx="3.5" fill="url(#emptyGrad)" opacity=".5"/>
+          <rect x="78" y="34" width="7" height="28" rx="3.5" fill="url(#emptyGrad)" opacity=".35"/>
+        </svg>
+      </div>
+      <h2>把回放拖进来</h2>
+      <p class="muted">支持 osu!mania 的 <code>.osr</code> 回放。谱面会按回放里的 MD5 自动从你的曲库里匹配。</p>
+      <div class="empty-actions">
+        <button class="btn btn-primary" id="btnPickFile">选择回放文件</button>
+      </div>
+      <p class="fineprint">文件只在本机处理，不会上传到任何服务器。</p>
+      <div class="local-folder" id="localFolder">
+        <h3>也可以直接读文件夹里的回放<span class="tag">不经过浏览器上传</span></h3>
+        <p class="fineprint" id="localFolderHint">把 <code>.osr</code> 复制到下面这个目录，然后在页面里点文件名即可（服务端直接读磁盘，所以浏览器上传被挡住也能用）：</p>
+        <div class="local-path-row">
+          <code id="localFolderPath">—</code>
+          <button class="btn btn-ghost" id="btnOpenFolder2">打开文件夹</button>
+        </div>
+        <ul class="bm-list" id="localReplayList"></ul>
+      </div>
+    </div>
+
+    <!-- 总览 -->
+    <div class="tab-panel" id="panel-overview" hidden>
+      <div class="grid-overview">
+        <article class="card glass hero" id="heroCard">
+          <div class="hero-top">
+            <div class="grade-ring" id="gradeRing">
+              <svg viewBox="0 0 120 120">
+                <defs>
+                  <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#22d3ee"/>
+                  </linearGradient>
+                </defs>
+                <circle cx="60" cy="60" r="50" class="ring-bg"/>
+                <circle cx="60" cy="60" r="50" class="ring-fg" id="ringFg"/>
+              </svg>
+              <span class="grade-letter" id="gradeLetter">–</span>
+            </div>
+            <div class="hero-copy">
+              <h1 id="heroHeadline">等待分析</h1>
+              <p class="muted" id="heroDesc">导入回放后会给出总评、失误成因与改进建议。</p>
+              <div class="badges" id="heroBadges"></div>
+              <p class="projection" id="heroProjection" hidden></p>
+            </div>
+          </div>
+          <div class="hero-paras" id="heroParas"></div>
+          <div class="hero-lists">
+            <div class="mini-list">
+              <h3><span class="dot dot-good"></span>亮点</h3>
+              <ul id="listStrengths"><li class="muted">—</li></ul>
+            </div>
+            <div class="mini-list">
+              <h3><span class="dot dot-bad"></span>短板</h3>
+              <ul id="listWeaknesses"><li class="muted">—</li></ul>
+            </div>
+          </div>
+        </article>
+
+        <article class="card glass" id="catCard">
+          <div class="card-head">
+            <h2>失误成因</h2>
+            <button class="fold-btn" data-fold="catCard" title="折叠/展开">
+              <svg viewBox="0 0 24 24" class="ico"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div class="card-body">
+            <div class="donut-wrap">
+              <canvas id="donutCat" width="180" height="180"></canvas>
+              <div class="donut-center">
+                <strong id="catTotal">0</strong>
+                <span>次失误</span>
+              </div>
+            </div>
+            <ul class="legend" id="catLegend"></ul>
+            <div class="stat-strip" id="catStats"></div>
+          </div>
+        </article>
+
+        <article class="card glass span-2" id="histCard">
+          <div class="card-head">
+            <h2>击打误差分布</h2>
+            <div class="card-tools">
+              <span class="tag" id="histMeta">—</span>
+              <button class="fold-btn" data-fold="histCard" title="折叠/展开">
+                <svg viewBox="0 0 24 24" class="ico"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="card-body">
+            <canvas id="chartHist" class="chart" height="200"></canvas>
+          </div>
+        </article>
+
+        <article class="card glass" id="adviceCard">
+          <div class="card-head">
+            <h2>改进建议</h2>
+            <button class="fold-btn" data-fold="adviceCard" title="折叠/展开">
+              <svg viewBox="0 0 24 24" class="ico"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div class="card-body">
+            <ol class="advice-list" id="adviceList"></ol>
+          </div>
+        </article>
+
+        <article class="card glass" id="metaCard">
+          <div class="card-head">
+            <h2>本次数据</h2>
+            <button class="fold-btn" data-fold="metaCard" title="折叠/展开">
+              <svg viewBox="0 0 24 24" class="ico"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div class="card-body">
+            <dl class="kv" id="metaKv"></dl>
+          </div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 时间轴 -->
+    <div class="tab-panel" id="panel-timeline" hidden>
+      <article class="card glass" id="timelineCard">
+        <div class="card-head">
+          <h2>时间轴</h2>
+          <div class="card-tools">
+            <span class="tag" id="timelineMeta">—</span>
+            <button class="fold-btn" data-fold="timelineCard" title="折叠/展开">
+              <svg viewBox="0 0 24 24" class="ico"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="transport transport-timeline">
+            <button class="icon-btn" id="btnPlayTl" title="播放 / 暂停（时间轴上也能边听边看曲线）">
+              <svg viewBox="0 0 24 24" class="ico" id="icoPlayTl"><path d="M8 5.5v13l11-6.5-11-6.5Z" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linejoin="round"/></svg>
+            </button>
+            <span class="tag" id="playTimeTl">0:00 / 0:00</span>
+            <span class="tag acc-now" id="accNowTl" title="当前时间所在这一小段（约 6 个音）的 v1 加权准确率：300/MAX 同权，200 记 2/3">此刻 v1 —</span>
+            <span class="fineprint">边看曲线边听：空格也能播放 / 暂停</span>
+          </div>
+          <canvas id="chartTimeline" class="chart chart-tall" height="300"></canvas>
+          <p class="fineprint">点一下时间轴可以跳到那个位置；竖线是当前播放位置。</p>
+        </div>
+      </article>
+
+      <div class="grid-2">
+        <article class="card glass" id="sectionsCard">
+          <div class="card-head"><h2>分段表现</h2></div>
+          <div class="card-body"><div id="sectionsBody" class="bars"></div></div>
+        </article>
+        <article class="card glass" id="densityCard">
+          <div class="card-head"><h2>密度 vs 失误率</h2></div>
+          <div class="card-body"><canvas id="chartDensity" class="chart" height="220"></canvas></div>
+        </article>
+      </div>
+    </div>
+
+    <!-- 失误清单 -->
+    <div class="tab-panel" id="panel-errors" hidden>
+      <article class="card glass" id="errorsCard">
+        <div class="card-head">
+          <h2>失误清单</h2>
+          <div class="card-tools" id="errorFilters">
+            <button class="chip chip-btn is-on" data-cat="all">全部</button>
+            <button class="chip chip-btn" data-cat="ability"><i class="sw" data-cor="ability"></i>能力</button>
+            <button class="chip chip-btn" data-cat="rhythm"><i class="sw" data-cor="rhythm"></i>节奏</button>
+            <button class="chip chip-btn" data-cat="distraction"><i class="sw" data-cor="distraction"></i>分神</button>
+            <button class="chip chip-btn" data-cat="slip"><i class="sw" data-cor="slip"></i>失手</button>
+            <button class="chip chip-btn" data-sev="severe">只看严重</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="error-empty" id="errorEmpty" hidden>没有符合筛选条件的失误。</div>
+          <ul class="error-list" id="errorList"></ul>
+          <button class="btn btn-ghost more-btn" id="btnMoreErrors" hidden>再看 50 条</button>
+        </div>
+      </article>
+    </div>
+
+    <!-- 回放 -->
+    <div class="tab-panel" id="panel-replay" hidden>
+      <div class="grid-replay">
+        <article class="card glass player-card">
+          <div class="card-head">
+            <h2>回放</h2>
+            <div class="card-tools">
+              <button class="chip chip-btn" id="btnToggleErrors" title="只高亮失误">只看失误</button>
+              <button class="chip chip-btn" id="btnCompare" title="上传同一张谱面的另一份回放，两路并排同步播放对比">对比</button>
+              <span class="tag" id="playTime">0:00 / 0:00</span>
+            </div>
+          </div>
+          <div class="card-body playfield-wrap" id="playfieldWrap">
+            <div class="pf-slot" id="pfSlot1">
+              <canvas id="playfield" class="playfield"></canvas>
+              <span class="pf-badge" id="pfBadge1" hidden>回放 1 · 主</span>
+            </div>
+            <div class="pf-slot" id="pfSlot2" hidden>
+              <canvas id="playfield2" class="playfield"></canvas>
+              <span class="pf-badge" id="pfBadge2">回放 2 · 标杆</span>
+              <button class="pf-close" id="btnCloseCompare" title="关闭对比，回到单回放">×</button>
+            </div>
+          </div>
+          <input type="file" id="fileCompare" accept=".osr" hidden>
+          <div class="transport">
+            <button class="icon-btn" id="btnPlay" title="播放/暂停">
+              <svg viewBox="0 0 24 24" class="ico" id="icoPlay"><path d="M8 5.5v13l11-6.5-11-6.5Z" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linejoin="round"/></svg>
+            </button>
+            <input type="range" id="seek" class="seek" min="0" max="1000" value="0" step="1" aria-label="播放进度">
+            <select id="speed" class="mini-select" title="播放速度">
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1.0×</option>
+              <option value="1.5">1.5×</option>
+            </select>
+            <button class="icon-btn" id="btnMute" title="静音">
+              <svg viewBox="0 0 24 24" class="ico"><path d="M5 9.5h3l4-3.5v12l-4-3.5H5z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <div class="transport transport-extra">
+            <label class="mini-field" title="音符从画布顶端落到判定线花多少毫秒。数字越小 = 下落越快、一屏里音符越稀">
+              <span>下落</span>
+              <input type="range" id="scroll" class="mini-range" min="300" max="2600" step="50" value="1200" aria-label="下落速度">
+              <b id="scrollVal">1200 ms</b>
+            </label>
+            <label class="mini-field" title="音画偏移（毫秒）。正值 = 谱面比音频提前，负值 = 谱面比音频延后">
+              <span>音画</span>
+              <input type="range" id="offset" class="mini-range" min="-500" max="500" step="5" value="0" aria-label="音画偏移">
+              <b id="offsetVal">0 ms</b>
+            </label>
+            <label class="mini-field" title="回放音量（只影响本页面，不动系统音量）">
+              <span>音量</span>
+              <input type="range" id="volume" class="mini-range" min="0" max="100" step="5" value="60" aria-label="音量">
+              <b id="volumeVal">60%</b>
+            </label>
+          </div>
+          <p class="fineprint" id="audioNote"></p>
+        </article>
+
+        <aside class="card glass now-card">
+          <div class="card-head"><h2>此刻</h2></div>
+          <div class="card-body">
+            <div class="now-big" id="nowTime">0.000s</div>
+            <div class="now-cats" id="nowCats"></div>
+            <p class="muted" id="nowHint">播放时这里会显示最近一次击打的判定与误差。</p>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <!-- 谱面难度（MSD） -->
+    <div class="tab-panel" id="panel-chart" hidden>
+      <article class="card glass">
+        <div class="card-head">
+          <h2>谱面难度（MSD）</h2>
+          <p class="muted">数据来自MinaCalc</p>
+        </div>
+        <div class="msd-top">
+          <div class="msd-cell msd-big">
+            <strong id="msdOverall">—</strong>
+            <span>综合 MSD</span>
+          </div>
+          <!-- 段位估算单元格：暂时隐藏（标尺本身还不够准），表格保留在下面的卡片里
+               恢复方式：把下面的 hidden 删掉即可。 -->
+          <div class="msd-cell msd-dan" hidden>
+            <strong id="msdDan">—</strong>
+            <span id="msdDanNote">参照 REFORM 段位标尺</span>
+          </div>
+          <div class="msd-cell msd-meta">
+            <span id="msdMeta">—</span>
+          </div>
+        </div>
+        <canvas id="chartRadar" height="380"></canvas>
+      </article>
+      <article class="card glass" id="msdScaleCard">
+        <div class="card-head">
+          <h2>段位标尺</h2>
+          <p class="muted">Reform段位MSD对照表，仅供参考</p>
+        </div>
+        <div class="msd-scale" id="msdScale"></div>
+      </article>
+    </div>
+
+    <!-- 细节 -->
+    <div class="tab-panel" id="panel-details" hidden>
+      <div class="grid-2">
+        <article class="card glass" id="columnsCard">
+          <div class="card-head"><h2>各列表现</h2></div>
+          <div class="card-body"><canvas id="chartColumns" class="chart" height="240"></canvas></div>
+        </article>
+        <article class="card glass" id="judgeCard">
+          <div class="card-head"><h2>判定分布</h2></div>
+          <div class="card-body"><div id="judgeBars" class="bars"></div></div>
+        </article>
+      </div>
+      <article class="card glass" id="rawCard">
+        <div class="card-head"><h2>原始统计</h2></div>
+        <div class="card-body"><table class="tbl" id="rawTable"></table></div>
+      </article>
+    </div>
+  </section>
+</main>
+
+<!-- 隐藏的 file input -->
+<input type="file" id="fileOsr" accept=".osr" hidden>
+<input type="file" id="fileOsu" accept=".osu" hidden>
+
+<!-- 拖拽遮罩 -->
+<div class="dropzone" id="dropzone" hidden>
+  <div class="dropzone-inner glass">
+    <svg viewBox="0 0 24 24" class="ico big"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+    <p>松手即开始分析</p>
+  </div>
+</div>
+
+<!-- 需要手动选谱面 -->
+<div class="modal" id="bmModal" hidden>
+  <div class="modal-card glass">
+    <h3>这个回放对应的谱面没在曲库里找到</h3>
+    <p class="muted" id="bmModalHint">回放里的谱面 MD5 是 —。</p>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="btnPickOsu">手动选择 .osu 文件</button>
+      <button class="btn btn-ghost" id="btnCloseModal">取消</button>
+    </div>
+    <div class="modal-search">
+      <input type="text" id="bmQuery" placeholder="或者按曲名搜索曲库…" class="text-input">
+      <ul class="bm-list" id="bmList"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- 帮助 -->
+<div class="modal" id="helpModal" hidden>
+  <div class="modal-card glass help-card">
+    <h3>怎么用</h3>
+    <ol class="help-steps">
+      <li>在 osu! 里打开成绩详情 → 导出回放，得到一个 <code>.osr</code>，拖到这里。</li>
+      <li>谱面会按回放里的 MD5 自动从曲库匹配；匹配不到会让你手动选 <code>.osu</code>。</li>
+      <li>「总览」看总体评价与失误成因；「时间轴」看波动；「失误清单」逐条看原因；「回放」边听边看。</li>
+    </ol>
+    <h4>失误是怎么分类的</h4>
+    <ul class="help-list">
+      <li><b>超出能力范围</b>：失误集中在高密度、高难度 pattern，且同类片段里反复吃亏。</li>
+      <li><b>节奏感弱</b>：误差方向稳定地偏（一直偏早/偏晚），换密度也照样偏。</li>
+      <li><b>分神</b>：失误成簇突发、伴随长停顿、难度不高、之后立刻恢复。</li>
+    </ul>
+    <p class="fineprint">判定窗口按 mania 的 OD 公式计算（MAX ±16ms，300/200/100/50 随 OD 收窄）。UR = 误差总体标准差 × 10。</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="btnSelfTest">测试后端连接</button>
+      <button class="btn btn-primary" id="btnCloseHelp">知道了</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<div class="loading" id="loading" hidden>
+  <div class="loading-card glass">
+    <div class="spinner"></div>
+    <p id="loadingText">正在解析回放…</p>
+    <button class="btn btn-ghost" id="loadingCancel" onclick="if(window.__cancelLoading){window.__cancelLoading();}else{var b=document.getElementById('loading');if(b)b.hidden=true;}">取消</button>
+  </div>
+</div>
+
+<!-- 上传被浏览器挡住时的兜底提示 -->
+<div class="modal" id="uploadBlocked" hidden>
+  <div class="modal-card glass">
+    <h3>浏览器没能把文件传给本地服务</h3>
+    <p class="muted" id="blockedHint">这台机器上 POST 请求似乎发不出去（GET 是正常的）。不用折腾浏览器，可以改用下面这条通道：</p>
+    <ol class="help-steps">
+      <li>点下面的「打开文件夹」，把 <code>.osr</code> 复制进去；</li>
+      <li>回到这里点「刷新列表」，列表里就会出现它；</li>
+      <li>点文件名即可分析（服务端直接从磁盘读，完全不经过浏览器）。</li>
+    </ol>
+    <code id="blockedPath">—</code>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="btnOpenFolder">打开文件夹</button>
+      <button class="btn btn-ghost" id="btnRetryUpload">重试上传</button>
+      <button class="btn btn-primary" id="btnRefreshLocal">刷新列表</button>
+    </div>
+  </div>
+</div>
+
+<footer class="foot">
+  <span id="footLeft">mania replay analysis · 本地运行</span>
+  <span id="footRight">© 2026 RJL0619 · MIT License</span>
+</footer>
+
+<script src="/static/js/charts.js?v=__ASSET_V__"></script>
+<script src="/static/js/player.js?v=__ASSET_V__"></script>
+<script src="/static/js/api.js?v=__ASSET_V__"></script>
+<script src="/static/js/ui.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.js?v=__ASSET_V__"></script>
+</body>
+</html>
