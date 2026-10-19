@@ -1,0 +1,48 @@
+# 运行产物
+app/_cache/
+_cache/
+_tools/
+*.log
+
+# 用户数据：报告、回放、谱面都不进仓库
+报告/*
+_replays/*
+!_replays/把回放放这里.txt
+*.osr
+*.osu
+*.osz
+*.osb
+*.osk
+*.ora
+
+# 本地配置与凭据
+.env
+.env.*
+*.env
+config.json
+*.local.json
+*.session
+*.token
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# 打包输出
+dist/
+build/
+*.spec
+
+# 内置运行时：体积大，可重新下载
+# 恢复方式：python.org 的 Windows embeddable package 解压到 python/，
+# 再把 msvcp140.dll / vcruntime140.dll / vcruntime140_1.dll 放进 python/。
+python/
+
+# 本地工具（含本机 git 路径，不进公开仓库）
+推送公开仓库.bat
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini
