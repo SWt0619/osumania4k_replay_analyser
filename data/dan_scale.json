@@ -1,0 +1,280 @@
+{
+ "source": "MinaCalc 0.72.1（vendor/minacalc/libminacalc.dll），score_goal=0.93，rate=1.0",
+ "measuredAt": "2026-10-19",
+ "anchors": [
+  {
+   "label": "INTRO-1",
+   "dan": -3,
+   "msd": 5.74,
+   "series": "REFORM"
+  },
+  {
+   "label": "INTRO-2",
+   "dan": -2,
+   "msd": 9.44,
+   "series": "REFORM"
+  },
+  {
+   "label": "INTRO-3",
+   "dan": -1,
+   "msd": 13.04,
+   "series": "REFORM"
+  },
+  {
+   "label": "1 段",
+   "dan": 1,
+   "msd": 15.53,
+   "series": "REFORM"
+  },
+  {
+   "label": "2 段",
+   "dan": 2,
+   "msd": 17.07,
+   "series": "REFORM"
+  },
+  {
+   "label": "3 段",
+   "dan": 3,
+   "msd": 17.23,
+   "series": "REFORM"
+  },
+  {
+   "label": "4 段",
+   "dan": 4,
+   "msd": 19.89,
+   "series": "REFORM"
+  },
+  {
+   "label": "5 段",
+   "dan": 5,
+   "msd": 21.39,
+   "series": "REFORM"
+  },
+  {
+   "label": "6 段",
+   "dan": 6,
+   "msd": 23.08,
+   "series": "REFORM"
+  },
+  {
+   "label": "7 段",
+   "dan": 7,
+   "msd": 23.68,
+   "series": "REFORM"
+  },
+  {
+   "label": "8 段",
+   "dan": 8,
+   "msd": 24.53,
+   "series": "REFORM"
+  },
+  {
+   "label": "9 段",
+   "dan": 9,
+   "msd": 26.04,
+   "series": "REFORM"
+  },
+  {
+   "label": "10 段",
+   "dan": 10,
+   "msd": 26.1,
+   "series": "REFORM"
+  },
+  {
+   "label": "Alpha",
+   "dan": 10.5,
+   "msd": 27.21,
+   "series": "EXTRA"
+  },
+  {
+   "label": "Beta",
+   "dan": 11.0,
+   "msd": 27.57,
+   "series": "EXTRA"
+  },
+  {
+   "label": "Gamma",
+   "dan": 11.5,
+   "msd": 30.35,
+   "series": "EXTRA"
+  },
+  {
+   "label": "Delta",
+   "dan": 12.0,
+   "msd": 32.29,
+   "series": "EXTRA"
+  },
+  {
+   "label": "Epsilon",
+   "dan": 12.5,
+   "msd": 34.9,
+   "series": "EXTRA"
+  }
+ ],
+ "raw": [
+  {
+   "series": "EXTRA-ALPHA",
+   "level": null,
+   "msd": 27.21
+  },
+  {
+   "series": "EXTRA-BETA",
+   "level": null,
+   "msd": 27.57
+  },
+  {
+   "series": "EXTRA-DELTA",
+   "level": null,
+   "msd": 32.29
+  },
+  {
+   "series": "EXTRA-EPSILON",
+   "level": null,
+   "msd": 34.9
+  },
+  {
+   "series": "EXTRA-GAMMA",
+   "level": null,
+   "msd": 30.35
+  },
+  {
+   "series": "INTRO",
+   "level": 1,
+   "msd": 5.74
+  },
+  {
+   "series": "INTRO",
+   "level": 2,
+   "msd": 9.44
+  },
+  {
+   "series": "INTRO",
+   "level": 3,
+   "msd": 13.04
+  },
+  {
+   "series": "Malody",
+   "level": 0,
+   "msd": 11.54
+  },
+  {
+   "series": "Malody",
+   "level": 1,
+   "msd": 15.34
+  },
+  {
+   "series": "Malody",
+   "level": 2,
+   "msd": 16.18
+  },
+  {
+   "series": "Malody",
+   "level": 3,
+   "msd": 18.8
+  },
+  {
+   "series": "Malody",
+   "level": 4,
+   "msd": 20.46
+  },
+  {
+   "series": "Malody",
+   "level": 5,
+   "msd": 21.97
+  },
+  {
+   "series": "Malody",
+   "level": 6,
+   "msd": 23.04
+  },
+  {
+   "series": "Malody",
+   "level": 7,
+   "msd": 23.86
+  },
+  {
+   "series": "Malody",
+   "level": 8,
+   "msd": 24.96
+  },
+  {
+   "series": "Malody",
+   "level": 9,
+   "msd": 25.87
+  },
+  {
+   "series": "Malody",
+   "level": 10,
+   "msd": 25.52
+  },
+  {
+   "series": "REFORM",
+   "level": 1,
+   "msd": 15.53
+  },
+  {
+   "series": "REFORM",
+   "level": 2,
+   "msd": 17.07
+  },
+  {
+   "series": "REFORM",
+   "level": 3,
+   "msd": 17.23
+  },
+  {
+   "series": "REFORM",
+   "level": 4,
+   "msd": 19.89
+  },
+  {
+   "series": "REFORM",
+   "level": 5,
+   "msd": 21.39
+  },
+  {
+   "series": "REFORM",
+   "level": 6,
+   "msd": 23.34
+  },
+  {
+   "series": "REFORM",
+   "level": 6,
+   "msd": 22.82
+  },
+  {
+   "series": "REFORM",
+   "level": 7,
+   "msd": 23.68
+  },
+  {
+   "series": "REFORM",
+   "level": 8,
+   "msd": 24.53
+  },
+  {
+   "series": "REFORM",
+   "level": 9,
+   "msd": 26.04
+  },
+  {
+   "series": "REFORM",
+   "level": 10,
+   "msd": 26.1
+  }
+ ],
+ "malody": {
+  "0": 11.54,
+  "1": 15.34,
+  "2": 16.18,
+  "3": 18.8,
+  "4": 20.46,
+  "5": 21.97,
+  "6": 23.04,
+  "7": 23.86,
+  "8": 24.96,
+  "9": 25.87,
+  "10": 25.52
+ },
+ "note": "REFORM 的 EXTRA-ALPHA 及以上是「超出 10 段」的层级；Malody Regular-N 与 REFORM 的 N 段并不等值（Malody 0 段≈11.5，REFORM 1 段≈15.5），只作旁证。"
+}
