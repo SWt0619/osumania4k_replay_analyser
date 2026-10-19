@@ -1,4 +1,4 @@
-# osumania_replay_analyser
+# osumania4k_replay_analyser
 
 纯本地 osu!mania 回放分析器。导入osr，可以获得较为详细的数据分析。回放和谱面不会被上传到任何地方。
 
