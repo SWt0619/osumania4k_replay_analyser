@@ -17,7 +17,7 @@ from .beatmap import JUDGEMENT_LABEL, Beatmap, long_path, parse_osu_file
 from .library import get_library
 from .match import V1_WEIGHTS, MatchResult, compare_with_header, match_replay, v1_weight
 from .metrics import histogram, median, percentile, stdev, unstable_rate
-from .osr import Replay, extract_events, mods_human, parse_osr
+from .osr import MOD_MR, Replay, extract_events, mods_human, parse_osr
 from ..version import __version__
 
 JUDGEMENT_CODE = {"perfect": 0, "great": 1, "good": 2, "ok": 3, "meh": 4, "miss": 5}
@@ -690,6 +690,34 @@ def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str]
     }
 
 
+def _pattern_breakdown(contexts) -> list[dict]:
+    """键型构成：大类占比 + 每个大类下的细分占比。
+
+    按音符计（不是按块），这样各大类加起来正好是 100%。
+    细分只保留前四项，够用且不会把卡片撑爆。
+    """
+    per: dict[str, dict[str, int]] = {}
+    for c in contexts:
+        cat = c.coarse or "x"
+        key = patterns.classify(c)
+        bucket = per.setdefault(cat, {})
+        bucket[key] = bucket.get(key, 0) + 1
+    total = sum(sum(m.values()) for m in per.values()) or 1
+    out = []
+    for cat, m in sorted(per.items(), key=lambda kv: -sum(kv[1].values())):
+        n = sum(m.values())
+        out.append({
+            "key": cat,
+            "label": patterns.CATEGORY_LABEL.get(cat, cat),
+            "share": round(n / total * 100, 1),
+            "items": [
+                {"key": k, "label": patterns.PATTERN_LABEL.get(k, k), "share": round(v / n * 100, 1)}
+                for k, v in sorted(m.items(), key=lambda kv: -kv[1])[:4]
+            ],
+        })
+    return out
+
+
 def _pattern_stats(match: MatchResult, ctx_by_index: dict[int, patterns.NoteContext]) -> list[dict]:
     """每种键型：有多少物件、失误率多少、相对全谱平均"吃亏几倍"。
 
@@ -787,6 +815,17 @@ def analyze(
 
     beatmap, source = _find_beatmap(replay, beatmap_path, songs_root)
     presses, releases = extract_events(replay.frames)
+
+    if replay.mods & MOD_MR:
+        # Mirror 把整个键位左右镜像：回放里记的是「玩家看到的」列号，
+        # 而谱面文件没变。不翻回来的话，第 i 列的音符会去配第 i 列的按键，
+        # 实际该配的是 keys-1-i 列——每一击都错位，准确率会掉到离谱（实测 99.5% 变 67%）。
+        # 只在按键侧翻转、谱面保持原样，这样分列统计仍是「谱面第几列」的口径。
+        flip = beatmap.keys - 1
+        for ev in presses:
+            ev.column = flip - ev.column
+        for ev in releases:
+            ev.column = flip - ev.column
     timings["parse"] = round((time.time() - _mark) * 1000, 1)
     _mark = time.time()
 
@@ -804,6 +843,10 @@ def analyze(
         raise AnalyzeError("谱面里没有可分析的物件，或者回放与谱面完全不匹配。")
 
     contexts = patterns.build_context(beatmap)
+    # 先分块定大方向（叠 / 乱 / 切 / tech），再让每个音符在所属大类内挑细分键型。
+    # 必须在 classify 之前做：attribution 会按音符取键型。
+    blocks = patterns.build_blocks(contexts, beatmap.keys, [o.is_hold for o in beatmap.objects])
+    patterns.assign_coarse(contexts, blocks)
     timings["context"] = round((time.time() - _mark) * 1000, 1)
     _mark = time.time()
     # 按 obj_index 建一次索引：后面逐条失误都要取上下文，用 next() 扫全表是 O(n²)
@@ -832,6 +875,7 @@ def analyze(
     beatmap_payload = _beatmap_summary(beatmap, source, _peak_nps(match.notes))
 
     timings["assemble"] = round((time.time() - _mark) * 1000, 1)
+    pattern_detail = _pattern_breakdown(contexts)
 
     payload = {
         "ok": True,
@@ -847,6 +891,27 @@ def analyze(
         "notes": _compact_notes(match, atts),
         "errors": _error_payload(atts, ctx_by_index),
         "patterns": _pattern_stats(match, ctx_by_index),
+        # 分段的粗分类（叠 / 乱 / 切 / tech）：键型判断先看整段再挑细分，
+        # 前端可以在时间轴上把这条带画出来，让人一眼看出这首歌由哪几段构成。
+        "blocks": [
+            {
+                "start": round(b.start_time),
+                "end": round(b.end_time),
+                "category": b.category,
+                "label": b.label,
+                "notes": b.notes,
+                "jack": b.jack_ratio,
+                "chord": b.chord_ratio,
+                "regular": b.regularity,
+            }
+            for b in blocks
+        ],
+        # 整首歌的键型构成（按块内的物件数加权），给界面上一眼看出"这是叠图还是切图"
+        "patternShare": [
+            {"key": x["key"], "label": x["label"], "share": x["share"]} for x in pattern_detail
+        ],
+        # 每个大类下的细分键型（纵连 / 小叠 / 多押叠 · 单双三四押切 …）
+        "patternDetail": pattern_detail,
         "comboBreaks": combo_breaks,
         "categories": cat_summary,
         "projection": _projection(match, atts, replay.score, replay.mod_names),

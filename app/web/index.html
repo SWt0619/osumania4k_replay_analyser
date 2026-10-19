@@ -353,18 +353,16 @@
       <article class="card glass">
         <div class="card-head">
           <h2>谱面难度（MSD）</h2>
-          <p class="muted">数据来自MinaCalc</p>
+          <p class="muted">MSD 来自 MinaCalc；段位由 Sunny 星级换算（RC / LN 各一张标尺）</p>
         </div>
         <div class="msd-top">
           <div class="msd-cell msd-big">
             <strong id="msdOverall">—</strong>
             <span>综合 MSD</span>
           </div>
-          <!-- 段位估算单元格：暂时隐藏（标尺本身还不够准），表格保留在下面的卡片里
-               恢复方式：把下面的 hidden 删掉即可。 -->
-          <div class="msd-cell msd-dan" hidden>
+          <div class="msd-cell msd-dan">
             <strong id="msdDan">—</strong>
-            <span id="msdDanNote">参照 REFORM 段位标尺</span>
+            <span id="msdDanNote">段位估计</span>
           </div>
           <div class="msd-cell msd-meta">
             <span id="msdMeta">—</span>
@@ -383,6 +381,16 @@
 
     <!-- 细节 -->
     <div class="tab-panel" id="panel-details" hidden>
+      <article class="card glass" id="patternCard">
+        <div class="card-head">
+          <h2>键型构成</h2>
+          <p class="muted">先按段落判断大方向（长条 / 过渡 / 叠 / 乱 / 切 / tech），再在段内细分；每段约 64 个物件</p>
+        </div>
+        <div class="card-body">
+          <div class="pattern-bar" id="patternBar"></div>
+          <ul class="pattern-legend" id="patternLegend"></ul>
+        </div>
+      </article>
       <div class="grid-2">
         <article class="card glass" id="columnsCard">
           <div class="card-head"><h2>各列表现</h2></div>
@@ -490,5 +498,8 @@
 <script src="/static/js/api.js?v=__ASSET_V__"></script>
 <script src="/static/js/ui.js?v=__ASSET_V__"></script>
 <script src="/static/js/main.js?v=__ASSET_V__"></script>
+<!-- 段位估算器：ES 模块，内部 import vendor/mma 下的 Sunny 实现。
+     放在最后且异步加载——它只影响难度页那一行文字，缺了也不影响其他功能。 -->
+<script type="module" src="/static/js/estimator.js?v=__ASSET_V__"></script>
 </body>
 </html>

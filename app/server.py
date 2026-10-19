@@ -273,6 +273,25 @@ class _AssetMixin:
         self._send(200, body, ctype)
 
     # ---- 媒体（Range） --------------------------------------------------
+    # 段位估算是前端算的（算法是 JS），它要的是谱面原文而不是我们解析后的 JSON；
+    # 所以单独开一个接口，按会话把 .osu 文本给过去。页面只在打开难度页时才请求。
+    def _beatmap_text(self, qs):
+        sid = (qs.get("session") or [""])[0]
+        sess = SESSIONS.get(sid)
+        if not sess:
+            return self._error("会话已过期，请重新分析", 404)
+        path = sess.get("beatmapPath") or ""
+        if not path or not os.path.isfile(path):
+            return self._error("找不到这张谱面的文件，无法估算段位", 404)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as e:
+            return self._error("读取谱面失败：%s" % e, 500)
+        if len(text) > 4 * 1024 * 1024:
+            return self._error("谱面文件异常大，已放弃估算", 413)
+        return self._json({"ok": True, "name": os.path.basename(path), "text": text})
+
     def _serve_media(self, rest: str):
         parts = rest.split("/", 1)
         if len(parts) != 2:
@@ -658,6 +677,8 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
                                    "assetV": self._asset_version(),
                                    # stale=进程比代码旧（改完 .py 没重启）：页面据此提示用户重启
                                    "stale": stale_code()})
+            if path == "/api/beatmap-text":
+                return self._beatmap_text(qs)
             if path == "/api/library":
                 return self._library_info()
             if path == "/api/local-replays":

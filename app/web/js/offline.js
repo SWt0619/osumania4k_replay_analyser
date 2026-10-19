@@ -19,6 +19,7 @@
   window.UI.renderCategories(data);
   window.UI.renderMeta(data);
   window.UI.renderSections(data);
+  window.UI.renderPatternShare(data);
   window.UI.renderJudgeBars(data);
   window.UI.renderRawTable(data);
 

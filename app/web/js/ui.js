@@ -181,8 +181,84 @@
       (pj.note || "");
   }
 
+  // 段位估算：MSD 那条链走 MinaCalc，段位这张卡片改用 Sunny 星级查表。
+  // 估算器在前端跑（ES 模块），失败就保留 MinaCalc 的兜底文案，不影响页面其他部分。
+  async function applySunnyDan(data) {
+    const cell = $("msdDan");
+    const note = $("msdDanNote");
+    if (!cell || !note || !window.Estimator || !data || !data.session) return;
+    const rate = Number((data.replay && data.replay.rate) || 1) || 1;
+    let res;
+    try {
+      res = await window.Estimator.estimate(data.session, rate);
+    } catch (e) {
+      return;
+    }
+    if (!res || !res.ok) return;
+    cell.textContent = res.label;
+    const speed = rate === 1 ? "原速" : (rate > 1 ? "DT " : "HT ") + rate.toFixed(2) + "×";
+    const parts = ["Sunny " + res.rcStar.toFixed(2)];
+    if (res.lnStar > 0) parts.push("LN " + res.lnStar.toFixed(2));
+    note.textContent = parts.join(" / ") + " · " + speed;
+    note.title =
+      "段位由 Sunny 星级查表得到：RC 用 RC 标尺，LN 用 LN 标尺，两者是同一根横轴上的两张表。\n" +
+      "本次按键占比 " + (res.lnRatio * 100).toFixed(1) + "%，倍率 " + speed + "（开 DT/HT 时按实际密度算）。\n" +
+      "左边的 MSD 来自 MinaCalc，只看谱面本身，不随倍率变化，所以两个数字的口径不同。";
+  }
+
+  // 键型构成：把块级粗分类按物件数汇总成一条堆叠条 + 图例。
+  // 四大类的颜色固定，和「分段」里的颜色一致，方便对上号。
+  const PATTERN_COLORS = { stack: "#f472b6", cut: "#7c5cff", spam: "#22d3ee", tech: "#fbbf24", ln: "#34d399", calm: "#94a3b8" };
+
+  function renderPatternShare(data) {
+    const bar = $("patternBar");
+    const legend = $("patternLegend");
+    if (!bar || !legend) return;
+    clearNode(bar);
+    clearNode(legend);
+    const items = (data && data.patternShare) || [];
+    if (!items.length) {
+      const card = $("patternCard");
+      if (card) card.hidden = true;
+      return;
+    }
+    const total = items.reduce((s, x) => s + Number(x.share || 0), 0) || 1;
+    const detail = new Map(((data && data.patternDetail) || []).map((x) => [x.key, x]));
+    items.forEach((it) => {
+      const color = PATTERN_COLORS[it.key] || "var(--accent)";
+      const seg = document.createElement("span");
+      seg.style.width = (Number(it.share || 0) / total) * 100 + "%";
+      seg.style.background = color;
+      seg.title = it.label + " " + it.share + "%";
+      bar.appendChild(seg);
+
+      const li = document.createElement("li");
+      const dot = document.createElement("i");
+      dot.style.background = color;
+      const name = document.createElement("b");
+      name.textContent = it.label;
+      li.appendChild(dot);
+      li.appendChild(name);
+      li.appendChild(document.createTextNode(" " + it.share + "%"));
+
+      // 大类下面再列细分键型（只取前两个，够看且不挤）
+      const d = detail.get(it.key);
+      if (d && d.items && d.items.length) {
+        const sub = document.createElement("em");
+        sub.className = "pattern-sub";
+        sub.textContent = d.items
+          .slice(0, 2)
+          .map((x) => x.label + " " + x.share + "%")
+          .join(" · ");
+        li.appendChild(sub);
+      }
+      legend.appendChild(li);
+    });
+  }
+
   // 谱面难度页：MSD 数字 + 段位换算 + 段位标尺
   function renderMsd(data) {
+    void applySunnyDan(data);
     const box = $("msdOverall");
     if (!box) return;
     const m = (data && data.msd) || {};
@@ -611,6 +687,7 @@
     renderLibrary,
     renderHero,
     renderMsd,
+    renderPatternShare,
     renderCategories,
     renderMeta,
     renderSections,

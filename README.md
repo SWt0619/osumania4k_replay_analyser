@@ -11,7 +11,7 @@
 - **失误归因**：每个失误给出四类原因之一（超出能力范围 / 节奏感弱 / 分神 / 随机失手），附打分依据和次要成因。
 - **键型分类**：包含om4k 14 类键型stream、jumpstream、handstream、jack、trill、anchor 等（目前开发测试时发现部分键形判定不准，后续还需优化算法）
 - **跟曲重放**：播放谱面原声并对齐下落式音符，支持 0.5×~1.5× 变速、只看失误、两路回放并排对比、点选失误物件直接看原因。
-- **难度与段位**：调用 Etterna 的 MinaCalc 算 MSD 难度分与七维雷达图，可以参考Reform段位的MSD大致判断谱面难度
+- **难度与段位**：MinaCalc 算 MSD 难度分与七维雷达图；段位改由 Sunny 星级查表得到，RC 与 LN 各有标尺，长条图会给出「RC 段位 || LN 段位」两条，开 DT / HT 时按实际倍率下的密度计算
 - **音频在线补齐**：只在 lazer 里下载过的谱面本地没有音频，程序会按谱面记的图集 id 去 [sayobot](https://www.sayobot.cn) 等镜像站取一次谱面包，只留下音频并缓存，下次直接复用
 - **总体评价**：等级、一句话结论、分段表现、左右手对比、最吃亏的键型、稳定上限，以及几条具体建议和「修掉最容易改的那几击能打到多少」。
 - **纯本地、免安装**：只监听 `127.0.0.1`，便携版自带 Python 运行时，不装任何东西，也不用担心网络。
@@ -21,7 +21,7 @@
 
 ### 使用便携版 zip（推荐）
 
-1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.1.0-win64.zip`。
+1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.2.0-win64.zip`。
 2. 解压到任意位置。
 3. 双击 `启动分析器.exe`。它会静默起服务，不弹任何窗口。
 4. 浏览器会打开 `http://127.0.0.1:8806/`。端口被占用时程序会自动往后找一个空的。
@@ -104,18 +104,21 @@
 
 ![谱面难度：MSD 雷达图与段位标尺](img/8.png)
 
-通过Minacalc计算谱面MSD（EtternaAA标准），可以作为难度参考
-下方有reform段位的MSD数值（4dan-ε）
+上半部分是两个数。左边是 MinaCalc 算的 MSD（Etterna AA 标准），只看谱面本身，不随倍率变化。右边是段位，用 Sunny 星级换算，4K 的常规键型（RC）与长条（LN）各有一张标尺。
+
+长条多的图会给两个段位，形如 `Reform 5 mid/high || LN 6 low`，左边按常规键型算，右边按长条算。开 DT / HT 时按这一局的实际密度计算，所以同一张图开 DT 打出来的段位会比原速高一截，因为玩家面对的就是那个难度。
+
+下方是 REFORM 段位与 MSD 的对照表，用来判断左边的 MSD 大概落在哪一档。
 
 ### 细节数据
 
 ![细节数据：每列失误与平均偏差](img/9.png)
 
-查看每列的失误数量，平均偏差
+查看谱面键型构成（算法可能还不太精准，如果谱面bpm是歌曲实际bpm的倍数，可能导致切/叠判定错乱），还可以查看每列的失误数量，平均偏差
 
 ## 注意事项
 
-1. **DT / HT**：回放帧时间和谱面时间在同一条时间轴上，所以误差值不用换算；UR 按官方口径除以倍率。但判定窗口在 mod 下要不要缩放，stable 和 lazer 的说法不一致，本工具按「不缩放」处理，所以 DT 回放的判定分布可能与游戏里略有出入。
+1. **DT / HT / Mirror**：回放帧时间和谱面时间在同一条时间轴上，所以误差值不用换算；UR 按官方口径除以倍率。但判定窗口在 mod 下要不要缩放，stable 和 lazer 的说法不一致，本工具按「不缩放」处理，所以 DT 回放的判定分布可能与游戏里略有出入。开了 Mirror 的回放会先把按键的左右键位翻回来再配对（回放里记的是镜像后的坐标系），分列统计仍然按谱面原本的列号。
 2. **常规图数据较准确，但面图很可能会出现计算误差**：整条只出一个判定。头部按普通音符判档，尾部取「按下之后该列第一次松手」，再按官方合并误差口径降档；提前松手到掉出窗口、或松得太晚，整条算 MISS。v1 用的是另一套合成方式，口径略有差别。此外长条只会按照头部判定键形
 3. **启发式归因**：四类的边界在真实数据里会重叠（尤其「能力 + 节奏」双重），所以每条结论都带可信度，可信度低时请当成「两种都有可能」。
 4. **谱面版本对不上**（比如谱面后来被更新过）时 MD5 会查不到，程序会在「本次数据」里如实标注。
@@ -142,13 +145,15 @@ app/
     attribution.py     失误归因（打分 + 理由 + 次要成因）
     report.py          总体评价文案与预估值
     msd.py             MSD 难度（调用 vendor 里的 MinaCalc）
-    dan.py             「大概几段」的对照表
+    dan.py             MSD → 段位的对照表（段位主路径由前端估算，这里作兜底与标尺）
     library.py         曲库索引（按 MD5 找谱面、找音频）
     osu_dirs.py        曲库/导出/文件库的默认路径
     skin.py            读 osu! 皮肤素材（长条贴图等）
     analyze.py         串起来，输出一份 JSON
     audio_fetch.py     本地没有音频时去镜像站补（只留音频，其余丢弃）
-  web/                 前端（原生 JS，零依赖、零构建）
+  web/                 前端（原生 JS，零构建）
+    js/estimator.js    段位估算的封装：前端跑 Sunny，再查 RC / LN 两张标尺
+    vendor/mma/        第三方算法与段位表（MIT，原样复制，说明见该目录 README）
   _cache/              曲库索引缓存、端口号、server.log
 python/                内置的 Python 3.13 运行时（Windows x64，免安装）
 packaging/             构建脚本（exe / zip / 启动器）
@@ -160,8 +165,13 @@ _replays/              备用通道：把回放放这里，页面里点文件名
 ```
 
 
+## 更新记录
+
+每个版本改了什么见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 参考内容
 
 - [ppy/osu](https://github.com/ppy/osu)：判定窗口口径、测试回放与 ScoreV1 计分公式的依据。
 - [Etterna](https://github.com/etternagame/etterna)：使用其 MinaCalc 计算 MSD 难度。
 - [sayobot](https://www.sayobot.cn)：谱面镜像站。本地没有音频时，程序从这里下载谱面包并只保留音频（见「注意事项」第 6 条）。备用镜像：[nerinyan](https://nerinyan.moe)、[catboy](https://catboy.best)。
+- [osumania_map_analyser](https://github.com/LeoBlackMT/osumania_map_analyser)：段位估算所用的 Sunny 星级实现与 RC / LN 段位标尺，原样放在 `app\web\vendor\mma\` 下（未做改动，说明见该目录的 README）。

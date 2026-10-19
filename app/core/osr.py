@@ -130,6 +130,9 @@ MOD_FL = 1 << 10
 MOD_SO = 1 << 12
 MOD_AP = 1 << 13
 MOD_PF = 1 << 14
+# Mirror：mania 下会把整个键位镜像（第 0 列和第 keys-1 列互换）。
+# 回放里记的按键是镜像后的坐标系，谱面文件本身没变，配对前必须翻回来。
+MOD_MR = 1 << 30
 
 MOD_KEY_BITS = {
     1 << 15: "1K",
@@ -158,6 +161,7 @@ MOD_NAMES = {
     MOD_SO: "SO",
     MOD_AP: "AP",
     MOD_PF: "PF",
+    MOD_MR: "MR",
 }
 
 MOD_DESC = {

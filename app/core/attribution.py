@@ -69,6 +69,8 @@ class ErrorFeature:
     difficulty: float = 0.0
     difficulty_pct: float = 0.0
     pattern: str = "散音"
+    # 所属大类的名字（叠 / 乱 / 切 / tech / 长条 / 过渡），给"同类片段"这类说法用
+    category: str = ""
     subdivision: float = 99.0
 
     errors_near_1_5s: int = 0
@@ -159,7 +161,9 @@ def _build_jack_chains(
         if j >= 0:
             ctx = by_obj.get(n.obj_index)
             gap = n.note_time - notes[j].note_time
-            if patterns.is_jack_gap(gap, ctx.beat_length if ctx else 0.0):
+            if patterns.is_jack_gap(gap, ctx.row_gap if ctx else 0.0,
+                                   ctx.beat_length if ctx else 0.0,
+                                   ctx.chord_size if ctx else 1):
                 prev_same_col[i] = j
         last_in_col[n.column] = i
 
@@ -342,6 +346,7 @@ def _fill_context_feature(f: ErrorFeature, ctx: _FeatureContext) -> None:
     f.difficulty = ctx.weight_by_index.get(c.index, patterns.difficulty_weight(c))
     f.difficulty_pct = ctx.pct(f.difficulty, ctx.weight_sorted)
     f.pattern = patterns.pattern_label(c)
+    f.category = patterns.CATEGORY_LABEL.get(c.coarse, "") or f.pattern
     f.subdivision = c.subdivision
 
 
@@ -544,7 +549,7 @@ def _ability_pattern_terms(f: ErrorFeature, profile: dict, reasons: list[str]) -
         s += 0.16 * rel
         if f.sig_rel >= 2.0 and f.sig_err_rate >= 0.12:
             reasons.append("同类片段（%s）失误率 %.0f%%，是全局平均的 %.1f 倍" % (
-                f.pattern, f.sig_err_rate * 100, f.sig_rel))
+                f.category or f.pattern, f.sig_err_rate * 100, f.sig_rel))
 
     # 5) pattern 本身的要求
     if f.ctx is not None:

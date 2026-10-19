@@ -676,10 +676,21 @@ canvas { display: block; }
 .msd-cell strong { font-size: 26px; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .msd-cell span { font-size: 11.5px; color: var(--dim); }
 .msd-big strong { color: var(--accent); }
-.msd-dan strong { color: var(--accent-2); }
+/* 段位这一格要放 "Reform 5 mid/high || LN 6 low" 这种双段位，字号得比 MSD 小一号 */
+.msd-dan { max-width: 340px; }
+.msd-dan strong { color: var(--accent-2); font-size: 17px; line-height: 1.4; }
 .msd-meta { flex: 1; justify-content: center; min-width: 200px; }
 .msd-meta span { font-size: 12px; line-height: 1.7; color: var(--dim); }
 #chartRadar { width: 100%; height: 380px; display: block; }
+
+/* 键型构成：一条堆叠条 + 图例，颜色与四大类对应 */
+.pattern-bar { display: flex; height: 16px; border-radius: 8px; overflow: hidden; background: var(--raise); }
+.pattern-bar > span { display: block; height: 100%; }
+.pattern-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0 0; padding: 0; list-style: none; }
+.pattern-legend li { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--dim); flex-wrap: wrap; }
+.pattern-sub { flex-basis: 100%; font-style: normal; font-size: 11.5px; color: var(--faint); padding-left: 15px; }
+.pattern-legend i { width: 9px; height: 9px; border-radius: 3px; }
+.pattern-legend b { color: var(--text); font-weight: 600; }
 
 .msd-scale { display: grid; gap: 4px; margin-top: 6px; }
 .msd-scale-row {
