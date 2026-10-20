@@ -912,3 +912,26 @@ canvas { display: block; }
   border: 1px solid var(--stroke-2); color: var(--accent-2); text-decoration: none;
 }
 .s-dl:hover { background: var(--accent-soft); }
+
+
+/* ---------------------------------------------------------------- 关于页 */
+/* 「关于」不是看数据的页，是查信息/找更新的页：用 rail-sep 和上面几页隔开 */
+.rail-btn-about { opacity: .92; }
+
+.about-kv { margin: 0; display: flex; flex-direction: column; gap: 14px; }
+.about-kv > div { display: flex; gap: 14px; align-items: baseline; }
+.about-kv dt { flex: 0 0 68px; color: var(--dim); font-size: 12.5px; }
+.about-kv dd { margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.about-kv a, .about-links a { color: var(--accent-2); text-decoration: none; word-break: break-all; }
+.about-kv a:hover, .about-links a:hover { text-decoration: underline; }
+.about-kv em, .about-kv .muted { font-style: normal; font-size: 12px; color: var(--dim); line-height: 1.55; }
+.about-kv code, .about-links code, .about-card code { font-size: 11.5px; }
+
+.about-links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.about-links li { display: flex; flex-direction: column; gap: 3px; }
+.about-links span { color: var(--dim); font-size: 12.5px; line-height: 1.55; }
+
+@media (max-width: 620px) {
+  .about-kv > div { flex-direction: column; gap: 2px; }
+  .about-kv dt { flex: none; }
+}

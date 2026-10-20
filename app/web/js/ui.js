@@ -757,6 +757,17 @@
     }, bad ? 4200 : 2400);
   }
 
+  // ---------------------------------------------------------------- 关于
+  // 版本号只有一个来源：在线页是 /api/health，离线报告是 REPORT_DATA.version。
+  // 拿不到就保持 "—"，不猜。
+  function renderAbout(version) {
+    const box = $("aboutVersion");
+    if (!box) return;
+    const text = String(version || "").trim();
+    if (!text) return;
+    box.textContent = /^\d/.test(text) ? "v" + text : text;
+  }
+
   function loading(on, text) {
     const box = $("loading");
     if (text) $("loadingText").textContent = text;
@@ -783,6 +794,7 @@
     renderCategories,
     renderMeta,
     renderSimilar,
+    renderAbout,
     renderSections,
     renderJudgeBars,
     renderRawTable,

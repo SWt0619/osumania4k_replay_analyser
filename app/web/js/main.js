@@ -88,17 +88,38 @@
   // 各留一套实现迟早会只改好其中一边。
   const readTheme = window.UI.readTheme;
 
+  // ---------------------------------------------------------------- 心跳 / 关页即退服务
+  // 这是个从浏览器打开的本地工具：页面关掉了，后台那个 python 进程就没必要留着。
+  // 页面每隔 10 秒报一次到，关闭时用 sendBeacon 发一个 bye，服务端据此自动退出。
+  // 两个细节：
+  //   * 后台标签页的定时器会被浏览器降到约 1 分钟一次，所以服务端的超时给到 75 秒；
+  //   * 刷新会先发 bye 再重新加载，新页面几毫秒内就报到，不会被误杀。
+  var CLIENT_ID = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+  function heartbeat() {
+    try {
+      fetch("/api/alive?c=" + CLIENT_ID, { cache: "no-store", keepalive: true })
+        .catch(function () { /* 服务没起也不影响页面 */ });
+    } catch (e) { /* 忽略 */ }
+  }
+  heartbeat();
+  setInterval(heartbeat, 10000);
+  window.addEventListener("pagehide", function () {
+    try { navigator.sendBeacon("/api/bye?c=" + CLIENT_ID); } catch (e) { /* 忽略 */ }
+  });
+
   // ---------------------------------------------------------------- 标签页
   function switchTab(name) {
     state.tab = name;
     document.querySelectorAll(".rail-btn").forEach((b) => {
       b.classList.toggle("is-active", b.dataset.tab === name);
     });
-    ["overview", "timeline", "errors", "replay", "chart", "details"].forEach((t) => {
+    ["overview", "timeline", "errors", "replay", "chart", "details", "about"].forEach((t) => {
       const p = $("panel-" + t);
       if (p) p.hidden = t !== name;
     });
-    $("emptyState").hidden = !!state.data;
+    // 「关于」不依赖分析结果：没导入回放时也要能看，所以它开着就别显示空状态
+    $("emptyState").hidden = !!state.data || name === "about";
     // 切到某页时补一次重绘（隐藏时 canvas 尺寸是 0）
     if (state.data) {
       requestAnimationFrame(() => {
@@ -1052,6 +1073,7 @@
     window.UI.renderTrack(data);
     window.UI.renderHero(data);
     window.UI.renderMsd(data);
+    window.UI.renderAbout(data.version);
     window.UI.renderSimilar(null);   // 段位还没算出来，这张卡片先不显示
     void loadSimilar(data);          // 异步：算段位 → 要推荐 → 再画
     window.UI.renderCategories(data);
@@ -1847,6 +1869,7 @@
       const health = await window.API.health(4000);
       await checkFrontendVersion(health);
       warnIfStaleCode(health);
+      window.UI.renderAbout(health && health.version);
     } catch (e) { /* 后端没起就不折腾 */ }
 
     refreshLocalReplays();

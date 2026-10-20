@@ -20,21 +20,22 @@ from .metrics import quantile_edges
 # 键型：机器可读 key → 中文名。
 # 顺序即分类优先级（叠 > 交互 > 切换类 > 单次多押 > 锚 > 散音），见 classify()。
 PATTERN_LABEL = {
-    "chordjack": "多押叠",      # chordjack
-    "longjack": "纵连",         # longjack / jack
-    "minijack": "小叠",         # minijack
-    "jumptrill": "对拍",        # jumptrill
-    "trill": "交互",            # trill
-    "quadstream": "四押切",     # quadstream
-    "handstream": "三押切",     # handstream
-    "jumpstream": "双押切",     # jumpstream
-    "stream": "单押切",         # (single) stream
-    "quad": "四押",             # quad
-    "hand": "三押",             # hand / triple
-    "jump": "双押",             # jump / double
-    "anchor": "锚",             # anchor
-    "single": "散音",           # 不算任何特殊键型的单点
-    "longnote": "长条",         # 长条为主的段落，不套用 RC 的四大类
+    "chordjack": "Chordjack",
+    "longjack": "Longjack",
+    "minijack": "Minijack",
+    "jumptrill": "Jumptrill",
+    "trill": "Trill",
+    "quadstream": "Quadstream",     # 仅 5 键以上；4K 里四押就是四键全按
+    "handstream": "Handstream",
+    "jumpstream": "Jumpstream",
+    "stream": "Stream",
+    "spamstream": "Speedstream",    # Speed 段里的等间隔连打（不是 Stream）
+    "quad": "Quad",
+    "hand": "Hand",
+    "jump": "Jump",
+    "anchor": "Anchor",
+    "single": "Single",
+    "longnote": "LN",               # 长条为主的段落，不套用 RC 的四大类
 }
 
 # 判断"这一段里掺了多大的押"的阈值（占窗口内物件的比例）。
@@ -43,6 +44,26 @@ PATTERN_LABEL = {
 _QUAD_SHARE = 0.06
 _HAND_SHARE = 0.30
 _JUMP_SHARE = 0.30
+# 块里四押物件的占比超过它就按"叠"处理（见 _block_category 里的实测分布）。
+QUAD_STACK_SHARE = 0.15
+# 「乱」与「切」的分界：切是按 1/16 音组织的写法；乱是等效 1/24、1/32 音的高速单键。
+# subdivision 是"与上一行的间隔 / 每拍毫秒"，所以 1/16 音 = 0.25、1/24 音 = 0.167、1/32 音 = 0.125。
+# 取 0.20 当分界（比 1/16 明显更密才算乱），并要求这类物件在块里过半。
+FAST_SUBDIVISION = 0.20
+FAST_SHARE_MIN = 0.50
+
+# 「技术」= 复杂节奏、节奏在快速变化（例如 12 分、16 分、24 分掺着来）。
+# 判断这件事不能只数"混了几种细分"（那是静态构成），要看间隔序列**有没有在变**：
+# 用短周期重复率——把行间隔序列和它往前挪 2/3/4/6 行的自己做比较，落在同一档的比例越高，
+# 说明节奏越"有型"（一整段同一种细分，或者固定图样在循环），越低说明节奏一直在换。
+# 实测（整段）：均匀 1/32 墙 1.00、纯 16 分 1.00、Speed 段 0.88 / 0.67、
+# Technical 段 0.61 / 0.55；全库块级分位 p50 0.73、p25 0.58。
+# 门槛取两类样本的正中 0.64：乱的样本（0.67）仍留在乱，技术的样本（0.61、0.55）进技术。
+RHYTHM_PERIODS = (2, 3, 4, 6)
+RHYTHM_REPEAT_TECH = 0.64
+# 判定"同一档"的容差：绝对 6ms（短间隔时的量化误差）或相对 10%，取大的那个。
+RHYTHM_TOL_MS = 6.0
+RHYTHM_TOL_RATIO = 0.10
 
 
 @dataclass
@@ -78,6 +99,12 @@ class NoteContext:
     # 用来把切换类分成 单押切 / 双押切 / 三押切 / 四押切 —— 只看自己那一瞬间的
     # chord_size 是不够的：双押切里的单键那一刻也是单键。
     chord_mix: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # 这张谱有几个键。4K 与 7K 对"四押"的含义完全不同：4K 里四押就是四键全按，
+    # 不存在 quadstream 那种"四押连打"的说法，所以细分键型要看这个。
+    keys: int = 4
+    # 本行有几个列在上一行也出现过（占本行比例）。叠段的本质就是"同一组手指被反复按下"，
+    # 这个比例比"同列间隔是否 ≤1/16 拍"更贴近实际——1/4 间隔的 chordjack 也能认出来。
+    row_overlap: float = 0.0
 
 
 def _beat_marks(beatmap: Beatmap) -> tuple[list[float], list[float]]:
@@ -159,6 +186,7 @@ class _Grid:
     ut_index: dict[float, int]
     col_times: list[list[float]]
     row_gaps: dict[float, float]
+    row_cols: dict[float, set]
     marks: tuple[list[float], list[float]]
 
     def beat_length(self, t: float) -> float:
@@ -189,12 +217,16 @@ def _build_grid(beatmap: Beatmap) -> _Grid:
         gaps = [uniq_times[j + 1] - uniq_times[j] for j in range(lo, max(lo, hi - 1))]
         row_gaps[t] = _median(gaps) if gaps else 9999.0
 
+    row_cols: dict[float, set] = {}
+    for o in objs:
+        row_cols.setdefault(o.time, set()).add(o.column)
+
     return _Grid(times=times, cols=[o.column for o in objs], uniq_times=uniq_times,
                  ut_index=ut_index, col_times=col_times, row_gaps=row_gaps,
-                 marks=_beat_marks(beatmap))
+                 row_cols=row_cols, marks=_beat_marks(beatmap))
 
 
-def _context_of(i: int, obj, grid: _Grid) -> NoteContext:
+def _context_of(i: int, obj, grid: _Grid, keys: int = 4) -> NoteContext:
     """量第 i 个物件：密度、拍长、细分、连打/交互/锚点/叠。"""
     t = obj.time
     times = grid.times
@@ -220,6 +252,13 @@ def _context_of(i: int, obj, grid: _Grid) -> NoteContext:
     subdivision = interval_prev / bl if bl > 0 else 9999.0
 
     rg = grid.row_gaps[t]
+    # 本行与上一行的列重合度：叠段（chordjack）的核心特征
+    overlap = 0.0
+    if uti > 0 and chord_size >= 2:
+        cur = grid.row_cols.get(t) or set()
+        prev = grid.row_cols.get(grid.uniq_times[uti - 1]) or set()
+        if cur:
+            overlap = len(cur & prev) / len(cur)
     # 锚点：本列在邻域里占了足够大的份额（≥40%）、且确实被反复用（≥3 次）。
     # 以前只看"同列 ±200ms 出现 3 次"，密集段里随手一个单键就满足，于是锚成了垃圾桶。
     dominant = (
@@ -245,6 +284,8 @@ def _context_of(i: int, obj, grid: _Grid) -> NoteContext:
         is_jack=is_jack_gap(same_prev, rg, bl, chord_size),
         row_gap=rg,
         column_dominant=dominant,
+        keys=keys,
+        row_overlap=overlap,
     )
 
 
@@ -255,7 +296,7 @@ def build_context(beatmap: Beatmap) -> list[NoteContext]:
         return []
 
     grid = _build_grid(beatmap)
-    out = [_context_of(i, o, grid) for i, o in enumerate(objs)]
+    out = [_context_of(i, o, grid, beatmap.keys) for i, o in enumerate(objs)]
 
     _mark_chord_mix(out, grid.times)
     _mark_jack_runs(out, grid.times, max(1, beatmap.keys))
@@ -338,13 +379,18 @@ BLOCK_OVERLAP = 16
 
 # 四类粗分类的中文名。键型细分在各自大类内部进行（见 classify）。
 # 另加一个"长条"大类：面（LN）图的难点在长条本身，套用 RC 的四大类只会给出误导性的结论。
+# 键型一律用英文术语：中文的「切 / 叠 / 乱」在不同人群里指的东西不一样
+# （比如"乱"有人当成 vibro、有人当成 LN），英文术语没有歧义。
+#   cut   → Stream   （以 1/16 音组织的连打，含 jumpstream / handstream）
+#   stack → Jack     （同一组手指被反复按下，含 minijack / chordjack）
+#   spam  → Speed    （等效 1/24、1/32 音的高速单键）
 CATEGORY_LABEL = {
-    "ln": "长条",
-    "calm": "过渡",
-    "stack": "叠",
-    "spam": "乱",
-    "cut": "切",
-    "tech": "tech",
+    "ln": "LN",
+    "calm": "Calm",
+    "stack": "Jack",
+    "spam": "Speed",
+    "cut": "Stream",
+    "tech": "Tech",
 }
 
 
@@ -368,6 +414,13 @@ class Block:
     snap_entropy: float
     nps: float = 0.0
     same_group: float = 0.0
+    # 四押（4K：四键全按）物件在本块里占的比例。四押在连续段落里必然形成叠的配置。
+    quad_share: float = 0.0
+    # 比 1/16 音更密（≤ FAST_SUBDIVISION）的物件占比：用来区分「乱」（speed）与「切」。
+    fast_share: float = 0.0
+    # 节奏的短周期重复率（0..1）。1 = 间隔序列在按 2/3/4/6 行循环（节奏可预测），
+    # 越小说明节奏一直在变——那是「技术」的核心特征，不是「乱」（乱只是快而已）。
+    rhythm_repeat: float = 1.0
     category: str = ""
 
     @property
@@ -376,9 +429,15 @@ class Block:
 
 
 def _snap_bucket(subdivision: float) -> str:
-    """把细分值归到最近的常见档位，用于衡量「节奏型混了几种」。"""
-    for name, v in (("1/4", 1.0), ("1/3", 0.667), ("1/8", 0.5), ("1/6", 0.333),
-                    ("1/16", 0.25), ("1/12", 0.167)):
+    """把细分值归到最近的常见档位，用于衡量「节奏型混了几种」。
+
+    档名口径：`1/N 音` 指一小节（4/4）里有 N 个，也就是间隔 = 4/N 拍。
+    所以 0.25 拍是 1/16 音、0.125 拍是 1/32 音；三连音那几档按同一个口径算，
+    0.667 拍是 1/6 音、0.333 拍是 1/12 音、0.167 拍是 **1/24** 音
+    （早先这三档写成了 1/3、1/6、1/12，正好差一半，和玩家说的「24 分音」对不上）。
+    """
+    for name, v in (("1/4", 1.0), ("1/6", 0.667), ("1/8", 0.5), ("1/12", 0.333),
+                    ("1/16", 0.25), ("1/24", 0.167), ("1/32", 0.125)):
         if abs(subdivision - v) <= v * 0.18:
             return name
     return "other"
@@ -413,6 +472,33 @@ def _same_group_ratio(seg: list[NoteContext]) -> float:
     return hit / total if total else 0.0
 
 
+def _rhythm_repeat(seg: list[NoteContext]) -> float:
+    """节奏的短周期重复率（0..1）：间隔序列有多"可预测"。
+
+    做法：把行间隔序列和它往前挪 k 行（k = 2/3/4/6）的自己逐项对比，落在同一档（±10% 或
+    ±6ms）的比例取最大。1 = 每隔几行就重复同一种间隔——均匀连打、固定图样循环都算；
+    越小说明间隔一直在换档，也就是「节奏在变」。
+
+    为什么要这个：只数"混了几种细分"是静态构成，分不出「16 分夹 8 分」这种规整的跳押
+    和「12 分、16 分、24 分掺着来」的技术段——前者的间隔序列是 55/55/110 循环，
+    后者根本找不到短周期。技术段的定义落在这上面，判据才和玩家的感受对得上。
+    """
+    times = sorted({c.time for c in seg})
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    if len(gaps) < 6:
+        return 1.0
+    best = 0.0
+    for k in RHYTHM_PERIODS:
+        hit = total = 0
+        for i in range(k, len(gaps)):
+            total += 1
+            if abs(gaps[i] - gaps[i - k]) <= max(RHYTHM_TOL_MS, RHYTHM_TOL_RATIO * gaps[i]):
+                hit += 1
+        if total:
+            best = max(best, hit / total)
+    return best
+
+
 def _regularity(seg: list[NoteContext]) -> float:
     """节奏规则度：相邻时间点的间隔集中在某一档的比例。
 
@@ -445,7 +531,8 @@ def _calm_share(seg: list[NoteContext]) -> float:
 
 
 def _block_category(hold_ratio: float, calm_share: float, snap_ent: float, jack: float,
-                    same_group: float, regularity: float, chord: float) -> str:
+                    same_group: float, regularity: float, chord: float,
+                    quad: float = 0.0, fast: float = 0.0, repeat: float = 1.0) -> str:
     """块的粗分类。顺序即优先级。
 
     长条最优先——面图的难点不在 RC 键型上；其次是低密度且无明确键型的过渡段。
@@ -454,11 +541,29 @@ def _block_category(hold_ratio: float, calm_share: float, snap_ent: float, jack:
         return "ln"
     if calm_share >= 0.40:
         return "calm"
+    # 四押（4K 里就是四键全按）在连续段落里必然形成叠的配置：一行四押之后，
+    # 下一行不管怎么写都会复用其中的列，同一组手指被反复按下。实测"切"块的四押占比
+    # 90 分位只有 0.03，而真正的四押段在 0.3~0.6，所以门槛取 0.15。
+    # 这一条排在乱/技术之前：四押段几乎必然伴随节奏起伏，但它的难点是"叠"，
+    # 不是节奏——不先拦下来，和弦满地的叠图会被"节奏在变"抢走（实测 Envy - Observation）。
+    if quad >= QUAD_STACK_SHARE and chord >= 0.50:
+        return "stack"
+    # 「乱」= 高速单键：等效 1/24、1/32 音一级（比 1/16 更密）。切是按 1/16 音组织的写法，
+    # 所以先按密度分流，别把 speed 图一路塞进切 / tech。
+    # 和弦太多的不算乱（那是叠），门槛见 chord < 0.55：speed 图里夹的双押三押不影响。
+    # 还要求节奏本身不起伏（repeat 高）：同样是高速，间隔一直在换档的是「技术」，不是「乱」。
+    if fast >= FAST_SHARE_MIN and chord < 0.55 and repeat > RHYTHM_REPEAT_TECH:
+        return "spam"
+    # 「技术」的主判据是节奏在变——不是"快"，也不是"混了几种细分"。
+    # 12 分、16 分、24 分掺着来的段落，行间隔序列找不到短周期，repeat 会明显偏低。
+    # 同列连按很明显的块仍然算叠（叠图里也常有节奏变化，主因是手指连按）。
+    if repeat <= RHYTHM_REPEAT_TECH and jack < 0.12:
+        return "tech"
     # 节奏型本身就杂（几种细分混着来）：排在叠之前——
-    # 但同列连按很明显的块仍然算叠（叠图里也常有节奏变化，主因是手指连按）。
+    # 但同列连按很明显的块仍然算叠。
     if snap_ent >= TECH_ENTROPY and jack < 0.12:
         return "tech"
-    # 叠有两条路：16 分层的同列连按（jack），或者同一组和弦连续重复（same_group）。
+    # 叠还有两条路：16 分层的同列连按（jack），或者同一组和弦连续重复（same_group）。
     # 后者专治 1/8 层的夹叠图——那种图同列间隔够不到 16 分，但和弦在反复。
     # jack 的门槛取 0.12：更低的块里同列回按只是零星巧合，够不上"这一段的写法是叠"；
     # 块级同组重复的分布与门槛见 SAME_GROUP_MIN 上方的实测值。
@@ -471,7 +576,8 @@ def _block_category(hold_ratio: float, calm_share: float, snap_ent: float, jack:
     return "spam"
 
 
-def _make_block(seg: list[NoteContext], start: int, keys: int, holds: list[bool] | None = None) -> Block:
+def _make_block(seg: list[NoteContext], start: int, keys: int, holds: list[bool] | None = None,
+                wide: list[NoteContext] | None = None) -> Block:
     n = len(seg)
     jack = sum(1 for c in seg if c.is_jack) / n
     chord = sum(1 for c in seg if c.chord_size >= 2) / n
@@ -486,8 +592,11 @@ def _make_block(seg: list[NoteContext], start: int, keys: int, holds: list[bool]
 
     nps = sum(c.density_1s for c in seg) / n
     hold_ratio = (sum(1 for h in holds[start : start + n] if h) / n) if holds else 0.0
+    quad = sum(1 for c in seg if c.chord_size >= keys) / n
+    fast = sum(1 for c in seg if c.subdivision <= FAST_SUBDIVISION) / n
+    repeat = _rhythm_repeat(wide if wide else seg)
     category = _block_category(hold_ratio, _calm_share(seg), snap_ent,
-                               jack, same_group, regularity, chord)
+                               jack, same_group, regularity, chord, quad, fast, repeat)
 
     return Block(
         start_index=start,
@@ -501,6 +610,9 @@ def _make_block(seg: list[NoteContext], start: int, keys: int, holds: list[bool]
         snap_entropy=round(snap_ent, 3),
         nps=round(nps, 1),
         same_group=round(same_group, 3),
+        quad_share=round(quad, 3),
+        fast_share=round(fast, 3),
+        rhythm_repeat=round(repeat, 3),
         category=category,
     )
 
@@ -527,7 +639,11 @@ def build_blocks(contexts: list[NoteContext], keys: int = 4, holds: list[bool] |
         if end >= n:
             break
         i += step
-    return [_make_block(contexts[a:b], a, keys, holds) for a, b in bounds]
+    return [_make_block(contexts[a:b], a, keys, holds,
+                        # 节奏变化要看得比一个块更长：64 个物件只有 3 秒左右，
+                        # 短窗口里"换档"很容易被巧合带偏。前后各放宽半个块。
+                        contexts[max(0, a - BLOCK_NOTES // 2):min(n, b + BLOCK_NOTES // 2)])
+            for a, b in bounds]
 
 
 def assign_coarse(contexts: list[NoteContext], blocks: list[Block]) -> None:
@@ -604,11 +720,16 @@ def _mark_jack_runs(contexts: list[NoteContext], times: list[float], keys: int) 
 
 
 def _stream_family(ctx: NoteContext) -> str:
-    """按周围的多押构成，把切分为 单押切 / 双押切 / 三押切 / 四押切。"""
+    """按周围的多押构成，把切分为 单押切 / 双押切 / 三押切 / 四押切。
+
+    4K 里没有 quadstream：四个键全按就是"四押"，它出现的地方按 handstream 归；
+    真正成段的四押在块级别已经判成"叠"了（见 QUAD_STACK_SHARE）。
+    quadstream 只留给 5 键以上的谱面。
+    """
     j2, j3, j4 = ctx.chord_mix
-    if j4 >= _QUAD_SHARE:
+    if ctx.keys >= 5 and j4 >= _QUAD_SHARE:
         return "quadstream"
-    if j3 >= _HAND_SHARE:
+    if j3 >= _HAND_SHARE or j4 >= _QUAD_SHARE:
         return "handstream"
     if j2 >= _JUMP_SHARE:
         return "jumpstream"
@@ -641,7 +762,7 @@ def _classify_stack(ctx: NoteContext) -> str:
     chord = ctx.chord_size
     # 只要这一击属于「和弦在反复」或「同列紧邻回按」，就算多押叠。
     # 否则玩家会看到一段明明是叠的谱，细分里写着"双押/四押"，那是单次多押的说法。
-    if chord >= 2 and (ctx.is_jack or ctx.repeat_chord):
+    if chord >= 2 and (ctx.is_jack or ctx.repeat_chord or ctx.row_overlap >= 0.5):
         return "chordjack"
     if ctx.is_jack:
         return "longjack" if ctx.jack_run_len >= 3 else "minijack"
@@ -666,7 +787,8 @@ def _classify_spam(ctx: NoteContext) -> str:
     if ctx.is_trill and ctx.chord_size == 1:
         return "trill"
     if ctx.is_stream:
-        return "stream"
+        # 这里是"乱"块里的连打，不能再叫"单押切"——块的大类是乱，细分写切会自相矛盾
+        return "spamstream"
     return _by_chord(ctx.chord_size)
 
 

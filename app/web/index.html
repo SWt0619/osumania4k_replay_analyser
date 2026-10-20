@@ -82,6 +82,10 @@
     <button class="rail-btn" data-tab="details" title="细节数据">
       <svg viewBox="0 0 24 24" class="ico"><path d="M5 6h14M5 12h14M5 18h9" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>
     </button>
+    <span class="rail-sep"></span>
+    <button class="rail-btn rail-btn-about" data-tab="about" title="关于 / 项目地址">
+      <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M12 10.6v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="7.9" r="1.15" fill="currentColor"/></svg>
+    </button>
   </nav>
 
   <!-- 右：内容 -->
@@ -402,7 +406,7 @@
       <article class="card glass" id="patternCard">
         <div class="card-head">
           <h2>键型构成</h2>
-          <p class="muted">先按段落判断大方向（长条 / 过渡 / 叠 / 乱 / 切 / tech），再在段内细分；每段约 64 个物件</p>
+          <p class="muted">先按段落判断大方向（LN / Calm / Jack / Speed / Stream / Tech），再在段内细分；每段约 64 个物件</p>
         </div>
         <div class="card-body">
           <div class="pattern-bar" id="patternBar"></div>
@@ -422,6 +426,81 @@
       <article class="card glass" id="rawCard">
         <div class="card-head"><h2>原始统计</h2></div>
         <div class="card-body"><table class="tbl" id="rawTable"></table></div>
+      </article>
+    </div>
+
+    <!-- 关于：版本、项目地址、参考来源。
+         这一页不依赖分析结果，没导入回放时也能看（见 switchTab 对 emptyState 的处理）。 -->
+    <div class="tab-panel" id="panel-about" hidden>
+      <article class="card glass">
+        <div class="card-head">
+          <h2>关于</h2>
+          <p class="muted">osu!mania 回放分析器 · 纯本地运行，回放与谱面不上传</p>
+        </div>
+        <div class="card-body">
+          <dl class="about-kv">
+            <div>
+              <dt>版本</dt>
+              <dd id="aboutVersion">—</dd>
+            </div>
+            <div>
+              <dt>项目地址</dt>
+              <dd>
+                <a href="https://github.com/SWt0619/osumania4k_replay_analyser" target="_blank" rel="noreferrer noopener">github.com/SWt0619/osumania4k_replay_analyser</a>
+                <em>源码、更新记录、问题反馈都在这里</em>
+              </dd>
+            </div>
+            <div>
+              <dt>下载更新</dt>
+              <dd>
+                <a href="https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest" target="_blank" rel="noreferrer noopener">Releases · 最新版本</a>
+                <em>下载 <code>osumania_replay_analyser-x.y.z-win64.zip</code>，解压覆盖即可；<code>_cache</code>、<code>_replays</code>、<code>报告</code> 不受影响，可以留着</em>
+              </dd>
+            </div>
+            <div>
+              <dt>许可</dt>
+              <dd>MIT<span class="muted">作者 RJL0619</span></dd>
+            </div>
+          </dl>
+        </div>
+      </article>
+
+      <article class="card glass">
+        <div class="card-head">
+          <h2>参考内容</h2>
+          <p class="muted">判定口径、难度与段位都建立在这些项目/服务上</p>
+        </div>
+        <div class="card-body">
+          <ul class="about-links">
+            <li>
+              <a href="https://github.com/ppy/osu" target="_blank" rel="noreferrer noopener">ppy/osu</a>
+              <span>判定窗口口径、测试回放与 ScoreV1 计分公式的依据</span>
+            </li>
+            <li>
+              <a href="https://github.com/etternagame/etterna" target="_blank" rel="noreferrer noopener">Etterna</a>
+              <span>MinaCalc：MSD 难度分与七维雷达图</span>
+            </li>
+            <li>
+              <a href="https://www.sayobot.cn" target="_blank" rel="noreferrer noopener">sayobot</a>
+              <span>谱面镜像站。本地没有音频时从这里补一份，取不到再试 nerinyan、catboy；只在缺音频且开关打开时联网</span>
+            </li>
+            <li>
+              <a href="https://github.com/LeoBlackMT/osumania_map_analyser" target="_blank" rel="noreferrer noopener">osumania_map_analyser</a>
+              <span>段位估算用的 Sunny 星级实现与 RC / LN 段位标尺（原样放在 <code>app\web\vendor\mma</code>）</span>
+            </li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="card glass">
+        <div class="card-head"><h2>隐私</h2></div>
+        <div class="card-body">
+          <p class="muted">
+            回放、谱面与统计结果都只在本机处理，不会上传到任何服务器；服务只监听 <code>127.0.0.1</code>。
+            唯一的联网行为是「本地缺音频时去谱面镜像站补一份」，可以在 <code>app\_cache\config.json</code> 里用
+            <code>{"autoFetchAudio": false}</code> 关掉。
+          </p>
+        </div>
       </article>
     </div>
   </section>

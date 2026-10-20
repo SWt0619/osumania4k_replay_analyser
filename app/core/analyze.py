@@ -536,7 +536,33 @@ def _beatmap_summary(beatmap: Beatmap, source: str, peak_nps: float) -> dict:
         "firstObject": round(beatmap.first_time),
         "lastObject": round(beatmap.last_time),
         "md5": beatmap.md5,
+        # 谱面自己的 ID：推荐时要靠它把"这张图自己"排掉。
+        # 不能只比曲名——.osu 里 Title 与 TitleUnicode 常常是两个名字
+        # （例如 Title=Mach space journey / TitleUnicode=音速宇宙旅行），
+        # 而镜像站的索引里只有前者，光比名字会漏掉自己。
+        "beatmapId": _meta_int(beatmap, "BeatmapID") or None,
+        "beatmapSetId": _meta_int(beatmap, "BeatmapSetID") or None,
+        # 另一种写法：上面的 title/artist 取的是 Unicode 那版（给页面显示用），
+        # 而镜像站的索引里记的往往是 Title / Artist 那版，只带显示名就对不上。
+        "titleAlt": _alt_name(beatmap.meta, "Title", "TitleUnicode", beatmap.title),
+        "artistAlt": _alt_name(beatmap.meta, "Artist", "ArtistUnicode", beatmap.artist),
     }
+
+
+def _meta_int(beatmap: Beatmap, key: str) -> int:
+    try:
+        return int(str(beatmap.meta.get(key, "") or 0).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _alt_name(meta: dict, plain_key: str, unicode_key: str, shown: str) -> str:
+    """曲名/作者的另一种写法（与页面显示的那个不同）。没有别的写法时返回空串。"""
+    for key in (plain_key, unicode_key):
+        name = str(meta.get(key, "") or "").strip()
+        if name and name != shown:
+            return name
+    return ""
 
 
 # ScoreV1（mania）的官方计分表。来源：osu! wiki「osu!mania scoring system」。

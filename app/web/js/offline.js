@@ -19,6 +19,7 @@
   window.UI.renderTrack(data);
   window.UI.renderHero(data);
   window.UI.renderMsd(data);
+  window.UI.renderAbout(data.version);
   // 相似谱面这张卡片在离线报告里不出来：推荐按 Sunny 段位排序，而段位要前端
   // 估算器算、要问后端索引（单文件报告既没有估算器也没有服务），
   // 只靠 MINACalc 的 REFORM 段位去凑会给出另一套口径的结果，宁可不显示。
@@ -125,7 +126,7 @@
   });
 
   // ---- 页签 ----
-  const PANELS = ["overview", "timeline", "errors", "replay", "chart", "details"];
+  const PANELS = ["overview", "timeline", "errors", "replay", "chart", "details", "about"];
   function switchTab(name) {
     document.querySelectorAll(".rail-btn").forEach((b) => b.classList.toggle("is-active", b.dataset.tab === name));
     PANELS.forEach((t) => {

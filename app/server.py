@@ -212,6 +212,59 @@ def _field(req: dict, key: str) -> str:
     value = req.get(key)
     return value.strip() if isinstance(value, str) else ""
 
+class Watchdog:
+    """「页面关了就退服务」的实现。
+
+    之所以要做：这是个从浏览器打开的本地工具，用户关掉标签页之后进程还挂着，
+    下次再启动就是第二个实例，还得手动去结束进程——体验很差。
+
+    判据是页面定期发心跳：
+      * 页面每 10 秒 GET /api/alive?c=<每次打开页面生成的随机 id>；
+      * 关闭/刷新时用 sendBeacon 发 /api/bye?c=<id>。
+
+    两个时间参数都是按浏览器的实际行为定的：
+      * BEAT_TTL 75 秒 —— 后台标签页会把定时器降到约 1 分钟一次，留够余量，
+        否则用户一切到别的窗口服务就自己死了；
+      * BYE_GRACE 8 秒 —— 刷新会先 bye 再重新加载，新页面几乎立刻报到，
+        这个窗口既够它报到，又让"真的关掉"在 8 秒内收尾。
+    """
+
+    BEAT_TTL = 75.0
+    BYE_GRACE = 8.0
+
+    def __init__(self) -> None:
+        self._clients: dict[str, float] = {}   # id -> 到期时刻
+        self._lock = threading.Lock()
+        self.armed = False                     # 至少有过一次心跳才启用，避免"没人打开过"就退出
+
+    def beat(self, cid: str) -> None:
+        if not cid:
+            return
+        with self._lock:
+            self.armed = True
+            self._clients[cid] = time.time() + self.BEAT_TTL
+
+    def bye(self, cid: str) -> None:
+        if not cid:
+            return
+        with self._lock:
+            now = time.time()
+            deadline = now + self.BYE_GRACE
+            old = self._clients.get(cid)
+            self._clients[cid] = deadline if old is None else min(old, deadline)
+
+    def any_alive(self) -> bool:
+        now = time.time()
+        with self._lock:
+            for cid, exp in list(self._clients.items()):
+                if exp <= now:
+                    self._clients.pop(cid, None)
+            return bool(self._clients)
+
+
+WATCHDOG = Watchdog()
+
+
 class SessionStore:
     """分析结果与媒体路径的进程内缓存（session_id → 会话）。
 
@@ -1014,6 +1067,23 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 self.end_headers()
                 self.close_connection = True
                 return
+            if path == "/api/alive":
+                WATCHDOG.beat((qs.get("c") or [""])[0][:64])
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                return
+            if path == "/api/bye":
+                WATCHDOG.bye((qs.get("c") or [""])[0][:64])
+                log("[watchdog] 页面关闭，%d 秒后若无新页面就退出" % WATCHDOG.BYE_GRACE)
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.close_connection = True
+                return
             if path == "/api/health":
                 return self._json({"ok": True, "version": __version__, "time": time.time(),
                                    "assetV": self._asset_version(),
@@ -1255,6 +1325,8 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8806)
     ap.add_argument("--no-open", action="store_true")
     ap.add_argument("--songs", default="", help="手动指定 osu! Songs 目录")
+    ap.add_argument("--keep-alive", action="store_true",
+                    help="页面关掉后也不退出服务（调试用）")
     ap.add_argument("--allow-multi", action="store_true",
                     help="即使已经有实例在跑也照常启动（调试用，正常使用不需要）")
     args = ap.parse_args()
@@ -1327,6 +1399,19 @@ def main() -> int:
                 log("[startup] 曲库预热失败：%r" % (e,))
 
     threading.Thread(target=warm, daemon=True).start()
+
+    # 页面关掉就退出：每 5 秒看一次有没有活着的页面
+    if not args.keep_alive:
+        def watch():
+            while True:
+                time.sleep(5.0)
+                if WATCHDOG.armed and not WATCHDOG.any_alive():
+                    log("[watchdog] 没有任何页面在线，服务退出")
+                    print("[mania-replay-lab] 页面已关闭，服务退出。", flush=True)
+                    httpd.shutdown()
+                    return
+
+        threading.Thread(target=watch, daemon=True).start()
 
     if not args.no_open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

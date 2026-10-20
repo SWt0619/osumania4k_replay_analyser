@@ -22,7 +22,7 @@
 
 ### 使用便携版 zip（推荐）
 
-1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.3.0-win64.zip`。
+1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.3.1-win64.zip`。
 2. 解压到任意位置。
 3. 双击 `启动分析器.exe`。它会静默起服务，不弹任何窗口。
 4. 浏览器会打开 `http://127.0.0.1:8806/`。端口被占用时程序会自动往后找一个空的。
@@ -116,7 +116,8 @@
 7. **找不到曲库时**：点右上角的曲库标签，可以手动指定目录。稳定版填到**有 `osu!.exe` 的那一级**（不是里面的 Songs），lazer 填到**同时有 `Songs` 和 `files` 的那一级**，填错会当场提示是哪一栏不对；保存后立即重新扫描，不用重启。
 8. **本程序只支持OSU!Mania 4K 谱面**：试图导入其他键数/其他模式的谱面都会被拒绝
 9. **同一时间只会跑一个实例**：再点一次 `启动分析器.exe`（或再执行一次 `python app\server.py`），如果已经有一个在跑，程序会直接打开它的页面然后退出，不会再起第二个。要停就在第二个进程所在的目录里点 `停止分析器.exe`。
-10. **真出问题时先看 `crashreport\`**：页面提示「服务器内部错误」时，程序目录旁的 `crashreport\` 下会有一份 `crash-日期-时间-pid-指纹.txt`，里面是版本、系统、请求、完整堆栈和 `server.log` 的最后 60 行。提 issue 时把它一起发过来即可（同一处堆栈只会写一份，最多保留 50 份；回放坏掉、不是 4K 这类正常提示不会写进去）。
+10. **关掉网页，服务会自己退出**：页面每 10 秒报一次到，关标签页后 8 秒左右进程就结束，不用再手动清理（切到别的窗口不会误退，超时留了 75 秒）。调试时加 `--keep-alive` 可以让它常驻。
+11. **真出问题时先看 `crashreport\`**：页面提示「服务器内部错误」时，程序目录旁的 `crashreport\` 下会有一份 `crash-日期-时间-pid-指纹.txt`，里面是版本、系统、请求、完整堆栈和 `server.log` 的最后 60 行。提 issue 时把它一起发过来即可（同一处堆栈只会写一份，最多保留 50 份；回放坏掉、不是 4K 这类正常提示不会写进去）。
 
 ## 性能与排错
 
@@ -174,4 +175,4 @@ _replays/              备用通道：把回放放这里，页面里点文件名
 - [ppy/osu](https://github.com/ppy/osu)：判定窗口口径、测试回放与 ScoreV1 计分公式的依据。
 - [Etterna](https://github.com/etternagame/etterna)：使用其 MinaCalc 计算 MSD 难度。
 - [sayobot](https://www.sayobot.cn)：谱面镜像站。本地没有音频时，程序从这里下载谱面包并只保留音频（见「注意事项」第 6 条）。备用镜像：[nerinyan](https://nerinyan.moe)、[catboy](https://catboy.best)。
-- [osumania_map_analyser](https://github.com/LeoBlackMT/osumania_map_analyser)：段位估算所用的 Sunny 星级实现与 RC / LN 段位标尺，原样放在 `app\web\vendor\mma\` 下（未做改动，说明见该目录的 README）。
+- [osumania_map_analyser](https://github.com/LeoBlackMT/osumania_map_analyser)：使用该项目整合的段位估算所用的 Sunny 星级实现与 RC / LN 段位标尺，原样放在 `app\web\vendor\mma\` 下（未做改动，说明见该目录的 README）。

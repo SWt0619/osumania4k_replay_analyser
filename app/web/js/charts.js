@@ -1320,14 +1320,15 @@
   // 七个键型维度画成正多边形。为什么用雷达而不是柱状：
   // "这张图难在耐力还是难在叠键"是一个**形状**问题，雷达一眼能看出偏科方向。
   var RADAR_KEYS = ["stream", "jumpstream", "handstream", "chordjack", "jackspeed", "stamina", "technical"];
+  // 键型术语统一用英文：中文的「切 / 叠 / 乱」在不同人群里指的不是一回事
   var RADAR_LABELS = {
-    stream: "单押切",
-    jumpstream: "双押切",
-    handstream: "三押切",
-    chordjack: "多押叠",
-    jackspeed: "叠键速度",
-    stamina: "耐力",
-    technical: "技巧",
+    stream: "Stream",
+    jumpstream: "Jumpstream",
+    handstream: "Handstream",
+    chordjack: "Chordjack",
+    jackspeed: "JackSpeed",
+    stamina: "Stamina",
+    technical: "Technical",
   };
 
   function drawRadar(canvas, skillsets, opts) {
