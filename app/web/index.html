@@ -271,9 +271,13 @@
           </div>
         </div>
         <div class="card-body">
+          <div class="error-summary" id="errorSummary"></div>
           <div class="error-empty" id="errorEmpty" hidden>没有符合筛选条件的失误。</div>
           <ul class="error-list" id="errorList"></ul>
-          <button class="btn btn-ghost more-btn" id="btnMoreErrors" hidden>再看 50 条</button>
+          <div class="error-more" id="errorMore" hidden>
+            <button class="btn btn-ghost" id="btnMoreErrors">再看 100 条</button>
+            <button class="btn btn-ghost" id="btnAllErrors">全部展开</button>
+          </div>
         </div>
       </article>
     </div>
@@ -433,6 +437,33 @@
     <div class="modal-search">
       <input type="text" id="bmQuery" placeholder="或者按曲名搜索曲库…" class="text-input">
       <ul class="bm-list" id="bmList"></ul>
+    </div>
+  </div>
+</div>
+
+<!-- 手动指定 osu! 目录：自动探测找不到曲库时的最后兜底 -->
+<div class="modal" id="pathModal" hidden>
+  <div class="modal-card glass">
+    <h3>指定 osu! 目录</h3>
+    <p class="muted">默认会自动找曲库；找不到时在这里手动指定，填完保存会重新扫一遍。</p>
+
+    <label class="dir-field">
+      <span>稳定版（osu!stable）</span>
+      <input type="text" id="pathStable" class="text-input" placeholder="例如 D:\OsuStable" autocomplete="off">
+      <em>选到<b>有 osu!.exe 的那一级</b>，不是里面的 Songs。</em>
+    </label>
+
+    <label class="dir-field">
+      <span>lazer（osu!lazer）</span>
+      <input type="text" id="pathLazer" class="text-input" placeholder="例如 C:\Users\你\AppData\Roaming\osu" autocomplete="off">
+      <em>选到<b>同时有 Songs 和 files 的那一级</b>。没装 lazer 就留空。</em>
+    </label>
+
+    <p class="dir-status" id="pathStatus"></p>
+
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="btnSavePaths">保存并重新扫描</button>
+      <button class="btn btn-ghost" id="btnClosePathModal">取消</button>
     </div>
   </div>
 </div>

@@ -445,3 +445,13 @@ def get_library(root: str | None = None, force: bool = False) -> Library:
         if roots:
             _LIB.build(roots[0], cache_path=_CACHE_PATH)
     return _LIB
+
+
+def reset_library() -> None:
+    """丢掉进程内索引，下次 get_library 会按新的根重建。
+
+    玩家在网页上改了游戏目录后必须调用：否则单例还指着旧目录，
+    新设的路径看起来"不生效"。
+    """
+    global _LIB
+    _LIB = Library()

@@ -4,6 +4,10 @@
 
   const { $, el, fmtTime, fmtSigned, CATS } = window.UI;
 
+  // 失误清单每页条数、按多少毫秒分一段（1000+ 条的谱面靠分段标题找位置）
+  const ERROR_PAGE = 100;
+  const ERROR_BUCKET_MS = 30000;
+
   const state = {
     data: null,
     replayBase64: null,
@@ -958,20 +962,49 @@
 
   function renderErrorList() {
     const all = filteredErrors();
+    const total = (state.data && state.data.errors ? state.data.errors.length : 0);
     const shown = all.slice(0, state.errorShown);
+
+    // 每 30 秒一段的条数：上千条时靠时间标题分段，比无脑往下滚好找得多
+    const bucketCounts = {};
+    all.forEach((e) => {
+      const b = Math.floor(e.t / ERROR_BUCKET_MS);
+      bucketCounts[b] = (bucketCounts[b] || 0) + 1;
+    });
+
     window.UI.renderErrors(shown, {
-      onSeek: (t) => {
-        // 点一条失误 = "带我去看这一刻"，所以顺手切到回放页
+      bucketCounts,
+      onSeek: (t, err) => {
+        // 点一条失误 = "带我去看这一刻"：切到回放页，**停在音符落下前 0.2 秒**。
+        // 不自动播放——直接开播会一下冲过这一击，用户得反复往回快进才看得清。
+        // 顺带把这条选中，右侧「此刻」卡片会显示它的错因。
         switchTab("replay");
+        if (state.playing) pause();
         requestAnimationFrame(() => {
           resizePlayer();
-          seekTo(t, true);
+          seekTo(Math.max(0, t - 200), false);
+          if (err) selectError({ note: { t: err.t, c: err.column } });
         });
       },
     });
+
+    // 三个数字都从同一份筛选结果实时算：筛选/展开后立刻刷新，
+    // 不再依赖"上一次渲染留下的档位数"。
+    const sum = $("errorSummary");
+    if (sum) {
+      const parts = ["共 " + total + " 条"];
+      if (all.length !== total) parts.push("筛选后 " + all.length + " 条");
+      parts.push("已显示 " + shown.length + " 条");
+      sum.textContent = parts.join(" · ");
+    }
+
+    const remain = Math.max(0, all.length - shown.length);
+    const moreBox = $("errorMore");
     const more = $("btnMoreErrors");
-    more.hidden = all.length <= state.errorShown;
-    more.textContent = "再看 50 条（还有 " + Math.max(0, all.length - state.errorShown) + " 条）";
+    const allBtn = $("btnAllErrors");
+    if (moreBox) moreBox.hidden = remain <= 0;
+    if (more) more.textContent = "再看 " + Math.min(ERROR_PAGE, remain) + " 条（剩 " + remain + " 条）";
+    if (allBtn) allBtn.hidden = remain <= ERROR_PAGE;
   }
 
   // ---------------------------------------------------------------- 主渲染
@@ -1011,8 +1044,9 @@
     $("histMeta").textContent = "中位 " + fmtSigned(sm.medianDelta, 1) + "ms · UR " + Number(sm.ur).toFixed(0);
     $("timelineMeta").textContent = "共 " + data.beatmap.notes + " 个物件 · " + data.summary.flaws + " 次有瑕疵";
 
-    state.errorShown = 50;
+    state.errorShown = ERROR_PAGE;
     renderErrorList();
+    applyReplaySpeed(data.replay);
     setupAudio(data);
     // 先把「总览」切出来：隐藏状态的 canvas 宽度是 0，画出来会是空白
     switchTab("overview");
@@ -1025,8 +1059,29 @@
     window.UI.toast("分析完成：" + data.beatmap.title + " [" + data.beatmap.difficulty + "]");
   }
 
-  function setupAudio(data) {
-    const note = $("audioNote");
+  // 回放倍率（DT 1.5× / HT 0.75×）要直接当播放速度用。
+  // 否则 DT 的回放会用原速播一遍：音符间距看着比当时宽，像是在说"这张图没那么难"。
+  // 仍然保留速度下拉框，玩家想按原速看细节可以自己改回去。
+  function applyReplaySpeed(replay) {
+    const rate = Number(replay && replay.rate) || 1;
+    state.speed = rate;
+    const sel = $("speed");
+    if (sel) {
+      // 自定义倍率（比如 1.33×）不在选项里就补一条，否则下拉框会跳回 1×
+      if (!Array.from(sel.options).some((o) => Math.abs(Number(o.value) - rate) < 1e-6)) {
+        const opt = document.createElement("option");
+        opt.value = String(rate);
+        opt.textContent = rate + "×";
+        sel.appendChild(opt);
+      }
+      sel.value = String(rate);
+    }
+    if (state.audio) {
+      try { state.audio.playbackRate = rate; } catch (e) { /* 元数据还没就绪，忽略 */ }
+    }
+  }
+
+  function setupAudio(data) {    const note = $("audioNote");
     if (state.audio) {
       state.audio.pause();
       state.audio = null;
@@ -1352,6 +1407,64 @@
     if (m) m.hidden = true;
   }
 
+  // ------------------------------------------------------ 手动指定游戏目录
+  // 自动探测兜不住的情况（装在哪都不知道、目录被改得面目全非）留一个出口：
+  // 点左上角的曲库标签，在这里填两次路径，保存后立刻重建索引。
+  async function openPathModal() {
+    const modal = $("pathModal");
+    if (!modal) return;
+    const status = $("pathStatus");
+    status.className = "dir-status";
+    status.textContent = "读取当前设置…";
+    modal.hidden = false;
+    try {
+      const info = await window.API.paths();
+      $("pathStable").value = info.stableDir || "";
+      $("pathLazer").value = info.lazerDir || "";
+      const ex = info.examples || {};
+      if (ex.stable) $("pathStable").placeholder = "例如 " + ex.stable;
+      if (ex.lazer) $("pathLazer").placeholder = "例如 " + ex.lazer;
+      status.textContent = info.count
+        ? "当前曲库：" + info.songsRoot + "（" + info.count + " 张谱面）"
+        : "当前还没找到曲库。填完下面的路径点保存试试。";
+    } catch (e) {
+      status.textContent = "读取当前设置失败：" + (e.message || e);
+    }
+    $("pathStable").focus();
+  }
+
+  async function savePaths() {
+    const btn = $("btnSavePaths");
+    const status = $("pathStatus");
+    const old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "扫描中…";
+    status.className = "dir-status";
+    status.textContent = "正在按新路径扫描曲库，谱面多的话要几秒…";
+    try {
+      const r = await window.API.savePaths({
+        stableDir: $("pathStable").value.trim(),
+        lazerDir: $("pathLazer").value.trim(),
+      });
+      status.className = "dir-status " + (r.count ? "good" : "bad");
+      status.textContent = r.count
+        ? "完成：找到 " + r.count + " 张谱面（" + r.songsRoot + "）"
+        : r.hint || "按这个路径没找到谱面，确认目录选对了吗？";
+      // 顺手把左上角的曲库标签刷新
+      try {
+        window.UI.renderLibrary(await window.API.library());
+      } catch (e) {
+        /* 刷新标签失败不影响保存结果 */
+      }
+    } catch (e) {
+      status.className = "dir-status bad";
+      status.textContent = e.message || "保存失败";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  }
+
   // ---------------------------------------------------------------- 事件绑定
   // 安全绑定：某个元素在旧版 HTML 里不存在时，不能因此让后面的绑定全部失效
   function on(id, ev, fn) {
@@ -1426,6 +1539,10 @@
     $("btnCloseHelp").addEventListener("click", () => closeModal("helpModal"));
     $("btnCloseModal").addEventListener("click", () => closeModal("bmModal"));
     $("btnPickOsu").addEventListener("click", () => $("fileOsu").click());
+    // 曲库标签点一下就能手动指定游戏目录（自动找不到时的兜底）
+    $("libChip").addEventListener("click", openPathModal);
+    $("btnClosePathModal").addEventListener("click", () => closeModal("pathModal"));
+    $("btnSavePaths").addEventListener("click", savePaths);
     document.querySelectorAll(".modal").forEach((m) => {
       m.addEventListener("click", (e) => {
         if (e.target === m) m.hidden = true;
@@ -1555,14 +1672,21 @@
             b.classList.toggle("is-on", b === btn);
           });
         }
-        state.errorShown = 50;   // 换筛选条件后回到第一页，不然会停在"第 300 条"
+        state.errorShown = ERROR_PAGE;   // 换筛选条件后回到第一页，不然会停在"第 300 条"
         renderErrorList();
       });
     });
     $("btnMoreErrors").addEventListener("click", () => {
-      state.errorShown += 50;
+      state.errorShown += ERROR_PAGE;
       renderErrorList();
     });
+    const allBtn = $("btnAllErrors");
+    if (allBtn) {
+      allBtn.addEventListener("click", () => {
+        state.errorShown = filteredErrors().length;
+        renderErrorList();
+      });
+    }
   }
 
   // 页签、窗口尺寸、键盘快捷键

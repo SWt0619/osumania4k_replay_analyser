@@ -625,8 +625,23 @@ def _score_ability(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
         s += 0.08 * structural
         reasons.append("前后 4 秒内错了 %d 个，是一整段跟不上" % (f.errors_near_4s + 1))
 
+    # 7b) 1.5 秒内连着错、而且中间手没停过：这一段整体跟不上。
+    #     成串不是"断片"的形状——手一直在动却一直在错，是密度/速度越过了上限。
+    #     （如果错之前手停过，那是分神/被打断，归分神类。）
+    if f.errors_near_1_5s >= 2 and not (f.gap_before_ratio >= 2.5 and f.gap_before >= 900):
+        s += 0.30
+        reasons.append("1.5 秒内连着错了 %d 个（中间手没停），是这一段整体跟不上" % (f.errors_near_1_5s + 1))
+
     if f.recent_abs_median > 16:
         s += 0.06 * clamp((f.recent_abs_median - 16) / 30.0, 0.0, 1.0)
+
+    # 7c) 耐力不足：整首的后 1/3 失误率明显爬升（并不是"这里难"，见 _stamina_profile）。
+    #     只在**确实落到后段**的失误上给分，而且这一条本身四道闸门都过了才会出现在 profile 里，
+    #     所以权重不必给太高——它解释的是"为什么这时候会错"，不是"这一击有多难"。
+    st = profile.get("stamina") or {}
+    if st.get("drop") and f.note.note_time >= st.get("lateFrom", float("inf")):
+        s += 0.18
+        reasons.append(st.get("reason") or "歌曲后段的失误明显增多，是耐力问题")
 
     s += _ability_collapse_terms(f, reasons)
     return clamp(s, 0.0, 1.0), reasons
@@ -693,14 +708,15 @@ def _score_distraction(f: ErrorFeature, profile: dict) -> tuple[float, list[str]
     这几条在**任何人**的失误上都成立（高准确率的局里尤其明显，因为剩下的失误本来就
     稀疏）。所以先判有没有签名，再谈打分：
 
-      * 突发：1.5 秒内连着错（不是孤立的一下）
       * 停顿：出错前手停了明显久于该处的正常间隔
       * 断片：这一击突然偏很远，紧接着又恢复正常
     三者全无时，分数整体打折（0.45），避免"什么都像分神"。
+
+    注意「成串出错」不在签名之列：手一直在动却连着错，是跟不上这一段（能力），
+    不是注意力断了。签名只剩「停过手」和「偏一下又回正」两种。
     """
     reasons: list[str] = []
     s = 0.0
-    easy = 1.0 - clamp(f.difficulty_pct, 0.0, 1.0)
 
     burst_n = f.errors_near_1_5s
     paused = f.gap_before_ratio >= 2.5 and f.gap_before >= 900
@@ -708,18 +724,17 @@ def _score_distraction(f: ErrorFeature, profile: dict) -> tuple[float, list[str]
     if f.note.delta is not None and f.baseline_abs > 0:
         jump = abs(abs(f.note.delta) - f.baseline_abs)
     broke = jump >= 40.0 and f.recovery >= 0.7
-    has_signature = burst_n >= 1 or paused or broke
 
-    burst = clamp(burst_n / 3.0, 0.0, 1.0)
-    # 如果这一档本来就大片出错（能力墙），成簇就不再是"分神"的证据
-    burst_trust = clamp(1.0 - f.density_bin_err / 0.35, 0.0, 1.0) * clamp(1.0 - f.dens_corr / 0.45, 0.0, 1.0)
-    s += 0.30 * burst * (0.25 + 0.75 * easy) * burst_trust
-    if burst_n >= 2 and easy > 0.4:
-        reasons.append("1.5 秒内连着错了 %d 个" % (burst_n + 1))
+    # 注意：「1.5 秒内连着错几个」**不是**分神的证据。
+    # 手一直在动却连着错，说明这一段跟不上（能力）；真正的分神要看"手停过"——
+    # 停顿之后再错，或者突然偏很远然后立刻回正。把成串的错判成分神，
+    # 等于把"能力不足"说成"走神"，两者的建议方向完全相反。
+    has_signature = paused or broke
 
-    # 手停下来过（走神 / 被别的事打断的强信号）
+    # 停顿 + 成串：这才是"注意力断了一下"的完整形状
     if paused:
         s += 0.20
+        s += 0.12 * clamp(burst_n / 3.0, 0.0, 1.0)
         reasons.append("出错前手停了 %.1f 秒（这里本来只隔 %.0fms 一个音）" % (
             f.gap_before / 1000.0, 1000.0 / max(1.0, f.density)))
 
@@ -738,8 +753,8 @@ def _score_distraction(f: ErrorFeature, profile: dict) -> tuple[float, list[str]
             reasons.append("这一击突然偏了 %.0fms，平时离散只有 %.0fms" % (
                 abs(f.note.delta), f.baseline_abs))
 
-    # "之后立刻恢复"只在**成串出错**之后才有信息量：孤立的 200 之后大家都会恢复
-    if burst_n >= 1:
+    # "之后立刻恢复"只在**有断片签名**时才有信息量：孤立的 200 之后大家都会恢复
+    if has_signature and burst_n >= 1:
         s += 0.12 * clamp((f.recovery - 0.6) / 0.4, 0.0, 1.0)
         if f.recovery >= 0.9:
             reasons.append("之后 6 个音立刻恢复正常")
@@ -807,6 +822,102 @@ def _score_slip(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
 # --------------------------------------------------------------------------- 画像
 
 
+def _stamina_profile(
+    notes: list[JudgedNote],
+    density_of: dict[int, float],
+    density_profile: list[dict],
+) -> dict:
+    """耐力：把谱面按**时间**三等分，看后 1/3 的失误率有没有明显爬升。
+
+    为什么必须谨慎：谱面后段本来就常更难，高手局的失误又稀少，
+    "前面一个 200 都没出、后面出一个"完全可能是正常波动。所以四道闸门：
+
+      1. 样本量：全曲 >= 400 个音符，后段 >= 40 个音符且 >= 8 个失误；
+      2. 绝对水位：后段失误率 >= 12%（否则从 1% 翻到 3% 没有意义）；
+      3. 相对涨幅：后段 >= 前段 1.45 倍，且 >= 中段 1.25 倍；
+      4. 难度校正：后段实际失误率 >= 该段按密度档**预期**失误率的 1.5 倍。
+         闸门 4 是关键——它把"后面本来就更难"从"耐力掉了"里分出去。
+
+    四条全中才算耐力不足；任一不满足就 drop=False。宁可漏判，也不要把
+    "结尾难"或"偶然一个 200"说成体力问题。
+    """
+    empty = {
+        "drop": False, "lateFrom": float("inf"),
+        "early": 0.0, "mid": 0.0, "late": 0.0, "expected": 0.0, "reason": "",
+    }
+    if len(notes) < 400:
+        return empty
+
+    t0 = notes[0].note_time
+    t1 = notes[-1].note_time
+    span = t1 - t0
+    if span <= 0:
+        return empty
+    cut_early = t0 + span / 3.0
+    cut_late = t0 + 2.0 * span / 3.0
+
+    seg = {"early": [0, 0], "mid": [0, 0], "late": [0, 0]}  # [音符数, 失误数]
+    late_expected: list[float] = []
+    for n in notes:
+        if n.note_time >= cut_late:
+            key = "late"
+        elif n.note_time >= cut_early:
+            key = "mid"
+        else:
+            key = "early"
+        seg[key][0] += 1
+        if n.is_flaw:
+            seg[key][1] += 1
+        if key == "late":
+            d = density_of.get(n.obj_index)
+            if d is not None:
+                for b in density_profile:
+                    if b["low"] <= d <= b["high"]:
+                        late_expected.append(b["errorRate"])
+                        break
+
+    counts = {k: v[0] for k, v in seg.items()}
+    rates = {k: (v[1] / v[0] if v[0] else 0.0) for k, v in seg.items()}
+    expected = mean(late_expected) if late_expected else 0.0
+
+    # 闸门 1：样本量
+    if counts["late"] < 40 or seg["late"][1] < 8 or counts["early"] < 60:
+        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
+                "mid": round(rates["mid"], 3), "late": round(rates["late"], 3),
+                "expected": round(expected, 3)}
+
+    late_rate = rates["late"]
+    # 闸门 2：绝对水位
+    if late_rate < 0.12:
+        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
+                "mid": round(rates["mid"], 3), "late": round(late_rate, 3),
+                "expected": round(expected, 3)}
+
+    # 闸门 3：相对涨幅（前段和中段都要比过）
+    if late_rate < rates["early"] * 1.45 or late_rate < rates["mid"] * 1.25:
+        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
+                "mid": round(rates["mid"], 3), "late": round(late_rate, 3),
+                "expected": round(expected, 3)}
+
+    # 闸门 4：难度校正——后段失误率要明显高于"按这一档密度本来就该有的失误率"
+    if expected <= 0 or late_rate < expected * 1.5:
+        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
+                "mid": round(rates["mid"], 3), "late": round(late_rate, 3),
+                "expected": round(expected, 3)}
+
+    return {
+        "drop": True,
+        "lateFrom": cut_late,
+        "early": round(rates["early"], 3),
+        "mid": round(rates["mid"], 3),
+        "late": round(late_rate, 3),
+        "expected": round(expected, 3),
+        "reason": "后 1/3 失误率 %.0f%%，前两段只有 %.0f%% / %.0f%%（同密度的预期是 %.0f%%），"
+                  "是耐力撑不住了" % (late_rate * 100, rates["early"] * 100,
+                                      rates["mid"] * 100, expected * 100),
+    }
+
+
 def build_profile(match: MatchResult, contexts: list[patterns.NoteContext]) -> dict:
     notes = match.notes
     deltas = match.deltas()
@@ -821,6 +932,20 @@ def build_profile(match: MatchResult, contexts: list[patterns.NoteContext]) -> d
             samples.append((c.density_1s, n.is_flaw))
     prof = density_error_profile(samples, n_bins=6)
     trend = trend_significance(prof)
+    density_bins = [
+        {
+            "low": round(b.low, 2),
+            "high": round(b.high, 2),
+            "count": b.count,
+            "errors": b.errors,
+            "errorRate": round(b.error_rate, 3),
+        }
+        for b in prof
+    ]
+    # 耐力：后 1/3 的失误率有没有在"同密度"的前提下明显爬升（判据见 _stamina_profile）
+    stamina = _stamina_profile(
+        notes, {c.index: c.density_1s for c in contexts}, density_bins
+    )
 
     # 稳定上限：失误率第一次明显超过基线的那一档的下边界
     ceiling = 0.0
@@ -841,16 +966,8 @@ def build_profile(match: MatchResult, contexts: list[patterns.NoteContext]) -> d
         "flaw_rate": (sum(1 for n in notes if n.is_flaw) / len(notes)) if notes else 0.0,
         "severe_rate": (sum(bits_severe) / len(notes)) if notes else 0.0,
         "runs": runs.as_dict(),
-        "density_profile": [
-            {
-                "low": round(b.low, 2),
-                "high": round(b.high, 2),
-                "count": b.count,
-                "errors": b.errors,
-                "errorRate": round(b.error_rate, 3),
-            }
-            for b in prof
-        ],
+        "density_profile": density_bins,
+        "stamina": stamina,
         "trend": trend,
     }
 

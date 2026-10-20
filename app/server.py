@@ -30,7 +30,7 @@ from app import paths  # noqa: E402
 from app.core import audio_fetch  # noqa: E402
 from app.core.analyze import AnalyzeError, analyze, set_msd_cache_path  # noqa: E402
 from app.core.beatmap import parse_osu_file  # noqa: E402
-from app.core.library import default_songs_roots, get_library, set_cache_path  # noqa: E402
+from app.core.library import default_songs_roots, get_library, reset_library, set_cache_path  # noqa: E402
 from app.core.osr import OsrError  # noqa: E402
 from app.core.skin import find_note_images, find_skin_in_exports  # noqa: E402
 from app.version import __version__  # noqa: E402
@@ -391,6 +391,82 @@ class _AnalysisApiMixin:
         info["ok"] = True
         return self._json(info)
 
+    # ---- 游戏目录（自动探测失败时让玩家在网页里手动指定） ----------------
+    def _paths_info(self):
+        from app.core import osu_dirs
+
+        roots = default_songs_roots()
+        lib = get_library(roots[0] if roots else None)
+        appdata = os.environ.get("APPDATA") or ""
+        return self._json({
+            "ok": True,
+            "stableDir": osu_dirs.config_stable_dir(),
+            "lazerDir": osu_dirs.config_lazer_dir(),
+            "songsRoot": roots[0] if roots else "",
+            "songsRoots": roots,
+            "count": len(lib.entries),
+            # 给输入框做占位提示：告诉玩家该选到哪一级
+            "examples": {
+                "stable": r"D:\OsuStable",
+                "lazer": os.path.join(appdata, "osu") if appdata else r"C:\Users\<你>\AppData\Roaming\osu",
+            },
+        })
+
+    def _paths_save(self, req: dict):
+        from app.core import osu_dirs
+
+        stable = (req.get("stableDir") or "").strip().strip('"').strip()
+        lazer = (req.get("lazerDir") or "").strip().strip('"').strip()
+
+        notes = []
+        if stable:
+            ok, msg = osu_dirs.inspect_stable_dir(stable)
+            if not ok:
+                return self._error("稳定版目录有问题：" + msg)
+            notes.append("稳定版：" + msg)
+        if lazer:
+            ok, msg = osu_dirs.inspect_lazer_dir(lazer)
+            if not ok:
+                return self._error("lazer 目录有问题：" + msg)
+            notes.append("lazer：" + msg)
+
+        data = audio_fetch.load_config(CACHE_DIR)
+        for key, val in (("stableDir", stable), ("lazerDir", lazer)):
+            if val:
+                data[key] = val
+            else:
+                data.pop(key, None)
+        if stable or lazer:
+            # 手动指定了游戏目录，就把更粗略的 songsRoot 清掉，免得两套配置打架
+            data.pop("songsRoot", None)
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            tmp = os.path.join(CACHE_DIR, "config.json.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, os.path.join(CACHE_DIR, "config.json"))
+        except OSError as e:
+            return self._error("保存配置失败：%s" % e, 500)
+
+        # 配置变了：清探测缓存 + 丢进程内索引，按新路径重建（可能要几秒）
+        osu_dirs.reset_cache()
+        reset_library()
+        roots = default_songs_roots()
+        t0 = time.time()
+        lib = get_library(roots[0] if roots else None, force=True)
+        ms = round((time.time() - t0) * 1000, 1)
+        log("[paths] stable=%s lazer=%s -> roots=%s (%d 张, %.0fms)"
+            % (stable or "-", lazer or "-", roots, len(lib.entries), ms))
+        return self._json({
+            "ok": True,
+            "songsRoot": roots[0] if roots else "",
+            "songsRoots": roots,
+            "count": len(lib.entries),
+            "buildMs": ms,
+            "notes": notes,
+            "hint": "" if lib.entries else "按这个路径还是没找到谱面，确认目录选对了吗？",
+        })
+
     def _analyze(self):
         raw = self._read_body()
         log("[analyze] 收到请求体 %.1f KB" % (len(raw) / 1024.0))
@@ -679,6 +755,8 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
                                    "stale": stale_code()})
             if path == "/api/beatmap-text":
                 return self._beatmap_text(qs)
+            if path == "/api/paths":
+                return self._paths_info()
             if path == "/api/library":
                 return self._library_info()
             if path == "/api/local-replays":
@@ -724,6 +802,8 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
                 return self._analyze_chunked()
             if path == "/api/beatmap-search":
                 return self._beatmap_search()
+            if path == "/api/paths":
+                return self._paths_save(_parse_json(self._read_body()) or {})
             if path == "/api/beatmap-meta":
                 return self._beatmap_meta()
             if path == "/api/analyze-local":

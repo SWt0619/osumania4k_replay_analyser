@@ -519,6 +519,19 @@ canvas { display: block; }
 .sw[data-cor="slip"] { background: var(--cat-slip); }
 
 .error-list { display: flex; flex-direction: column; gap: 6px; }
+/* 清单上方的计数行：共 N 条 · 筛选后 M 条 · 已显示 K 条 */
+.error-summary { margin-bottom: 8px; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+/* 每 30 秒一段的标题：细线 + 时间范围 + 该段条数，点一下跳到段首 */
+.error-group {
+  display: flex; align-items: center; gap: 10px;
+  margin: 10px 2px 0; font-size: 11.5px; color: var(--faint);
+  cursor: pointer; user-select: none;
+}
+.error-group:hover { color: var(--dim); }
+.error-group .eg-time { font-variant-numeric: tabular-nums; letter-spacing: .2px; }
+.error-group .eg-count { font-style: normal; color: var(--dim); }
+.error-group::after { content: ""; flex: 1; height: 1px; background: var(--stroke); }
+.error-more { display: flex; gap: 10px; justify-content: center; margin-top: 12px; flex-wrap: wrap; }
 .error-item {
   display: grid;
   grid-template-columns: 76px 62px 1fr auto;
@@ -769,6 +782,17 @@ canvas { display: block; }
 }
 .modal-card h3 { font-size: 16px; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; flex-wrap: wrap; }
+
+/* 手动指定游戏目录 */
+.chip#libChip { cursor: pointer; }
+.dir-field { display: block; }
+.dir-field > span { display: block; font-size: 12.5px; color: var(--dim); margin-bottom: 6px; }
+.dir-field .text-input { width: 100%; font-size: 13px; }
+.dir-field em { display: block; margin-top: 6px; font-style: normal; font-size: 11.5px; color: var(--faint); line-height: 1.6; }
+.dir-field em b { color: var(--dim); font-weight: 600; }
+.dir-status { margin: 4px 0 0; min-height: 18px; font-size: 12.5px; line-height: 1.6; color: var(--dim); }
+.dir-status.bad { color: #ff9ea8; }
+.dir-status.good { color: var(--good); }
 .modal-search { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; }
 .bm-list { max-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
 .bm-list li {

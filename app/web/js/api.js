@@ -166,6 +166,19 @@
       return jsonFetch("/api/library");
     },
 
+    // 自动探测找不到曲库时，让玩家在页面上手动指定游戏目录
+    paths() {
+      return jsonFetch("/api/paths");
+    },
+
+    savePaths(payload) {
+      return jsonFetch("/api/paths", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    },
+
     // 上传前先确认后端活着：连不上就立刻报错，别让页面干等
     health(timeoutMs) {
       const ctrl = new AbortController();

@@ -141,12 +141,17 @@
       chip.classList.add("off");
       chip.classList.remove("ok");
       t.textContent = "未找到曲库";
+      // 自动探测不到时给出可操作的下一步，而不是只说"找不到"
+      chip.title =
+        "没找到 osu! 的曲库目录。\n" +
+        "点一下这里，可以手动指定游戏目录。\n" +
+        "也可以直接拖 .osu 进来，或分析后手动选择对应的谱面。";
       return;
     }
     chip.classList.add("ok");
     chip.classList.remove("off");
     t.textContent = info.count + " 张谱面";
-    chip.title = "osu! 曲库：" + info.root;
+    chip.title = "osu! 曲库：" + info.root + "\n（点一下可以手动指定游戏目录）";
   }
 
   // ---------------------------------------------------------------- 总评
@@ -624,7 +629,7 @@
     if (err.secondaryLabel) chip.title = "也可能与「" + err.secondaryLabel + "」有关";
     li.appendChild(chip);
 
-    li.addEventListener("click", () => onSeek(err.t));
+    li.addEventListener("click", () => onSeek(err.t, err));
     return li;
   }
 
@@ -643,12 +648,31 @@
     setTimeout(() => item.classList.remove("is-flash"), 1600);
   }
 
+  // 时间分段标题：1000+ 条失误时靠它定位，点一下直接跳到那一段开头
+  function errorGroup(bucket, count, onSeek) {
+    const li = el("div", "error-group");
+    const t0 = bucket * 30000;
+    li.appendChild(el("span", "eg-time", fmtTime(t0) + " – " + fmtTime(t0 + 30000)));
+    if (count) li.appendChild(el("em", "eg-count", count + " 条"));
+    if (onSeek) li.addEventListener("click", () => onSeek(t0, null));
+    return li;
+  }
+
   function renderErrors(list, opts) {
     const ul = $("errorList");
     clearNode(ul);
     const empty = $("errorEmpty");
     empty.hidden = list.length > 0;
-    list.forEach((e) => ul.appendChild(errorItem(e, opts.onSeek)));
+    const counts = (opts && opts.bucketCounts) || null;
+    let last = null;
+    list.forEach((e) => {
+      const b = Math.floor(e.t / 30000);
+      if (b !== last) {
+        last = b;
+        ul.appendChild(errorGroup(b, counts ? counts[b] : 0, opts && opts.onSeek));
+      }
+      ul.appendChild(errorItem(e, opts.onSeek));
+    });
   }
 
   // ---------------------------------------------------------------- Toast / Loading

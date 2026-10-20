@@ -12,6 +12,9 @@
   }
 
   // ---- 基本渲染 ----
+  // 报告里的回放也要按回放当时的倍率走（DT 1.5× / HT 0.75×），
+  // 否则画面看起来比实际打的时候慢，会低估这张图。
+  const reportRate = Number((data.replay && data.replay.rate) || 1) || 1;
   $("emptyState").hidden = true;
   window.UI.renderTrack(data);
   window.UI.renderHero(data);
@@ -40,33 +43,81 @@
 
   // ---- 失误清单（报告里限制条数，避免文件过大） ----
   const MAX_ERRORS = 200;
-  let shown = 50;
-  function renderErrors() {
-    const list = (data.errors || []).slice(0, Math.min(shown, MAX_ERRORS));
-    window.UI.renderErrors(list, { onSeek: (t) => { switchTab("replay"); seekTo(t); } });
-    const more = $("btnMoreErrors");
-    const total = Math.min((data.errors || []).length, MAX_ERRORS);
-    more.hidden = total <= shown;
-    more.textContent = "再看 50 条（还有 " + Math.max(0, total - shown) + " 条）";
+  let errorShown = 50;
+  const errorFilter = { cat: "all", severe: false };
+
+  // 筛选状态放在一处：列表、计数行、按钮文案全部由它实时算出来。
+  // 以前筛选分支各自调 renderErrors 却忘了更新「再看」按钮，数字就停在筛选前。
+  function filteredErrors() {
+    return (data.errors || []).filter((e) => {
+      if (errorFilter.cat !== "all" && e.category !== errorFilter.cat) return false;
+      if (errorFilter.severe && e.severity < 3) return false;
+      return true;
+    });
   }
+
+  function renderErrors() {
+    const all = filteredErrors();
+    const capped = Math.min(all.length, MAX_ERRORS);
+    const list = all.slice(0, Math.min(errorShown, capped));
+
+    const bucketCounts = {};
+    all.forEach((e) => {
+      const b = Math.floor(e.t / 30000);
+      bucketCounts[b] = (bucketCounts[b] || 0) + 1;
+    });
+
+    window.UI.renderErrors(list, {
+      bucketCounts,
+      onSeek: (t) => { switchTab("replay"); seekTo(t); },
+    });
+
+    const total = (data.errors || []).length;
+    const sum = $("errorSummary");
+    if (sum) {
+      const parts = ["共 " + total + " 条"];
+      if (all.length !== total) parts.push("筛选后 " + all.length + " 条");
+      parts.push("已显示 " + list.length + " 条" +
+                 (all.length > MAX_ERRORS ? "（报告最多带 " + MAX_ERRORS + " 条）" : ""));
+      sum.textContent = parts.join(" · ");
+    }
+
+    const remain = Math.max(0, capped - list.length);
+    const moreBox = $("errorMore");
+    const more = $("btnMoreErrors");
+    const allBtn = $("btnAllErrors");
+    if (moreBox) moreBox.hidden = remain <= 0;
+    else if (more) more.hidden = remain <= 0;
+    if (more) more.textContent = "再看 " + Math.min(50, remain) + " 条（剩 " + remain + " 条）";
+    if (allBtn) allBtn.hidden = remain <= 50;
+  }
+
   renderErrors();
   $("btnMoreErrors").addEventListener("click", () => {
-    shown += 50;
+    errorShown += 50;
     renderErrors();
   });
+  const allBtnEl = $("btnAllErrors");
+  if (allBtnEl) {
+    allBtnEl.addEventListener("click", () => {
+      errorShown = filteredErrors().length;
+      renderErrors();
+    });
+  }
+
   document.querySelectorAll("#errorFilters .chip-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const cat = btn.dataset.cat;
       if (btn.dataset.sev) {
-        btn.classList.toggle("is-on");
-        const on = btn.classList.contains("is-on");
-        const list = (data.errors || []).filter((e) => (on ? e.severity >= 3 : true)).slice(0, MAX_ERRORS);
-        window.UI.renderErrors(list, { onSeek: (t) => { switchTab("replay"); seekTo(t); } });
-        return;
+        errorFilter.severe = !errorFilter.severe;
+        btn.classList.toggle("is-on", errorFilter.severe);
+      } else {
+        errorFilter.cat = btn.dataset.cat;
+        document.querySelectorAll("#errorFilters .chip-btn[data-cat]").forEach((b) => {
+          b.classList.toggle("is-on", b === btn);
+        });
       }
-      document.querySelectorAll("#errorFilters .chip-btn[data-cat]").forEach((b) => b.classList.toggle("is-on", b === btn));
-      const list = (cat === "all" ? data.errors : data.errors.filter((e) => e.category === cat)).slice(0, MAX_ERRORS);
-      window.UI.renderErrors(list, { onSeek: (t) => { switchTab("replay"); seekTo(t); } });
+      errorShown = 50;   // 换筛选条件后回到第一页
+      renderErrors();
     });
   });
 
@@ -204,7 +255,7 @@
     if (!playing) return;
     const dt = now - lastTick;
     lastTick = now;
-    timeMs += dt;
+    timeMs += dt * reportRate;
     if (timeMs >= duration) {
       timeMs = duration;
       playing = false;
