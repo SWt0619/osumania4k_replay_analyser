@@ -188,18 +188,19 @@
 
   // 段位估算：MSD 那条链走 MinaCalc，段位这张卡片改用 Sunny 星级查表。
   // 估算器在前端跑（ES 模块），失败就保留 MinaCalc 的兜底文案，不影响页面其他部分。
+  // 返回值给调用方用：相似谱面要按段位找，得等这里算完（离线报告没有估算器，返回 null）。
   async function applySunnyDan(data) {
     const cell = $("msdDan");
     const note = $("msdDanNote");
-    if (!cell || !note || !window.Estimator || !data || !data.session) return;
+    if (!cell || !note || !window.Estimator || !data || !data.session) return null;
     const rate = Number((data.replay && data.replay.rate) || 1) || 1;
     let res;
     try {
       res = await window.Estimator.estimate(data.session, rate);
     } catch (e) {
-      return;
+      return null;
     }
-    if (!res || !res.ok) return;
+    if (!res || !res.ok) return null;
     cell.textContent = res.label;
     const speed = rate === 1 ? "原速" : (rate > 1 ? "DT " : "HT ") + rate.toFixed(2) + "×";
     const parts = ["Sunny " + res.rcStar.toFixed(2)];
@@ -209,6 +210,7 @@
       "段位由 Sunny 星级查表得到：RC 用 RC 标尺，LN 用 LN 标尺，两者是同一根横轴上的两张表。\n" +
       "本次按键占比 " + (res.lnRatio * 100).toFixed(1) + "%，倍率 " + speed + "（开 DT/HT 时按实际密度算）。\n" +
       "左边的 MSD 来自 MinaCalc，只看谱面本身，不随倍率变化，所以两个数字的口径不同。";
+    return res;
   }
 
   // 键型构成：把块级粗分类按物件数汇总成一条堆叠条 + 图例。
@@ -262,8 +264,9 @@
   }
 
   // 谱面难度页：MSD 数字 + 段位换算 + 段位标尺
+  // 段位不在这里算：它要等异步的 Sunny 估算（相似谱面还得靠它），
+  // 由调用方先画 MSD、再调 applySunnyDan 覆写段位格。
   function renderMsd(data) {
-    void applySunnyDan(data);
     const box = $("msdOverall");
     if (!box) return;
     const m = (data && data.msd) || {};
@@ -498,6 +501,12 @@
       ["空按", String(sm.ghosts || 0)],
       ["分析耗时", (data.elapsedMs || 0) + " ms"],
     ];
+    // Random 会打乱列序：把推断结果留在面板里，别只在弹一下的提示里出现过
+    if (rp.columnOrder && rp.columnOrder.length) {
+      const at = rows.findIndex(([k]) => k === "Mod");
+      rows.splice(at + 1, 0, ["列序（Random）",
+        rp.columnOrder.map((pressCol, noteCol) => noteCol + "→" + pressCol).join("、")]);
+    }
     rows.forEach(([k, v]) => {
       const d = el("div");
       d.appendChild(el("dt", null, k));
@@ -508,6 +517,60 @@
     // 回放头按 ScoreV1 记长按（按住的 tick 数进连击），本工具按 ScoreV2 只记头尾两次，
     // 用 V2 打出来的回放必然对不上 —— 那是口径差异，不是解析出错。
     // 比对数据本身仍留在 replay.verified 里，排查时能看。
+  }
+
+  // ---------------------------------------------------------------- 相似谱面
+  // 数据来自后端 recommend：段位与键型构成都接近的几张图，带 sayobot 的下载地址。
+  // 段位是前端算出来的，所以这里是「拿到 items 再画」，不自己发请求。
+  function renderSimilar(items) {
+    const card = $("similarCard");
+    const ul = $("similarList");
+    if (!card || !ul) return;
+    const list = Array.isArray(items) ? items : [];
+    clearNode(ul);
+    if (!list.length) {
+      card.hidden = true;
+      return;
+    }
+
+    list.forEach((it) => {
+      const li = el("li", "similar-item");
+      const main = el("div", "s-main");
+      const title = el("a", "s-title",
+        (it.artist || "") + " - " + (it.title || "") + " [" + (it.version || "") + "]");
+      title.href = it.pageUrl || "#";
+      title.target = "_blank";
+      title.rel = "noreferrer noopener";
+      main.appendChild(title);
+
+      // 键型中文名由后端给（和「键型构成」卡片同一张表），前端不再维护第二份
+      const cat = it.label || it.dominant || "";
+      const bits = [];
+      if (cat) bits.push(cat + (it.dominantShare ? " " + Math.round(it.dominantShare * 100) + "%" : ""));
+      if (it.dan) {
+        const gap = Number(it.danGap);
+        bits.push(it.dan + (gap > 0 ? "（差 " + gap + " 档）" : "（同档）"));
+      }
+      if (it.similarity) bits.push("相似度 " + Math.round(it.similarity * 100) + "%");
+      const line = el("div", "s-meta", bits.join(" · "));
+      // MSD 只作参考、不参与排序，放悬浮说明里，不占正文
+      line.title = [
+        it.msd ? "这张图 MSD " + Number(it.msd).toFixed(1) : "",
+        it.shareLabel ? "键型构成 " + it.shareLabel : "",
+        it.relaxed ? "候选不够，已放宽段位门槛" : "",
+      ].filter(Boolean).join("\n");
+      main.appendChild(line);
+      li.appendChild(main);
+
+      const dl = el("a", "s-dl", "下载 .osz");
+      dl.href = it.downloadUrl || "#";
+      dl.target = "_blank";
+      dl.rel = "noreferrer noopener";
+      dl.title = "从 sayobot 下载这套谱面（含全部难度）";
+      li.appendChild(dl);
+      ul.appendChild(li);
+    });
+    card.hidden = false;
   }
 
   // ---------------------------------------------------------------- 分段条
@@ -603,6 +666,8 @@
     if (err.density) bits.push(Number(err.density).toFixed(1) + " NPS");
     bits.push("第 " + (err.column + 1) + " 列");
     if (err.confidence) bits.push("判定可信度 " + Math.round(err.confidence * 100) + "%");
+    // 落在这段"同类键型耐力下滑"窗口里的失误，带一个短标记；整句说明放不下，悬停看全文
+    if (err.stamina) bits.push("耐力 " + err.stamina);
     return bits.join(" · ");
   }
 
@@ -621,6 +686,8 @@
     main.appendChild(el("div", "e-reason", reason));
     main.appendChild(el("div", "e-sub", errorBits(err)));
     li.appendChild(main);
+
+    if (err.stamina) li.title = "后段耐力下滑：" + err.stamina;
 
     const cat = err.category || "distraction";
     const chip = el("span", "e-cat cat-" + cat);
@@ -711,9 +778,11 @@
     renderLibrary,
     renderHero,
     renderMsd,
+    applySunnyDan,
     renderPatternShare,
     renderCategories,
     renderMeta,
+    renderSimilar,
     renderSections,
     renderJudgeBars,
     renderRawTable,

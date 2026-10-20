@@ -23,6 +23,7 @@ from __future__ import annotations
 import glob
 import os
 
+from . import config_store
 from .beatmap import long_path
 
 
@@ -141,7 +142,10 @@ def _lazer_custom_data_dir() -> list[str]:
                 if "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                if key.strip().lower() in ("data", "songs", "beatmapdirectory"):
+                # lazer 自定义数据目录写在 storage.ini 的 FullPath 里
+                # （osy.Game/IO/OsuStorage.cs 读的就是 StorageConfig.FullPath）；
+                # 另外三个是历史/别处见过的写法，一起认。
+                if key.strip().lower() in ("fullpath", "data", "songs", "beatmapdirectory"):
                     val = val.strip().strip('"')
                     if val:
                         out.append(os.path.join(val, "Songs"))
@@ -217,24 +221,25 @@ def default_lazer_file_roots() -> list[str]:
 
 
 def _config() -> dict:
-    """读 `_cache/config.json`（读不到就当空配置）。"""
-    try:
-        import json
+    """读 `_cache/config.json`（读不到就当空配置）。
 
-        from ..paths import CACHE_DIR
-    except ImportError:
-        return {}
-    path = os.path.join(CACHE_DIR, "config.json")
-    try:
-        with open(long_path(path), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    读写细节统一在 config_store 里，这里只关心「玩家手填的目录」这几个键。
+    """
+    return config_store.read()
+
+
+def _env_songs_root() -> list[str]:
+    """命令行 `--songs` 指定的曲库（由 server.main 写进环境变量）。
+
+    这一项必须真的被读：参数在帮助里写着"手动指定 osu! Songs 目录"，
+    只设环境变量而没人读的话，用户会以为指定了、实际还是扫的默认位置。
+    """
+    val = (os.environ.get("MANIA_SONGS_ROOT") or "").strip()
+    return [val] if val else []
 
 
 def _config_songs_root() -> list[str]:
-    """玩家手动指定的曲库路径（`songsRoot`），优先级最高。"""
+    """网页里手动指定的曲库路径（`songsRoot`）。"""
     val = _config().get("songsRoot")
     return [val] if isinstance(val, str) and val.strip() else []
 
@@ -281,41 +286,49 @@ def inspect_lazer_dir(d: str) -> tuple[bool, str]:
 
 
 _ROOTS_CACHE: list[str] | None = None
+_DETECTED_CACHE: list[str] | None = None
 
 
 def reset_cache() -> None:
     """清掉探测缓存（测试用；运行时改了 config.json 需要重启程序）。"""
-    global _ROOTS_CACHE
+    global _ROOTS_CACHE, _DETECTED_CACHE
     _ROOTS_CACHE = None
+    _DETECTED_CACHE = None
 
 
-def default_songs_roots() -> list[str]:
-    """猜测本机 osu! 曲库位置（lazer 与 stable 都覆盖，含非默认安装）。
+def _explicit_roots() -> list[str]:
+    """玩家明确指定的曲库：命令行 `--songs` 优先，其次网页里填的。
 
-    结果按进程缓存：探测要在各盘列目录，每次请求都扫一遍没必要；
-    代价是运行期间新装的 osu! 或改过的 config.json 要重启程序才生效。
+    这两项既不在注册表里也不在常见路径里，所以不能混进「自动探测」那一组 ——
+    否则「传了自定义目录还去合并别的默认曲库」会把它自己也算成默认根。
     """
-    global _ROOTS_CACHE
-    if _ROOTS_CACHE is not None:
-        return list(_ROOTS_CACHE)
+    out = _env_songs_root() + _config_songs_root()
+    cfg_stable = config_stable_dir()
+    if cfg_stable:
+        out.extend(_songs_from_install_dir(cfg_stable))
+    cfg_lazer = config_lazer_dir()
+    if cfg_lazer:
+        out.append(os.path.join(cfg_lazer, "Songs"))
+    return out
+
+
+def detected_songs_roots() -> list[str]:
+    """自动探测到的曲库（不含玩家指定的那些）。
+
+    单独一个函数是给 `library._scan_all` 用的：它要判断「传进来这个根是不是默认曲库之一」，
+    玩家手填的目录不该算进来（否则会连带扫描旁边几个真实曲库，反而更慢）。
+    """
+    global _DETECTED_CACHE
+    if _DETECTED_CACHE is not None:
+        return list(_DETECTED_CACHE)
 
     home = os.path.expanduser("~")
     appdata = _appdata()
     localappdata = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
 
-    # 0) 玩家在网页上手动指定的（优先级最高）
-    candidates: list[str] = list(_config_songs_root())
-    cfg_stable = config_stable_dir()
-    if cfg_stable:
-        candidates.extend(_songs_from_install_dir(cfg_stable))
-    cfg_lazer = config_lazer_dir()
-    if cfg_lazer:
-        candidates.append(os.path.join(cfg_lazer, "Songs"))
-
+    candidates: list[str] = []
     # 1) 安装目录 → 稳定版 cfg 里的 BeatmapDirectory
-    install_dirs: list[str] = []
-    for d in _registry_install_dirs():
-        install_dirs.append(d)
+    install_dirs: list[str] = list(_registry_install_dirs())
     install_dirs.extend(_scan_for_installs())
     for d in install_dirs:
         candidates.extend(_songs_from_install_dir(d))
@@ -333,5 +346,20 @@ def default_songs_roots() -> list[str]:
         r"C:\osu!\Songs",
     ])
 
-    _ROOTS_CACHE = _existing(candidates)
+    _DETECTED_CACHE = _existing(candidates)
+    return list(_DETECTED_CACHE)
+
+
+def default_songs_roots() -> list[str]:
+    """猜测本机 osu! 曲库位置（lazer 与 stable 都覆盖，含非默认安装）。
+
+    顺序：玩家指定的在前，自动探测的在后 —— 调用方一律取第一个当主根。
+
+    结果按进程缓存：探测要在各盘列目录，每次请求都扫一遍没必要；
+    代价是运行期间新装的 osu! 或改过的 config.json 要重启程序才生效。
+    """
+    global _ROOTS_CACHE
+    if _ROOTS_CACHE is not None:
+        return list(_ROOTS_CACHE)
+    _ROOTS_CACHE = _existing(_explicit_roots() + detected_songs_roots())
     return list(_ROOTS_CACHE)

@@ -46,3 +46,16 @@ python/
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# 谱面数据集：脚本进仓库，抓下来的谱面与中间结果不进（体积大，可重新生成）
+_dataset/data/
+_dataset/.mma/
+_dataset/*.jsonl
+_dataset/*.csv
+_dataset/crawl.log
+
+# 临时工作目录（打包自检、一次性脚本、解压出来的包）
+_tmp/
+
+# 崩溃报告：本机排障产物，不进仓库也不进发行包
+crashreport/

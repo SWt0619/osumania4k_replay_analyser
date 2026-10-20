@@ -158,6 +158,7 @@ def serve(open_browser: bool = True) -> None:
 # --------------------------------------------------------------------- 拖拽模式
 def make_report(replay: str, beatmap: str | None = None, open_after: bool = True) -> tuple[bool, str]:
     from app.core.analyze import AnalyzeError, analyze
+    from app.core.json_safe import dumps as json_dumps
     from app.core.osr import OsrError
     from app.core.report_html import build_report_html, safe_report_name
 
@@ -166,14 +167,21 @@ def make_report(replay: str, beatmap: str | None = None, open_after: bool = True
     except (AnalyzeError, OsrError) as e:
         return False, str(e)
     except Exception as e:  # noqa: BLE001
+        # 真正没预料到的问题：除了弹窗，还留一份可发送的崩溃报告
+        from app.core import crashreport
+
+        report = crashreport.write("拖拽模式分析失败", e,
+                                   context={"回放": os.path.basename(replay)})
         log("分析异常：\n" + traceback.format_exc())
-        return False, "分析时出现意外错误：%s" % e
+        hint = "\n崩溃报告：%s" % report if report else ""
+        return False, "分析时出现意外错误：%s%s" % (e, hint)
 
     os.makedirs(paths.REPORT_DIR, exist_ok=True)
     base = os.path.join(paths.REPORT_DIR, "报告_%s_%s" % (safe_report_name(data), time.strftime("%Y%m%d_%H%M%S")))
     try:
         with open(base + ".json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
+            # 走 json_safe：这份 sidecar 也是给别人/别的工具看的，不能出现 Infinity
+            f.write(json_dumps(data, indent=1))
         with open(base + ".html", "w", encoding="utf-8") as f:
             f.write(build_report_html(data))
     except OSError as e:

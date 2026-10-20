@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .attribution import CATEGORY_LABEL
+from .labels import CATEGORY_LABEL
 
 
 def _f(v, default=0.0) -> float:
@@ -481,6 +481,27 @@ class _Draft:
             if last_acc - first_acc >= 1.0:
                 self.strengths.append("后段比前段稳（+%.1f 个百分点），续航没有问题。" % (last_acc - first_acc))
 
+    # 3.5) 耐力
+    # 判定本身在 attribution 里（同一大类连续 6 段之后失误明显上升），
+    # 但逐条失误的理由只留 3 条，长图上很容易被别的理由挤掉，所以这里单独写一段。
+    def add_stamina(self) -> None:
+        prof = (self.payload.get("categories") or {}).get("profile") or {}
+        st = prof.get("stamina") or {}
+        if not st.get("drop"):
+            return
+        start = _fmt_mmss(st.get("fromTime", 0))
+        self.paragraphs.append(
+            "还有一段值得单独说：%s 起连续 %d 段都是「%s」，前 6 段的失误率是 %.0f%%，"
+            "之后升到 %.0f%%（多 %.0f 个百分点，同期密度没有明显上升）。"
+            "同样的写法打着打着掉准，是耐力撑不住，不是这一段突然变难。"
+            % (start, st.get("blocks", 0), st.get("label", ""),
+               _f(st.get("baseRate")) * 100, _f(st.get("testRate")) * 100,
+               _f(st.get("rise")) * 100)
+        )
+        self.weaknesses.append(
+            "后段（%s 起）在同样的「%s」上掉准，体力是短板。" % (start, st.get("label", ""))
+        )
+
     # 4) 左右手
     def add_hands(self) -> None:
         hand_text, weak_hand = _hand_sentence(self.payload.get("columnStats", []))
@@ -601,6 +622,7 @@ def build_evaluation(payload: dict) -> dict:
     draft.add_accuracy()
     draft.add_categories()
     draft.add_sections()
+    draft.add_stamina()
     draft.add_hands()
     draft.add_pattern()
     draft.add_density()

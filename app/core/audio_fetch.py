@@ -25,10 +25,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import zipfile
 from urllib.request import Request, urlopen
 
+from . import config_store
 from .beatmap import AUDIO_EXTS, parse_osu_file
 from ..version import __version__
 
@@ -51,7 +53,9 @@ FAIL_TTL = 7 * 24 * 3600           # 失败条目多久后允许重试
 FETCH_VERSION = 2
 
 _last_request = 0.0
-_lock_hint = None
+# 同一时刻只允许一个线程去镜像站取。服务端是多线程的（ThreadingHTTPServer），
+# 两个窗口同时打开同一份缺音频的回放时，没有这把锁就会各下一遍。
+_fetch_lock = threading.Lock()
 
 
 def _throttle() -> None:
@@ -68,36 +72,24 @@ def _user_agent() -> str:
 
 
 # --------------------------------------------------------------------- 配置
-def config_path(cache_dir: str) -> str:
-    return os.path.join(cache_dir, "config.json")
-
-
 def load_config(cache_dir: str) -> dict:
-    try:
-        with open(config_path(cache_dir), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    """读配置（薄封装，保留这个函数名给服务端与脚本用）。"""
+    return config_store.read(cache_dir)
 
 
 def is_enabled(cache_dir: str) -> bool:
     """默认开启：这是「没声音」这个问题的正解，默认关掉等于没做。
 
-    关掉的办法是配置里显式写 autoFetchAudio: false（页面上有开关）。
+    关掉的办法是配置里显式写 autoFetchAudio: false。本版没有界面开关，
+    只能改文件（`/api/audio-pref` 接口留着给脚本用）；这一点与 README 的说法一致。
     """
     return bool(load_config(cache_dir).get("autoFetchAudio", True))
 
 
 def set_enabled(cache_dir: str, flag: bool) -> None:
-    data = load_config(cache_dir)
-    data["autoFetchAudio"] = bool(flag)
+    """只改联网开关这一个字段，配置里的其它项（比如手填的游戏目录）保持不变。"""
     try:
-        os.makedirs(cache_dir, exist_ok=True)
-        tmp = config_path(cache_dir) + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, config_path(cache_dir))
+        config_store.merge({"autoFetchAudio": bool(flag)}, cache_dir=cache_dir)
     except OSError:
         pass
 
@@ -195,7 +187,7 @@ def extract_audio(osz_path: str, wanted: str, out_base: str) -> str:
             if ext not in AUDIO_EXTS:
                 ext = ".mp3"
             out = out_base + ext
-            tmp = out + ".part"
+            tmp = out + ".%d.%d.part" % (os.getpid(), threading.get_ident())
             with z.open(name) as src, open(tmp, "wb") as dst:
                 while True:
                     chunk = src.read(256 * 1024)
@@ -206,14 +198,6 @@ def extract_audio(osz_path: str, wanted: str, out_base: str) -> str:
             return out
     except (OSError, zipfile.BadZipFile):
         return ""
-
-
-def _md5_of(path: str) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(256 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _verify_osz(osz_path: str, md5: str) -> bool:
@@ -256,12 +240,19 @@ def fetch_audio(beatmap_path: str, md5: str, cache_dir: str, force: bool = False
     if hit:
         return {"ok": True, "path": hit, "source": "cache", "error": "", "cached": True}
 
-    items = load_index(cache_dir)
-    prev = items.get(key) or {}
-    stale = prev.get("v") != FETCH_VERSION
-    if not force and not stale and prev.get("failed") and (time.time() - float(prev.get("at") or 0)) < FAIL_TTL:
-        return {"ok": False, "path": "", "source": "", "error": prev.get("error") or "上次没取到", "cached": False}
+    # 同一张图只让一个线程去取。两个窗口同时拖进同一份缺音频的回放时，
+    # 以前两边会各开一遍下载、往同一个 .part 文件里写，互相把包写坏之后
+    # 各自换下一个镜像重试——实测一次补全会打出 3~5 个请求，公共镜像很容易被限流。
+    with _fetch_lock:
+        # 等锁的这段时间里，先拿到锁的线程可能已经把音频下好写进缓存了
+        hit = cached_audio(cache_dir, key)
+        if hit:
+            return {"ok": True, "path": hit, "source": "cache", "error": "", "cached": True}
+        return _fetch_locked(beatmap_path, key, cache_dir, force)
 
+
+def _target_of(beatmap_path: str) -> tuple[str, str]:
+    """读出这次要抽的音频文件名与图集 id（读不到就给空串）。"""
     audio_name = ""
     set_id = ""
     try:
@@ -270,29 +261,25 @@ def fetch_audio(beatmap_path: str, md5: str, cache_dir: str, force: bool = False
         set_id = str(bm.meta.get("BeatmapSetID") or "").strip()
     except Exception:  # noqa: BLE001
         pass
-    if set_id in ("0", "-1"):
-        set_id = ""
+    return audio_name, ("" if set_id in ("0", "-1") else set_id)
 
-    # 没有图集 id 就到此为止，不做「按 MD5 猜图集」。
-    # 曾经试过 sayobot 的 ?K=<md5>，实测它根本不按 MD5 查：随便编一个 md5 都会返回
-    # 一张不相干的图集（连 status 都是 0），拿它去下载等于白下几十 MB 还可能配错音频。
-    # nerinyan /mino 的 md5 接口要么 530 要么 403，没有免鉴权可用的。
-    if not set_id:
-        err = "这张谱面没记录图集 id（自制图或还没上传到官网），无法在线补音频"
-        items[key] = {"v": FETCH_VERSION, "failed": True, "at": time.time(), "error": err}
-        save_index(cache_dir, items)
-        return {"ok": False, "path": "", "source": "", "error": err, "cached": False}
 
-    audio_dir = os.path.join(cache_dir, "audio")
-    os.makedirs(audio_dir, exist_ok=True)
-    tmp_osz = os.path.join(audio_dir, key + ".osz.part")
+def _download_from_mirrors(key: str, set_id: str, audio_name: str,
+                           audio_dir: str) -> tuple[str, str, str]:
+    """依次问每个镜像要一次包，成功返回（音频路径, 镜像名, ""），全失败返回（"", "", 错误）。
+
+    每个镜像都走同一条验收：体积像样 → 包里真有这张谱面 → 真能抽出音频。
+    校验顺序不能反：先抽音频再校验的话，会给错图写进一份"看起来正常"的缓存。
+    """
+    # 临时文件名带 pid 与线程号：多开一个程序实例时也不会写到同一个文件里
+    tag = "%d.%d" % (os.getpid(), threading.get_ident())
+    tmp_osz = os.path.join(audio_dir, key + "." + tag + ".osz.part")
     last_err = ""
     started = time.time()
     for name, tpl, headers in MIRRORS:
         # 总预算：三个镜像全挂时别让用户对着"正在补音频"等一分半
         if time.time() - started > BUDGET:
-            last_err = last_err or "镜像都没能在 %d 秒内给回应" % BUDGET
-            break
+            return "", "", last_err or "镜像都没能在 %d 秒内给回应" % BUDGET
         try:
             _get(tpl.format(sid=set_id), headers, sink=tmp_osz)
             # 低于这个尺寸的只可能是错误页或空响应；真正的有效性靠下面的 _verify_osz
@@ -306,16 +293,7 @@ def fetch_audio(beatmap_path: str, md5: str, cache_dir: str, force: bool = False
             if not out:
                 last_err = "%s 的包里没有音频" % name
                 continue
-            items[key] = {
-                "v": FETCH_VERSION,
-                "file": os.path.basename(out),
-                "source": name,
-                "at": time.time(),
-                "setId": set_id,
-                "size": os.path.getsize(out),
-            }
-            save_index(cache_dir, items)
-            return {"ok": True, "path": out, "source": name, "error": "", "cached": False}
+            return out, name, ""
         except Exception as e:  # noqa: BLE001
             last_err = "%s：%s" % (name, e)
         finally:
@@ -324,11 +302,47 @@ def fetch_audio(beatmap_path: str, md5: str, cache_dir: str, force: bool = False
                     os.remove(tmp_osz)
             except OSError:
                 pass
+    return "", "", last_err or "所有镜像都失败了"
 
-    items[key] = {"v": FETCH_VERSION, "failed": True, "at": time.time(),
-                  "error": last_err or "所有镜像都失败了"}
+
+def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> dict:
+    """真正的下载流程。调用方必须已经持有 `_fetch_lock`。"""
+    items = load_index(cache_dir)
+    prev = items.get(key) or {}
+    stale = prev.get("v") != FETCH_VERSION
+    if not force and not stale and prev.get("failed") and (time.time() - float(prev.get("at") or 0)) < FAIL_TTL:
+        return {"ok": False, "path": "", "source": "", "error": prev.get("error") or "上次没取到", "cached": False}
+
+    audio_name, set_id = _target_of(beatmap_path)
+
+    # 没有图集 id 就到此为止，不做「按 MD5 猜图集」。
+    # 曾经试过 sayobot 的 ?K=<md5>，实测它根本不按 MD5 查：随便编一个 md5 都会返回
+    # 一张不相干的图集（连 status 都是 0），拿它去下载等于白下几十 MB 还可能配错音频。
+    # nerinyan /mino 的 md5 接口要么 530 要么 403，没有免鉴权可用的。
+    if not set_id:
+        err = "这张谱面没记录图集 id（自制图或还没上传到官网），无法在线补音频"
+        items[key] = {"v": FETCH_VERSION, "failed": True, "at": time.time(), "error": err}
+        save_index(cache_dir, items)
+        return {"ok": False, "path": "", "source": "", "error": err, "cached": False}
+
+    audio_dir = os.path.join(cache_dir, "audio")
+    os.makedirs(audio_dir, exist_ok=True)
+    out, source, last_err = _download_from_mirrors(key, set_id, audio_name, audio_dir)
+    if out:
+        items[key] = {
+            "v": FETCH_VERSION,
+            "file": os.path.basename(out),
+            "source": source,
+            "at": time.time(),
+            "setId": set_id,
+            "size": os.path.getsize(out),
+        }
+        save_index(cache_dir, items)
+        return {"ok": True, "path": out, "source": source, "error": "", "cached": False}
+
+    items[key] = {"v": FETCH_VERSION, "failed": True, "at": time.time(), "error": last_err}
     save_index(cache_dir, items)
-    return {"ok": False, "path": "", "source": "", "error": last_err or "所有镜像都失败了", "cached": False}
+    return {"ok": False, "path": "", "source": "", "error": last_err, "cached": False}
 
 
 def stats(cache_dir: str) -> dict:

@@ -9,15 +9,24 @@ import hashlib
 import json
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass
 
 from . import attribution, dan, msd, patterns, report
 from .beatmap import JUDGEMENT_LABEL, Beatmap, long_path, parse_osu_file
 from .library import get_library
-from .match import V1_WEIGHTS, MatchResult, compare_with_header, match_replay, v1_weight
+from .match import (
+    V1_WEIGHTS,
+    MatchResult,
+    compare_with_header,
+    infer_random_order,
+    match_replay,
+    max_combo_from,
+    v1_weight,
+)
 from .metrics import histogram, median, percentile, stdev, unstable_rate
-from .osr import MOD_MR, Replay, extract_events, mods_human, parse_osr
+from .osr import MOD_MR, MOD_RANDOM, Replay, extract_events, mods_human, parse_osr
 from ..version import __version__
 
 JUDGEMENT_CODE = {"perfect": 0, "great": 1, "good": 2, "ok": 3, "meh": 4, "miss": 5}
@@ -35,8 +44,29 @@ TIMELINE_MAX_BUCKETS = 2000
 NPS_WINDOW_MS = 2000.0
 
 
+# 只开放 4K：键型判据、段位标尺、MSD 的键型分布都只按 4 键调过，
+# 5K 以上的谱面照样能解析，但结论没有依据。所以入口处一律拒绝，而不是给一份看着像
+# 那么回事、实际不可信的报告。
+SUPPORTED_KEYS = 4
+
+
 class AnalyzeError(Exception):
     """分析失败（给用户看的错误）。"""
+
+
+def unsupported_keys_message(beatmap: Beatmap) -> str:
+    """非 4K 谱面的统一提示语（服务端、exe 拖拽、页面提示共用这一份措辞）。"""
+    return (
+        "本工具目前只支持 4K（4 键）谱面。这张谱面是 %dK：%s - %s [%s]，无法分析。"
+        "请换用同一首曲子的 4K 难度，或者另找一张 4K 谱。"
+        % (beatmap.keys, beatmap.artist, beatmap.title, beatmap.difficulty_name)
+    )
+
+
+def ensure_supported(beatmap: Beatmap) -> None:
+    """挡住 4K 以外的谱面。所有导入路径最终都经过这里。"""
+    if beatmap.keys != SUPPORTED_KEYS:
+        raise AnalyzeError(unsupported_keys_message(beatmap))
 
 
 def _find_beatmap(replay: Replay, beatmap_path: str | None, songs_root: str | None) -> tuple[Beatmap, str]:
@@ -400,11 +430,22 @@ def _compact_notes(match: MatchResult, atts: list) -> list[dict]:
     return out
 
 
-def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext]) -> list[dict]:
+def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext],
+                   stamina: dict | None = None) -> list[dict]:
     """每条失误的完整说明：判定、误差、所在 pattern、归因与"凭什么这么判"。
 
     这里叠了 a.as_dict()，所以 category/scores/reasons 都在同一层，前端不必再嵌套取值。
+    stamina：落在耐力下滑区间里的失误多带一个短标记（失误清单只显示第一条理由，
+    整句说明放不下，短标记 + 悬停全文更合适）。
     """
+    st = stamina or {}
+    in_stamina = bool(st.get("drop")) and st.get("lateFrom") is not None
+    hint = ""
+    if in_stamina:
+        hint = "「%s」段 %.0f%%→%.0f%%" % (
+            st.get("label", ""), (st.get("baseRate") or 0) * 100,
+            (st.get("testRate") or 0) * 100,
+        )
     out = []
     for a in atts:
         n = a.note
@@ -424,6 +465,8 @@ def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext]) ->
                 "isHold": n.is_hold,
                 "dropped": n.dropped,
                 "severity": n.severity,
+                # 落在耐力窗口里才给：null 表示这条与耐力无关
+                "stamina": hint if in_stamina and n.note_time >= st["lateFrom"] else None,
                 **a.as_dict(),
             }
         )
@@ -522,20 +565,6 @@ PROJECTION_FIX_RATE = 0.10
 PROJECTION_CATEGORIES = ("distraction", "rhythm", "ability")
 
 
-def _combo_metrics(judgements: list[str]) -> int:
-    """最大连击：mania 里任何非 miss 都保连。"""
-    best = 0
-    run = 0
-    for j in judgements:
-        if j == "miss":
-            run = 0
-        else:
-            run += 1
-            if run > best:
-                best = run
-    return best
-
-
 def _v1_score(judgements: list[str], mods: list[str] | None = None) -> int:
     """按官方公式算 ScoreV1（0~1,000,000）。
 
@@ -576,27 +605,34 @@ def _v1_score(judgements: list[str], mods: list[str] | None = None) -> int:
 
 _MSD_CACHE: dict[str, dict] = {}
 _MSD_CACHE_PATH = ""
+# 服务端是多线程的（ThreadingHTTPServer），而 MSD 缓存是进程级共享状态：
+# 两个标签页同时打开同一张图时，一个线程正在 json.dump、另一个往 dict 里插键，
+# 会直接抛 "dictionary changed size during iteration"。读写都串行，落盘用快照。
+_MSD_LOCK = threading.Lock()
 
 
 def set_msd_cache_path(path: str) -> None:
     global _MSD_CACHE_PATH, _MSD_CACHE
-    _MSD_CACHE_PATH = path
-    _MSD_CACHE = {}
-    if path and os.path.isfile(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                _MSD_CACHE = json.load(f)
-        except (OSError, ValueError):
-            _MSD_CACHE = {}
+    with _MSD_LOCK:
+        _MSD_CACHE_PATH = path
+        _MSD_CACHE = {}
+        if path and os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    _MSD_CACHE = json.load(f)
+            except (OSError, ValueError):
+                _MSD_CACHE = {}
 
 
 def _save_msd_cache() -> None:
+    """落盘用快照：持锁期间别的线程改不到这份 dict。调用方需持有 _MSD_LOCK。"""
     if not _MSD_CACHE_PATH:
         return
+    snapshot = dict(_MSD_CACHE)
     try:
         os.makedirs(os.path.dirname(_MSD_CACHE_PATH), exist_ok=True)
         with open(_MSD_CACHE_PATH, "w", encoding="utf-8") as f:
-            json.dump(_MSD_CACHE, f, ensure_ascii=False)
+            json.dump(snapshot, f, ensure_ascii=False)
     except OSError:
         pass
 
@@ -605,23 +641,28 @@ def msd_for(beatmap_md5: str, beatmap) -> dict:
     """算这张谱的 MSD（MinaCalc）。按谱面 MD5 缓存 —— 同一张图只算一次。
 
     MSD 只由谱面决定、与回放无关，所以缓存键用 beatmap md5。
+    缓存命中不在锁外直接返回：dict 在另一线程里可能正被替换（改缓存路径）。
     """
     key = (beatmap_md5 or "").lower()
-    if key and key in _MSD_CACHE:
-        return _MSD_CACHE[key]
+    if key:
+        with _MSD_LOCK:
+            cached = _MSD_CACHE.get(key)
+        if cached is not None:
+            return cached
     ok, why = msd.available()
     if not ok:
         return {"available": False, "error": why}
     result = msd.calc(beatmap)
     if result is None:
-        return {"available": False, "error": "MinaCalc 没能算出结果"}
+        return {"available": False, "error": msd.last_error() or "MinaCalc 没能算出结果"}
     payload = result.as_dict()
     payload["available"] = True
     payload["dan"] = dan.estimate(payload["overall"])
     payload["scale"] = dan.scale_table()
     if key:
-        _MSD_CACHE[key] = payload
-        _save_msd_cache()
+        with _MSD_LOCK:
+            _MSD_CACHE[key] = payload
+            _save_msd_cache()
     return payload
 
 
@@ -667,8 +708,8 @@ def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str]
 
     cur_acc = cur_w / total * 100.0
     new_acc = new_w / total * 100.0
-    cur_combo = _combo_metrics(cur_js)
-    new_combo = _combo_metrics(new_js)
+    cur_combo = max_combo_from(cur_js)
+    new_combo = max_combo_from(new_js)
     # 分数用官方的 ScoreV1 公式（基础分 + 奖励分）直接算，两端同一把尺子，不做任何比例校准。
     # 回放头里的官方分数单独放在 officialScore 里，只作对照。
     cur_model = _v1_score(cur_js, mods)
@@ -768,7 +809,7 @@ def _file_hash(path: str) -> str:
         return ""
 
 
-def _replay_block(replay: Replay, verify: dict) -> dict:
+def _replay_block(replay: Replay, verify: dict, column_order: list[int] | None = None) -> dict:
     """回放元信息块（玩家、Mod、头部判定数、解析自检）。
 
     身份字段（做"同一张谱的两次游玩对比"必须靠它们）：
@@ -791,18 +832,36 @@ def _replay_block(replay: Replay, verify: dict) -> dict:
         "date": replay.timestamp.strftime("%Y-%m-%d %H:%M") if replay.timestamp else "",
         "headerCounts": replay.header_judgements,
         "frames": len(replay.frames),
+        # Random mod 推断出的列序（谱面列 → 按键列）；没开 Random 时为 null。
+        # 放在回放块里，是因为它描述的是"这一局怎么打的"，而不是谱面本身。
+        "columnOrder": column_order,
         "verified": verify,
     }
 
 
-def analyze(
-    replay_path: str,
-    beatmap_path: str | None = None,
-    songs_root: str | None = None,
-) -> dict:
-    started = time.time()
-    timings: dict[str, float] = {}
-    _mark = time.time()
+class _Stopwatch:
+    """分段计时：每调一次 mark(key) 就把「距上一次」的毫秒数记进 timings。
+
+    这些数字只用于诊断（页面与日志里能看到哪一段慢），但要保证 key 出现的位置
+    与实际阶段一一对应，所以「上次时刻」不能散在 analyze 里手动维护。
+    """
+
+    def __init__(self) -> None:
+        self.started = time.time()
+        self.timings: dict[str, float] = {}
+        self._last = time.time()
+
+    def mark(self, key: str) -> None:
+        now = time.time()
+        self.timings[key] = round((now - self._last) * 1000, 1)
+        self._last = now
+
+    def elapsed_ms(self) -> int:
+        return round((time.time() - self.started) * 1000)
+
+
+def _load_replay(replay_path: str) -> Replay:
+    """读回放并挡掉「不是 mania」「一个事件都没有」这两种必须中断的情况。"""
     replay = parse_osr(replay_path)
     if replay.mode != 3:
         raise AnalyzeError(
@@ -812,52 +871,113 @@ def analyze(
     if not replay.frames:
         # 没有事件 ≠ 全部漏接。真实回放至少会有帧；零帧基本是文件没写完/已损坏。
         raise AnalyzeError("回放里没有任何事件（文件可能没写完或已损坏），换一份完整的回放再试。")
+    return replay
 
+
+def _apply_random_order(order: list[int], presses, releases) -> None:
+    """按推断出的列序，把回放里的按键列翻回谱面列。
+
+    翻按键而不是改谱面：分列统计、键型、MSD 都按谱面原本的列号说话，
+    这一点和 Mirror 的处理保持一致。
+    """
+    inverse = [0] * len(order)
+    for note_col, press_col in enumerate(order):
+        inverse[press_col] = note_col
+    for ev in presses:
+        if 0 <= ev.column < len(inverse):
+            ev.column = inverse[ev.column]
+    for ev in releases:
+        if 0 <= ev.column < len(inverse):
+            ev.column = inverse[ev.column]
+
+
+def _random_notice(order: list[int], best: float, second: float) -> str:
+    """把推断结果说清楚：列序是什么、依据多强、哪些数字会受影响。"""
+    mapping = "、".join("%d→%d" % (note_col, press_col) for note_col, press_col in enumerate(order))
+    text = (
+        "检测到 Random mod：回放里的按键列被打乱过，已按这一局按键与音符的吻合度推断出列序"
+        "（谱面列→按键列：%s；按这套列序重算的准确率是 %.1f%%）。分列统计仍按谱面原本的列号。"
+        % (mapping, best * 100)
+    )
+    if best < 0.5:
+        text += "推断的把握不大（重算准确率偏低），请确认这份回放是不是配错了谱面。"
+    elif best - second < 0.05:
+        text += ("但这张图的音符在时间上分不出列（换一套列序也有 %.1f%%），"
+                 "列序仅供参考，整体准确率不受影响。" % (second * 100))
+    return text
+
+
+def _flip_mirror(beatmap: Beatmap, presses, releases) -> None:
+    """Mirror：把按键列号翻回谱面坐标系。
+
+    回放里记的是「玩家看到的」列号，而谱面文件没变。不翻回来的话，第 i 列的音符
+    会去配第 i 列的按键，实际该配的是 keys-1-i 列——每一击都错位，准确率会掉到离谱
+    （实测 99.5% 变 67%）。只在按键侧翻转、谱面保持原样，这样分列统计仍是
+    「谱面第几列」的口径。
+    """
+    flip = beatmap.keys - 1
+    for ev in presses:
+        ev.column = flip - ev.column
+    for ev in releases:
+        ev.column = flip - ev.column
+
+
+def _prepare_events(replay: Replay, beatmap_path: str | None, songs_root: str | None):
+    """定位谱面、抽按键事件、处理 Random / Mirror。
+
+    返回（谱面, 来源, 按键, 松手, 提示语, 推断出的列序或 None）。
+    """
     beatmap, source = _find_beatmap(replay, beatmap_path, songs_root)
+    # 键数检查放在抽事件之前：4K 以外的谱面不必再算配对与键型，直接给结论
+    ensure_supported(beatmap)
     presses, releases = extract_events(replay.frames)
 
-    if replay.mods & MOD_MR:
-        # Mirror 把整个键位左右镜像：回放里记的是「玩家看到的」列号，
-        # 而谱面文件没变。不翻回来的话，第 i 列的音符会去配第 i 列的按键，
-        # 实际该配的是 keys-1-i 列——每一击都错位，准确率会掉到离谱（实测 99.5% 变 67%）。
-        # 只在按键侧翻转、谱面保持原样，这样分列统计仍是「谱面第几列」的口径。
-        flip = beatmap.keys - 1
-        for ev in presses:
-            ev.column = flip - ev.column
-        for ev in releases:
-            ev.column = flip - ev.column
-    timings["parse"] = round((time.time() - _mark) * 1000, 1)
-    _mark = time.time()
+    warn = ""
+    column_order = None
+    if replay.mods & MOD_RANDOM:
+        # Random 会重排四列，而重排结果不在 .osr 里，只能从这一局反推。
+        # 推断出的列序已经包含 Mirror 的效果（两者叠加仍是一个列序），所以不再单独翻镜像。
+        order, best, second = infer_random_order(beatmap, presses, releases)
+        _apply_random_order(order, presses, releases)
+        warn += _random_notice(order, best, second)
+        column_order = order
+    elif replay.mods & MOD_MR:
+        _flip_mirror(beatmap, presses, releases)
 
-    warn = _warnings(replay, beatmap, presses)
+    warn += _warnings(replay, beatmap, presses)
     if not presses:
         warn += (
             "这份回放里没有任何按键事件，所有物件都会记为漏接。"
             "如果这不是你打的那一局，文件可能没写完或已损坏。"
         )
+    return beatmap, source, presses, releases, warn, column_order
 
+
+def _pair(beatmap: Beatmap, presses, releases) -> MatchResult:
     match = match_replay(beatmap, presses, releases)
-    timings["match"] = round((time.time() - _mark) * 1000, 1)
-    _mark = time.time()
     if not match.notes:
         raise AnalyzeError("谱面里没有可分析的物件，或者回放与谱面完全不匹配。")
+    return match
 
+
+def _build_contexts(beatmap: Beatmap):
+    """每音符上下文 + 分块粗分类。
+
+    必须先分块再 classify：先分块定大方向（叠 / 乱 / 切 / tech），
+    再让每个音符在所属大类内挑细分键型，单个音符的抖动就改不了结论。
+    """
     contexts = patterns.build_context(beatmap)
-    # 先分块定大方向（叠 / 乱 / 切 / tech），再让每个音符在所属大类内挑细分键型。
-    # 必须在 classify 之前做：attribution 会按音符取键型。
     blocks = patterns.build_blocks(contexts, beatmap.keys, [o.is_hold for o in beatmap.objects])
     patterns.assign_coarse(contexts, blocks)
-    timings["context"] = round((time.time() - _mark) * 1000, 1)
-    _mark = time.time()
-    # 按 obj_index 建一次索引：后面逐条失误都要取上下文，用 next() 扫全表是 O(n²)
-    ctx_by_index = {c.index: c for c in contexts}
-    atts, cat_summary = attribution.classify_all(match, contexts)
-    timings["classify"] = round((time.time() - _mark) * 1000, 1)
-    _mark = time.time()
+    return contexts, blocks
 
+
+def _verify_against_header(match: MatchResult, replay: Replay, warn: str) -> tuple[dict, str]:
+    """把重算的判定数与回放头对一遍，差太多时补一句"这份结果仅供参考"。
+
+    不拿"任何一项不相等"当条件 —— DT/HT 的判定窗口口径本来就有出入，那样会频繁误报。
+    """
     verify = compare_with_header(match, replay.header_judgements)
-    # 回放头记录的漏接数 vs 重算：差太多说明文件不完整、或者配错了谱面。
-    # 不拿"任何一项不相等"当条件 —— DT/HT 的判定窗口口径本来就有出入，那样会频繁误报。
     header_miss = verify["header"]["miss"]
     mine_miss = verify["mine"]["miss"]
     header_total = verify["total_header"]
@@ -866,6 +986,32 @@ def analyze(
             "重算出的漏接数（%d）与回放头记录（%d）差得较多，"
             "文件可能不完整或与谱面不匹配，这份结果仅供参考。" % (mine_miss, header_miss)
         )
+    return verify, warn
+
+
+def analyze(
+    replay_path: str,
+    beatmap_path: str | None = None,
+    songs_root: str | None = None,
+) -> dict:
+    watch = _Stopwatch()
+    replay = _load_replay(replay_path)
+    beatmap, source, presses, releases, warn, column_order = _prepare_events(
+        replay, beatmap_path, songs_root)
+    watch.mark("parse")
+
+    match = _pair(beatmap, presses, releases)
+    watch.mark("match")
+
+    contexts, blocks = _build_contexts(beatmap)
+    watch.mark("context")
+
+    # 按 obj_index 建一次索引：后面逐条失误都要取上下文，用 next() 扫全表是 O(n²)
+    ctx_by_index = {c.index: c for c in contexts}
+    atts, cat_summary = attribution.classify_all(match, contexts, blocks)
+    watch.mark("classify")
+
+    verify, warn = _verify_against_header(match, replay, warn)
     combo_breaks = _combo_breaks(match)
     cat_by_note = {id(a.note): a.category for a in atts}
     timeline = _timeline(match, None, cat_by_note, replay.rate)
@@ -873,15 +1019,15 @@ def analyze(
     columns = _column_stats(match)
     histo = _offset_histogram(match)
     beatmap_payload = _beatmap_summary(beatmap, source, _peak_nps(match.notes))
+    watch.mark("assemble")
 
-    timings["assemble"] = round((time.time() - _mark) * 1000, 1)
     pattern_detail = _pattern_breakdown(contexts)
 
     payload = {
         "ok": True,
         "version": __version__,
         "warnings": [w for w in [warn] if w],
-        "replay": _replay_block(replay, verify),
+        "replay": _replay_block(replay, verify, column_order),
         "beatmap": beatmap_payload,
         "summary": _summary(match, replay, atts, combo_breaks),
         "timeline": timeline,
@@ -889,7 +1035,7 @@ def analyze(
         "sections": sections,
         "columnStats": columns,
         "notes": _compact_notes(match, atts),
-        "errors": _error_payload(atts, ctx_by_index),
+        "errors": _error_payload(atts, ctx_by_index, (cat_summary.get("profile") or {}).get("stamina")),
         "patterns": _pattern_stats(match, ctx_by_index),
         # 分段的粗分类（叠 / 乱 / 切 / tech）：键型判断先看整段再挑细分，
         # 前端可以在时间轴上把这条带画出来，让人一眼看出这首歌由哪几段构成。
@@ -917,8 +1063,8 @@ def analyze(
         "projection": _projection(match, atts, replay.score, replay.mod_names),
         # 谱面难度（MinaCalc MSD）：与回放无关，纯看谱面；页面上画成雷达图
         "msd": msd_for(replay.beatmap_md5, beatmap),
-        "elapsedMs": round((time.time() - started) * 1000),
-        "timings": timings,
+        "elapsedMs": watch.elapsed_ms(),
+        "timings": watch.timings,
     }
     # 回放文件没写完（压缩块被截断）时，前端要明确告诉用户"这是残卷"，别让人以为数据就是这么多
     if getattr(replay, "truncated", False):
@@ -928,4 +1074,5 @@ def analyze(
         )
 
     payload["evaluation"] = report.build_evaluation(payload)
+    # 相似谱面不在这里算：难度要用前端 Sunny 算出的段位，等页面拿到段位后调 /api/recommend
     return payload

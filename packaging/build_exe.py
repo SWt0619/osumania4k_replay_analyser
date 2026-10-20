@@ -43,7 +43,7 @@ def main() -> int:
         "--collect-submodules", "app",
         "--add-data", os.path.join(ROOT, "app", "web") + sep + "app/web",
         "--add-data", os.path.join(ROOT, "vendor", "minacalc") + sep + "vendor/minacalc",
-        "--add-data", os.path.join(ROOT, "data", "dan_scale.json") + sep + "data",
+        "--add-data", os.path.join(ROOT, "data") + sep + "data",
         "--distpath", args.out,
         "--workpath", args.work,
         "--specpath", args.work,

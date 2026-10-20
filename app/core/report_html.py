@@ -7,11 +7,11 @@ exe 版的"把回放拖到 exe 上"用它；以后要加别的导出入口（命
 from __future__ import annotations
 
 import html as html_mod
-import json
 import os
 import re
 
 from .. import paths
+from . import json_safe
 
 
 def _read(path: str) -> str:
@@ -44,8 +44,11 @@ def build_report_html(data: dict) -> str:
         page,
         count=1,
     )
-    # 去掉所有外部脚本
-    page = re.sub(r'<script src="[^"]*"></script>\s*', "", page)
+    # 去掉所有外部脚本。这里必须匹配任意属性顺序：段位估算那个标签是
+    # `<script type="module" src=...>`，只认 `<script src=` 会把它漏在报告里，
+    # 离线打开时它去请求 /static/js/…，控制台留一条加载失败。
+    # （段位估算依赖服务端接口与 ES module，本来就不进单文件报告。）
+    page = re.sub(r'<script\b[^>]*\bsrc="[^"]*"[^>]*>\s*</script>\s*', "", page)
 
     # 报告里不需要的东西：空状态、导入按钮、曲库状态条。
     # 只按元素起始标签做替换，避免动到别处的同名文字。
@@ -54,7 +57,7 @@ def build_report_html(data: dict) -> str:
     page = page.replace('<div class="chip" id="libChip"', '<div class="chip" id="libChip" hidden')
 
     payload = (
-        json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        json_safe.dumps(data, separators=(",", ":"))
         .replace("</", "<\\/")
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")

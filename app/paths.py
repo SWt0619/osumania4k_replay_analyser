@@ -21,9 +21,41 @@ ROOT = os.path.dirname(APP_DIR)
 DATA_ROOT = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else ROOT
 
 WEB_DIR = os.path.join(APP_DIR, "web")
-CACHE_DIR = os.path.join(DATA_ROOT, "_cache") if FROZEN else os.path.join(ROOT, "app", "_cache")
 LOCAL_REPLAY_DIR = os.path.join(DATA_ROOT, "_replays")
 REPORT_DIR = os.path.join(DATA_ROOT, "报告")
+
+
+def _writable(path: str) -> bool:
+    """真去建一下、再写一个文件试试 —— 只看 os.access 在 Windows 上会误判。"""
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".write-test")
+        with open(probe, "w", encoding="ascii") as f:
+            f.write("ok")
+        os.remove(probe)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _pick_cache_dir() -> tuple[str, bool]:
+    """可写的缓存目录。装到只读位置时退到 %TEMP%，别让 import 就把进程带崩。
+
+    这一层必须在模块导入时做完：config_store 等模块是按值 `from ..paths import CACHE_DIR`
+    拿走的，等到 server 起来再改就晚了。
+    """
+    primary = os.path.join(DATA_ROOT, "_cache") if FROZEN else os.path.join(ROOT, "app", "_cache")
+    if _writable(primary):
+        return primary, False
+    import tempfile
+
+    fallback = os.path.join(tempfile.gettempdir(), "osumania_replay_analyser")
+    if _writable(fallback):
+        return fallback, True
+    return primary, False          # 两边都写不了：保持原样，后面报错会带真实路径
+
+
+CACHE_DIR, CACHE_FALLBACK = _pick_cache_dir()
 
 PORT_FILE = os.path.join(CACHE_DIR, "port.txt")
 PID_FILE = os.path.join(CACHE_DIR, "server.pid")

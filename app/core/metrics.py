@@ -193,9 +193,12 @@ def density_error_profile(
 
 
 def trend_significance(profile: list[BucketStat]) -> dict:
-    """粗略判断"错误率是否随密度上升"。
+    """粗略判断"错误率是否随密度上升"，不引回归库。
 
-    用相邻桶错误率差 + 端点对比，给出一个 0..1 的"陡峭度"评分，避免引入回归库。
+    只用三个便宜的量：
+      * slope_score —— 端点落差除以 0.5 后夹到 0..1，当"陡峭度"；
+      * monotonic   —— 相邻桶里最多允许一次回落；
+      * jump / ratio —— 端点差与端点比值，报告里直接引用这两句话的数字。
     """
     usable = [b for b in profile if b.count >= 5]
     if len(usable) < 3:

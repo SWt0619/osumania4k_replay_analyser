@@ -302,6 +302,7 @@ canvas { display: block; }
 #histCard { grid-column: span 7; }
 #adviceCard { grid-column: span 5; }
 #metaCard { grid-column: span 12; }
+#similarCard { grid-column: span 12; }
 
 .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
 /* 回放页：竖屏舞台。mania 的谱面本来就是纵向读的，宽屏时一屏只能看到几拍，
@@ -888,3 +889,26 @@ canvas { display: block; }
   .e-cat { grid-column: 1 / -1; justify-self: start; }
   .kv { grid-template-columns: minmax(0, 1fr); }
 }
+
+
+/* ---------------------------------------------------------------- 相似谱面 */
+.similar-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.similar-item {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  background: var(--glass-2); border: 1px solid var(--stroke);
+  transition: background .18s ease, border-color .18s ease;
+}
+.similar-item:hover { background: var(--glass-3); border-color: var(--stroke-2); }
+.s-main { flex: 1; min-width: 0; }
+.s-title {
+  display: block; color: var(--text); font-weight: 600; text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.s-title:hover { color: var(--accent-2); }
+.s-meta { margin-top: 3px; font-size: 12px; color: var(--dim); }
+.s-dl {
+  flex: none; font-size: 12px; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--stroke-2); color: var(--accent-2); text-decoration: none;
+}
+.s-dl:hover { background: var(--accent-soft); }

@@ -1007,8 +1007,28 @@
     if (allBtn) allBtn.hidden = remain <= ERROR_PAGE;
   }
 
+  // ---------------------------------------------------------------- 相似谱面
+  // 难度轴是段位，而段位要前端用 Sunny 算（后端没有 JS 运行时），所以这条链是：
+  // 「先算段位 → 把段位标签发给后端 → 后端用会话里已有的键型构成去索引里找」。
+  // 任何一步失败都只是这张卡片不出现，不影响报告其余部分，也不弹错误。
+  async function loadSimilar(data) {
+    const res = await window.UI.applySunnyDan(data);
+    if (!res || !res.label || state.data !== data) return;
+    const items = await window.API.similar(data.session, res.label);
+    if (state.data !== data) return;   // 期间换了回放，别把上一局的结果画上来
+    window.UI.renderSimilar(items);
+  }
+
   // ---------------------------------------------------------------- 主渲染
   function renderAnalysis(data, meta) {
+    // 最后一道闸：后端已经拒过 4K 以外的谱面，这里再挡一次是为了"页面连着旧版服务"的情况
+    // （改完代码但服务没重启）。宁可什么都不显示，也不要让人看到一份没有依据的报告。
+    const keys = data && data.beatmap ? Number(data.beatmap.keys) : 0;
+    if (keys && keys !== 4) {
+      window.UI.loading(false);
+      window.UI.toast("本工具只支持 4K（4 键）谱面，这份是 " + keys + "K，已停止显示", true);
+      return;
+    }
     closeCompare();     // 换了主回放，对比自然失效
     state.data = data;
     state.selectedError = null;
@@ -1032,6 +1052,8 @@
     window.UI.renderTrack(data);
     window.UI.renderHero(data);
     window.UI.renderMsd(data);
+    window.UI.renderSimilar(null);   // 段位还没算出来，这张卡片先不显示
+    void loadSimilar(data);          // 异步：算段位 → 要推荐 → 再画
     window.UI.renderCategories(data);
     window.UI.renderMeta(data);
     window.UI.renderSections(data);
@@ -1247,6 +1269,11 @@
       window.UI.toast("这是 " + file.name + "，不是回放文件（需要 .osr）", true);
       return;
     }
+    if (file.size === 0) {
+      // 空文件在后端只会得到一句「没有收到回放文件」，用户容易以为是自己没拖好
+      window.UI.toast("这个文件是空的（0 字节）：" + file.name + "。可能是导出时没写成功，重新导出一份再试", true);
+      return;
+    }
     if (file.size > 8 * 1024 * 1024) {
       window.UI.toast("这个文件 " + (file.size / 1048576).toFixed(1) + "MB，回放一般只有几百 KB，确认一下选对了没", true);
       return;
@@ -1291,9 +1318,12 @@
           (xhr) => { state.activeXhr = xhr; }
         );
       } catch (uploadErr) {
-        // 直接上传失败/超时（本机安全软件或代理把大 POST 体整包吞掉的典型表现）：
-        // 自动改走分片通道——把回放切成 24KB 小片逐个发、逐片重试，不再让人干等。
-        if (!state.cancelLoading) throw uploadErr; // 用户已经点了取消
+        // 只有"传输层"失败才该改走分片通道：连不上、超时、被中途掐断
+        // （本机安全软件或代理把大 POST 体整包吞掉的典型表现）。
+        // 后端已经答复过（空文件、坏回放、4K 以外、内部错误）时重发没有意义，
+        // 只会把「没有收到回放文件」盖成「分片 1 被拒绝（HTTP 400）」，把真正的原因弄丢。
+        const answered = !!(uploadErr && (uploadErr.payload || uploadErr.answered));
+        if (!state.cancelLoading || answered) throw uploadErr; // 取消过 / 后端已答复 → 不兜底
         beacon("fallback-chunked", { reason: (uploadErr && uploadErr.message) || "?" });
         state.activeXhr = null;
         data = await window.API.analyzeUploadChunked(
@@ -1341,6 +1371,14 @@
     startWaiting();
     try {
       const b64 = await window.API.fileToBase64(file);
+      // 先只要一份元数据：选错键数（同一图集里常混着 7K 难度）时立刻给结论，
+      // 不必把整份回放重新上传一遍再等后端报错。
+      const meta = await window.API.beatmapMeta(b64);
+      if (meta && meta.keys && Number(meta.keys) !== 4) {
+        window.UI.loading(false);
+        window.UI.toast("本工具只支持 4K（4 键）谱面，你选的是 " + meta.keys + "K：" + meta.label, true);
+        return;
+      }
       const data = await window.API.analyze(state.replayBase64, b64);
       closeModal("bmModal");
       renderAnalysis(data);
@@ -1372,6 +1410,11 @@
         ul.appendChild(li);
       });
       if (!(res.items || []).length) ul.appendChild(el("li", "muted", "没有匹配的谱面"));
+      // 非 4K 的谱面被后端滤掉了。不说一声的话，用户会以为曲库里根本没有这张图。
+      if (res.hidden) {
+        ul.appendChild(el("li", "muted",
+          "另有 " + res.hidden + " 张非 4K 谱面未列出（本工具只支持 4K）"));
+      }
     } catch (e) {
       window.UI.toast(e.message || "搜索失败", true);
     }

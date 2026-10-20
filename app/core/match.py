@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import bisect
+import itertools
 import math
 from dataclasses import dataclass, field
 
@@ -60,6 +61,25 @@ def combo_multiplier(combo: int) -> float:
     if combo > COMBO_MULT_CAP:
         return math.log(COMBO_MULT_CAP, 4)
     return math.log(combo, 4)
+
+
+def max_combo_from(judgements) -> int:
+    """最长连击：mania 里任何非 miss 都保连。
+
+    单独一个函数，是因为「什么算断连」要在两处用同一把尺子：
+    汇总里的 maxCombo，以及「修掉几处失误后连击能到多少」的预估。
+    以前两处各写一遍，规则一改就只改到一边。
+    """
+    best = 0
+    run = 0
+    for j in judgements:
+        if j == "miss":
+            run = 0
+        else:
+            run += 1
+            if run > best:
+                best = run
+    return best
 
 
 @dataclass
@@ -234,15 +254,8 @@ class MatchResult:
         return score, score_v2_grade(acc)
 
     def max_combo(self) -> int:
-        best = 0
-        cur = 0
-        for n in self.notes:
-            if n.judgement == "miss" or n.dropped:
-                cur = 0
-            else:
-                cur += 1
-                best = max(best, cur)
-        return best
+        """最长连击。长按掉判定在 judgement 里已经是 miss，所以只看判定名就够。"""
+        return max_combo_from([n.judgement for n in self.notes])
 
     def deltas(self) -> list[float]:
         return [n.delta for n in self.notes if n.delta is not None]
@@ -299,6 +312,29 @@ def _group_columns(
     return notes_by_col, presses_by_col, release_by_col, ghosts
 
 
+def _pair_indices(note_times: list[float], press_times: list[float], hit_window: float):
+    """纯配对：按贪心规则产出 (音符下标, 按键下标) 对。
+
+    单独抽出来是因为「什么算配上」只有这一份定义：真正的判定用它，
+    Random mod 推断列序时也用它（那边只关心配上了多少权重，不需要建对象）。
+    规则说明见 `_pair_column`。
+    """
+    i = 0
+    j = 0
+    n = len(note_times)
+    m = len(press_times)
+    while i < n and j < m:
+        if press_times[j] < note_times[i] - hit_window:
+            j += 1
+            continue
+        if press_times[j] > note_times[i] + hit_window:
+            i += 1
+            continue
+        yield i, j
+        i += 1
+        j += 1
+
+
 def _pair_column(
     col: int,
     notes: list[HitObject],
@@ -321,19 +357,14 @@ def _pair_column(
     配对窗口，于是"晚 164ms 的那一下"会被记成前一颗物件的 miss 并消耗掉，连锁导致
     后面两三颗明明打中了却被算成漏接，acc 能差出 0.08pp。
     """
-    i = 0
-    j = 0
-    while i < len(notes) and j < len(press_times):
-        note = notes[i]
-        pt = press_times[j]
-        if pt < note.time - hit_window:
-            ghosts.append(GhostPress(time=pt, column=col))
-            j += 1
-            continue
-        if pt > note.time + hit_window:
+    times = [n.time for n in notes]
+    matched = dict(_pair_indices(times, press_times, hit_window))
+    for i, note in enumerate(notes):
+        j = matched.get(i)
+        if j is None:
             out.append(_make_miss(note))
-            i += 1
             continue
+        pt = press_times[j]
         delta = pt - note.time
         judgement = judge_offset(delta, od_value)
         if judgement == "miss":
@@ -342,14 +373,64 @@ def _pair_column(
             out.append(_make_miss(note, press_time=pt, delta=delta))
         else:
             out.append(_make_hit(note, pt, delta, judgement))
-        i += 1
-        j += 1
-    while i < len(notes):
-        out.append(_make_miss(notes[i]))
-        i += 1
-    while j < len(press_times):
-        ghosts.append(GhostPress(time=press_times[j], column=col))
-        j += 1
+    used = set(matched.values())
+    for j, pt in enumerate(press_times):
+        if j not in used:
+            ghosts.append(GhostPress(time=pt, column=col))
+
+
+def _column_weight(notes: list[HitObject], press_times: list[float],
+                   hit_window: float, od_value: float) -> float:
+    """把某一列音符与某一列按键配一遍，返回累计的 v1 权重（0..音符数）。
+
+    只累加权重、不建判定对象：推断列序要把 4×4 种组合都比一遍，
+    建对象纯属浪费。
+    """
+    times = [n.time for n in notes]
+    total = 0.0
+    for i, j in _pair_indices(times, press_times, hit_window):
+        total += V1_WEIGHTS.get(judge_offset(press_times[j] - times[i], od_value), 0.0)
+    return total
+
+
+def infer_random_order(beatmap: Beatmap, presses, releases,
+                       od: float | None = None) -> tuple[list[int], float, float]:
+    """推断 Random mod 打乱后的列序。
+
+    Random 会把四列的顺序重新排一遍，回放里记的是重排**之后**的列号，谱面文件却没变。
+    重排结果没有存进 .osr，所以只能从这一局的数据反推：枚举所有列序，每种都按正常
+    规则配一遍，取「判定权重最高」的那套。
+
+    4 键一共 24 种列序，而配对本来就是逐列做的，所以先算 4×4 的两两权重，
+    再让 24 种列序查表求和 —— 只有 16 次配对的开销。
+
+    返回 (order, best, second)：
+      order[谱面列] = 回放里的按键列；
+      best / second 是按这套列序重算的 v1 准确率（0..1）里最好与次好的两个。
+      两者差距很小，说明这张图的音符在时间上分不出列，推断结果不可当真。
+      同分时优先取原序列（0,1,2,3），也就是"看不出被打乱就不动它"。
+      超过 6 键不推断（列序数量会爆炸），直接按原序列返回。
+    """
+    keys = max(1, beatmap.keys)
+    od_value = beatmap.od if od is None else od
+    hit_window = judgement_windows(od_value)["meh"]
+    notes_by_col, presses_by_col, _release_by_col, _ghost = _group_columns(
+        beatmap, presses, releases, keys)
+    total = sum(len(v) for v in notes_by_col)
+    identity = tuple(range(keys))
+    if not total or keys > 6:
+        return list(identity), 0.0, 0.0
+
+    weights = [[_column_weight(notes_by_col[c], presses_by_col[j], hit_window, od_value)
+                for j in range(keys)] for c in range(keys)]
+    ranked = sorted(
+        ((sum(weights[c][perm[c]] for c in range(keys)), perm)
+         for perm in itertools.permutations(range(keys))),
+        key=lambda item: (-item[0], item[1] != identity),
+    )
+    best_score, best_perm = ranked[0]
+    second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+    return list(best_perm), best_score / total, second_score / total
 
 
 def _hold_judgement(head_delta: float | None, tail_delta: float | None,

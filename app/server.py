@@ -19,6 +19,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -27,8 +28,14 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from app import paths  # noqa: E402
-from app.core import audio_fetch  # noqa: E402
-from app.core.analyze import AnalyzeError, analyze, set_msd_cache_path  # noqa: E402
+from app.core import audio_fetch, config_store, crashreport, json_safe, osu_dirs, recommend  # noqa: E402
+from app.core.analyze import (  # noqa: E402
+    SUPPORTED_KEYS,
+    AnalyzeError,
+    analyze,
+    set_msd_cache_path,
+    unsupported_keys_message,
+)
 from app.core.beatmap import parse_osu_file  # noqa: E402
 from app.core.library import default_songs_roots, get_library, reset_library, set_cache_path  # noqa: E402
 from app.core.osr import OsrError  # noqa: E402
@@ -118,15 +125,6 @@ FAVICON = (
     b'</svg>'
 )
 
-# 备用通道：把 .osr 放进这个目录，服务端直接读，完全不经过浏览器的上传
-LOCAL_REPLAY_DIR = paths.LOCAL_REPLAY_DIR
-os.makedirs(LOCAL_REPLAY_DIR, exist_ok=True)
-
-# 分片上传的中转目录：直接上传被本机安全软件/代理吞掉时的自动兜底通道
-CHUNK_DIR = os.path.join(CACHE_DIR, "chunks")
-CHUNK_MAX = 64 * 1024  # 单片上限，与前端约定一致
-
-
 def log(msg: str) -> None:
     line = "%s %s\n" % (time.strftime("%H:%M:%S"), msg)
     try:
@@ -134,6 +132,85 @@ def log(msg: str) -> None:
             f.write(line)
     except OSError:
         pass
+
+
+# 备用通道：把 .osr 放进这个目录，服务端直接读，完全不经过浏览器的上传
+LOCAL_REPLAY_DIR = paths.LOCAL_REPLAY_DIR
+try:
+    os.makedirs(LOCAL_REPLAY_DIR, exist_ok=True)
+except OSError as _e:      # 只读目录：这一栏用不了，但不该让整个服务起不来
+    log("[startup] 备用通道目录建不出来：%r" % (_e,))
+
+# 分片上传的中转目录：直接上传被本机安全软件/代理吞掉时的自动兜底通道
+CHUNK_DIR = os.path.join(CACHE_DIR, "chunks")
+CHUNK_MAX = 64 * 1024  # 单片上限，与前端约定一致
+
+
+def _write_err(text: str) -> None:
+    """往 stderr 写一行 —— exe（--noconsole）里 stderr 是 None，直接写会再抛一次。"""
+    stream = sys.stderr
+    if stream is None:
+        return
+    try:
+        stream.write(text if text.endswith("\n") else text + "\n")
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _report_crash(event: str, exc: BaseException, context: dict | None = None) -> str | None:
+    """把异常写进日志与 crashreport，返回报告路径（写不出来为 None）。
+
+    顺序是有讲究的：先落日志、再落报告、最后才往 stderr 打字。
+    stderr 在打包形态下不存在，放最后能保证前两步一定执行过。
+    """
+    try:
+        trace = traceback.format_exc()
+    except Exception:  # noqa: BLE001
+        trace = repr(exc)
+    log("[%s] %s" % (event, crashreport.summary(exc)))
+    path = None
+    try:
+        path = crashreport.write(event, exc, context=context)
+    except Exception:  # noqa: BLE001 - 报告模块自己也不该炸，但兜一层
+        path = None
+    if path:
+        log("[%s] 崩溃报告：%s" % (event, path))
+    _write_err(trace)
+    return path
+
+
+# 只接受本机来源：Host 必须指向回环地址（挡 DNS rebinding），
+# Origin 如果存在，主机部分也必须是回环（挡"别的网站借浏览器读本机数据"）。
+_LOOPBACK_NAMES = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _host_ok(value: str) -> bool:
+    text = (value or "").strip().lower()
+    if not text:
+        return True                       # HTTP/1.0 客户端可能不带 Host
+    if text.startswith("["):              # [::1]:8806
+        name = text.partition("]")[0] + "]"
+    else:
+        name = text.partition(":")[0]
+    return name in _LOOPBACK_NAMES
+
+
+def _origin_ok(value: str) -> bool:
+    text = (value or "").strip()
+    if not text:
+        return True                       # 同源 GET、curl、离线报告都不带 Origin
+    try:
+        parts = urllib.parse.urlsplit(text)
+    except ValueError:
+        return False
+    return (parts.scheme in ("http", "https")
+            and (parts.hostname or "").lower() in ("127.0.0.1", "localhost", "::1"))
+
+
+def _field(req: dict, key: str) -> str:
+    """取一个字符串字段。类型不对就当没填 —— 直接 .strip() 会打出一个 500。"""
+    value = req.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 class SessionStore:
     """分析结果与媒体路径的进程内缓存（session_id → 会话）。
@@ -216,6 +293,19 @@ class BodyTooLarge(Exception):
     """请求体超过上限。单独一个类型，是为了让传输层给出 413 而不是通用 500。"""
 
 
+def _is_under(path: str, root: str) -> bool:
+    """path 是否真的在 root 里面（按目录边界比，不是按字符串前缀）。
+
+    只写 startswith 的话，`app/web_evil/x` 会被当成 `app/web` 下的文件放出去；
+    不同盘符时 commonpath 会抛 ValueError，一律当"不在下面"。
+    """
+    try:
+        return os.path.normcase(os.path.commonpath([os.path.abspath(path), os.path.abspath(root)])) \
+            == os.path.normcase(os.path.abspath(root))
+    except ValueError:
+        return False
+
+
 def _write_temp(directory: str, suffix: str, data: bytes) -> str:
     """把上传内容落盘，文件名保证唯一。
 
@@ -238,7 +328,24 @@ def _write_temp(directory: str, suffix: str, data: bytes) -> str:
     return path
 
 
-class _AssetMixin:
+class _SessionView:
+    """会话存储的取用点。
+
+    mixin 里所有「按 sid 拿会话」都从这里走，而不是直接读模块级 SESSIONS。
+    这样既保留一处全局状态（本来就需要跨请求共享），又给测试留了一个替换点：
+    继承这个类并覆盖 sessions 就能塞一份假会话，不必启动完整服务。
+    """
+
+    @property
+    def sessions(self) -> "SessionStore":
+        return SESSIONS
+
+    def _session(self, sid: str) -> dict | None:
+        """按 sid 取会话；取不到时调用方负责给出「会话已过期」。"""
+        return self.sessions.get(sid) if sid else None
+
+
+class _AssetMixin(_SessionView):
     """静态文件与媒体（带 Range）的响应。
 
     与接口无关：不解析请求体、不建会话，只按路径找文件并写响应。
@@ -259,7 +366,7 @@ class _AssetMixin:
 
     def _serve_file(self, full: str):
         full = os.path.abspath(full)
-        if not full.startswith(os.path.abspath(WEB_DIR)):
+        if not _is_under(full, WEB_DIR):
             return self._error("非法路径", 403)
         if not os.path.isfile(full):
             return self._error("文件不存在", 404)
@@ -273,31 +380,12 @@ class _AssetMixin:
         self._send(200, body, ctype)
 
     # ---- 媒体（Range） --------------------------------------------------
-    # 段位估算是前端算的（算法是 JS），它要的是谱面原文而不是我们解析后的 JSON；
-    # 所以单独开一个接口，按会话把 .osu 文本给过去。页面只在打开难度页时才请求。
-    def _beatmap_text(self, qs):
-        sid = (qs.get("session") or [""])[0]
-        sess = SESSIONS.get(sid)
-        if not sess:
-            return self._error("会话已过期，请重新分析", 404)
-        path = sess.get("beatmapPath") or ""
-        if not path or not os.path.isfile(path):
-            return self._error("找不到这张谱面的文件，无法估算段位", 404)
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read()
-        except OSError as e:
-            return self._error("读取谱面失败：%s" % e, 500)
-        if len(text) > 4 * 1024 * 1024:
-            return self._error("谱面文件异常大，已放弃估算", 413)
-        return self._json({"ok": True, "name": os.path.basename(path), "text": text})
-
     def _serve_media(self, rest: str):
         parts = rest.split("/", 1)
         if len(parts) != 2:
             return self._error("非法媒体路径", 404)
         sid, kind = parts[0], parts[1]
-        sess = SESSIONS.get(sid)
+        sess = self._session(sid)
         if not sess:
             return self._error("会话已过期，请重新分析", 404)
         if kind in ("lnbody", "lntail"):
@@ -343,6 +431,11 @@ class _AssetMixin:
                         end = int(last)
                     elif first:
                         end = size - 1
+                # 显式给了结尾也不能越过文件末尾：Content-Length 会按这个值算，
+                # 不夹的话响应头写着 92 字节、实际只发得出 2 字节，
+                # 播放器/下载器读到一半就报 IncompleteRead（或一直等）。
+                if end > size - 1:
+                    end = size - 1
                 if start < 0 or start > end or start >= size:
                     self.close_connection = True
                     self.send_response(416)
@@ -375,14 +468,14 @@ class _AssetMixin:
             pass
 
 
-class _AnalysisApiMixin:
-    """分析相关接口：曲库、谱面元数据、分析、会话与媒体 URL。
+class _ApiMixin(_SessionView):
+    """曲库与谱面查询接口：只读本机文件系统与曲库索引，不碰分析流程。
 
-    只依赖传输层的四个原语（_read_body / _json / _error / _send）和模块级 SESSIONS，
-    换 HTTP 框架时这一层可以整体搬走，业务代码本身不用改。
+    依赖传输层的原语（_read_body / _json / _error，由 Handler 提供），
+    换 HTTP 框架时这一层可以整体搬走，业务代码不用改。
     """
 
-    # ---- API ------------------------------------------------------------
+    # ---- 曲库 -----------------------------------------------------------
     def _library_info(self):
         roots = default_songs_roots()
         lib = get_library(roots[0] if roots else None)
@@ -393,8 +486,6 @@ class _AnalysisApiMixin:
 
     # ---- 游戏目录（自动探测失败时让玩家在网页里手动指定） ----------------
     def _paths_info(self):
-        from app.core import osu_dirs
-
         roots = default_songs_roots()
         lib = get_library(roots[0] if roots else None)
         appdata = os.environ.get("APPDATA") or ""
@@ -413,10 +504,8 @@ class _AnalysisApiMixin:
         })
 
     def _paths_save(self, req: dict):
-        from app.core import osu_dirs
-
-        stable = (req.get("stableDir") or "").strip().strip('"').strip()
-        lazer = (req.get("lazerDir") or "").strip().strip('"').strip()
+        stable = _field(req, "stableDir").strip('"').strip()
+        lazer = _field(req, "lazerDir").strip('"').strip()
 
         notes = []
         if stable:
@@ -430,21 +519,18 @@ class _AnalysisApiMixin:
                 return self._error("lazer 目录有问题：" + msg)
             notes.append("lazer：" + msg)
 
-        data = audio_fetch.load_config(CACHE_DIR)
+        changes = {}
+        remove = []
         for key, val in (("stableDir", stable), ("lazerDir", lazer)):
             if val:
-                data[key] = val
+                changes[key] = val
             else:
-                data.pop(key, None)
+                remove.append(key)
         if stable or lazer:
             # 手动指定了游戏目录，就把更粗略的 songsRoot 清掉，免得两套配置打架
-            data.pop("songsRoot", None)
+            remove.append("songsRoot")
         try:
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            tmp = os.path.join(CACHE_DIR, "config.json.tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, os.path.join(CACHE_DIR, "config.json"))
+            config_store.merge(changes, remove, cache_dir=CACHE_DIR)
         except OSError as e:
             return self._error("保存配置失败：%s" % e, 500)
 
@@ -467,120 +553,27 @@ class _AnalysisApiMixin:
             "hint": "" if lib.entries else "按这个路径还是没找到谱面，确认目录选对了吗？",
         })
 
-    def _analyze(self):
-        raw = self._read_body()
-        log("[analyze] 收到请求体 %.1f KB" % (len(raw) / 1024.0))
-        req = _parse_json(raw)
-        if req is None:
-            return self._error("请求体不是合法 JSON")
-
-        replay_b64 = req.get("replay") or ""
-        if not replay_b64:
-            return self._error("没有收到回放文件")
-        try:
-            replay_bytes = base64.b64decode(replay_b64)
-        except Exception:  # noqa: BLE001
-            return self._error("回放文件的 base64 解码失败")
-
-        tmp_dir = os.path.join(CACHE_DIR, "uploads")
-        replay_path = _write_temp(tmp_dir, ".osr", replay_bytes)
-
-        beatmap_path = None
-        # 允许直接指定曲库里的 .osu 路径（本机工具，只校验后缀与存在性）
-        requested_path = (req.get("beatmapPath") or "").strip()
-        if requested_path:
-            if not requested_path.lower().endswith(".osu") or not os.path.isfile(requested_path):
-                return self._error("指定的谱面路径无效：%s" % requested_path)
-            beatmap_path = requested_path
-
-        beatmap_b64 = req.get("beatmap")
-        if beatmap_b64:
-            try:
-                bm_bytes = base64.b64decode(beatmap_b64)
-            except Exception:  # noqa: BLE001
-                return self._error("谱面文件的 base64 解码失败")
-            beatmap_path = _write_temp(tmp_dir, ".osu", bm_bytes)
-
-        songs_root = (req.get("songsRoot") or "").strip() or None
-        return self._finish_analyze(replay_path, beatmap_path, songs_root)
-
-    def _finish_analyze(self, replay_path: str, beatmap_path: str | None, songs_root: str | None):
-        """分析已落盘的回放并返回 JSON（直接上传 / 分片上传 / 本地文件夹共用）。"""
-        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root)
-        audio, background, note_skin = _resolve_media(payload, beatmap_path, songs_root)
-
-        # 谱面路径要在这里定下来：上传回放时 beatmap_path 是空的，真正的路径是
-        # analyze 内部按 MD5 从曲库解析出来的。不把它解析出来存进会话，
-        # 后面「在线补音频」就拿不到 .osu，也就读不出图集 id。
-        resolved_bm = beatmap_path or _resolve_bm(payload, songs_root)
-        sid = SESSIONS.create(payload, audio, background, note_skin,
-                              beatmap_path=resolved_bm or "",
-                              beatmap_md5=(payload.get("replay") or {}).get("beatmapMd5") or "")
-        payload["session"] = sid
-        cols = note_skin.get("columns") or []
-        payload["media"] = {
-            "audio": bool(audio),
-            "background": bool(background),
-            # 每列的 note 素材 URL（没找到的列为 null，前端回退到色块）
-            "noteImages": [("/api/media/%s/note%d" % (sid, i)) if p else None for i, p in enumerate(cols)],
-            "lnBody": ("/api/media/%s/lnbody" % sid) if note_skin.get("lnBody") else None,
-            "lnTail": ("/api/media/%s/lntail" % sid) if note_skin.get("lnTail") else None,
-        }
-        return self._json(payload)
-
-    # ---- 在线补音频 -----------------------------------------------------------
-    # 只在 lazer 里下载过的谱面，音频和谱面各自按内容哈希存放、彼此没有关联信息，
-    # 本地永远配不上音频。这里按谱面信息去镜像站取一次 .osz，只把音频留下。
-    def _audio_fetch(self):
-        req = _parse_json(self._read_body())
-        if req is None:
-            return self._error("请求体不是合法 JSON")
-        sid = (req.get("session") or "").strip()
-        sess = SESSIONS.get(sid)
-        if not sess:
-            return self._error("会话已过期，请重新分析", 404)
-        if sess.get("audio"):
-            return self._json({"ok": True, "already": True, "source": "local",
-                               "url": "/api/media/%s/audio" % sid})
-        if not audio_fetch.is_enabled(CACHE_DIR):
-            return self._json({"ok": False, "disabled": True, "error": "在线补音频已关闭"})
-
-        md5 = (sess.get("beatmapMd5") or "").strip()
-        log("[audio] 尝试补音频 %s …" % (md5[:8] or "(无 MD5)"))
-        try:
-            result = audio_fetch.fetch_audio(sess.get("beatmapPath") or "", md5, CACHE_DIR,
-                                             force=bool(req.get("force")))
-        except Exception as e:  # noqa: BLE001
-            log("[audio] 异常：%s" % e)
-            return self._json({"ok": False, "error": "补音频时出错：%s" % e})
-
-        if result.get("ok"):
-            SESSIONS.set_audio(sid, result["path"])
-            result["url"] = "/api/media/%s/audio" % sid
-            log("[audio] 已补上：%s（%s）" % (os.path.basename(result["path"]), result.get("source")))
-        else:
-            log("[audio] 没补到：%s" % result.get("error"))
-        return self._json(result)
-
-    def _audio_pref(self):
-        req = _parse_json(self._read_body()) or {}
-        if "enabled" in req:
-            audio_fetch.set_enabled(CACHE_DIR, bool(req.get("enabled")))
-            log("[audio] 在线补音频 = %s" % audio_fetch.is_enabled(CACHE_DIR))
-        return self._json({"ok": True, "enabled": audio_fetch.is_enabled(CACHE_DIR),
-                           "stats": audio_fetch.stats(CACHE_DIR)})
-
+    # ---- 谱面查询 -------------------------------------------------------
     def _beatmap_search(self):
         # 搜索是"边打边搜"的：请求体坏掉时退回空查询，比弹一个错更不打扰
         req = _parse_json(self._read_body()) or {}
         roots = default_songs_roots()
-        lib = get_library(req.get("songsRoot") or (roots[0] if roots else None))
-        hits = lib.search(req.get("query", ""), limit=40)
+        lib = get_library(_field(req, "songsRoot") or (roots[0] if roots else None))
+        hits = lib.search(_field(req, "query"), limit=40)
         out = []
+        hidden = 0
         for e in hits:
             try:
                 bm = parse_osu_file(e.path)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                # 单张谱面坏了不该让整次搜索失败，但也不能悄悄消失 ——
+                # 之前这里只 continue，用户只会觉得"曲库里怎么没这张图"。
+                log("[search] 跳过解析失败的谱面：%s（%s）" % (os.path.basename(e.path), e))
+                continue
+            # 非 4K 的谱面不进列表：选了也会在分析时被拒，列出来只是让人白点一次。
+            # 但要如实告诉用户"隐藏了几张"，否则会以为曲库里没有这张图。
+            if bm.keys != SUPPORTED_KEYS:
+                hidden += 1
                 continue
             out.append(
                 {
@@ -591,7 +584,7 @@ class _AnalysisApiMixin:
                     "notes": len(bm.objects),
                 }
             )
-        return self._json({"ok": True, "count": len(out), "items": out})
+        return self._json({"ok": True, "count": len(out), "items": out, "hidden": hidden})
 
     def _beatmap_meta(self):
         req = _parse_json(self._read_body())
@@ -615,6 +608,10 @@ class _AnalysisApiMixin:
             return self._error("谱面解析失败：%s" % e)
         if not bm.objects:
             return self._error("这份谱面里没有任何物件，确认一下选的是不是 mania 难度")
+        # 键数在"选谱面"这一步就挡住：等回放重新上传一遍再报错太绕，
+        # 而且用户多半是选错了同一图集里的 7K 难度。
+        if bm.keys != SUPPORTED_KEYS:
+            return self._error(unsupported_keys_message(bm))
         return self._json(
             {
                 "ok": True,
@@ -625,6 +622,119 @@ class _AnalysisApiMixin:
             }
         )
 
+    # ---- 段位估算用的谱面原文 -------------------------------------------
+    # 段位估算是前端算的（算法是 JS），它要的是谱面原文而不是我们解析后的 JSON；
+    # 所以单独开一个接口，按会话把 .osu 文本给过去。页面只在打开难度页时才请求。
+    def _beatmap_text(self, qs):
+        sid = (qs.get("session") or [""])[0]
+        sess = self._session(sid)
+        if not sess:
+            return self._error("会话已过期，请重新分析", 404)
+        path = sess.get("beatmapPath") or ""
+        if not path or not os.path.isfile(path):
+            return self._error("找不到这张谱面的文件，无法估算段位", 404)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as e:
+            return self._error("读取谱面失败：%s" % e, 500)
+        if len(text) > 4 * 1024 * 1024:
+            return self._error("谱面文件异常大，已放弃估算", 413)
+        return self._json({"ok": True, "name": os.path.basename(path), "text": text})
+
+
+class _AnalyzeApiMixin(_SessionView):
+    """分析接口：上传（整包 / 分片 / 本地目录）→ analyze() → 建会话 → 带 media URL 的 JSON。
+
+    会话在这里创建，媒体 URL 也在这里拼：两者必须用同一个 sid，
+    分开写会拼出「会话存在、URL 指向另一个 id」这种只在播放时才暴露的问题。
+    """
+
+    def _analyze(self):
+        raw = self._read_body()
+        log("[analyze] 收到请求体 %.1f KB" % (len(raw) / 1024.0))
+        req = _parse_json(raw)
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+
+        replay_b64 = req.get("replay") or ""
+        if not replay_b64:
+            return self._error("没有收到回放文件")
+        try:
+            # 与 _beatmap_meta 用同一口径：不校验的话 "!!!" 会被静默解成空字节，
+            # 后面报的是「文件是空的」，用户看不出真正的问题是这段请求体坏了。
+            replay_bytes = base64.b64decode(replay_b64, validate=True)
+        except Exception:  # noqa: BLE001
+            return self._error("回放文件的 base64 解码失败")
+
+        tmp_dir = os.path.join(CACHE_DIR, "uploads")
+        replay_path = _write_temp(tmp_dir, ".osr", replay_bytes)
+
+        beatmap_path = None
+        # 允许直接指定曲库里的 .osu 路径（本机工具，只校验后缀与存在性）
+        requested_path = _field(req, "beatmapPath")
+        if requested_path:
+            if not requested_path.lower().endswith(".osu") or not os.path.isfile(requested_path):
+                return self._error("指定的谱面路径无效：%s" % requested_path)
+            beatmap_path = requested_path
+
+        beatmap_b64 = req.get("beatmap")
+        if beatmap_b64:
+            try:
+                bm_bytes = base64.b64decode(beatmap_b64)
+            except Exception:  # noqa: BLE001
+                return self._error("谱面文件的 base64 解码失败")
+            beatmap_path = _write_temp(tmp_dir, ".osu", bm_bytes)
+
+        songs_root = _field(req, "songsRoot") or None
+        return self._finish_analyze(replay_path, beatmap_path, songs_root)
+
+    def _finish_analyze(self, replay_path: str, beatmap_path: str | None, songs_root: str | None):
+        """分析已落盘的回放并返回 JSON（直接上传 / 分片上传 / 本地文件夹共用）。"""
+        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root)
+        audio, background, note_skin = _resolve_media(payload, beatmap_path, songs_root)
+
+        # 谱面路径要在这里定下来：上传回放时 beatmap_path 是空的，真正的路径是
+        # analyze 内部按 MD5 从曲库解析出来的。不把它解析出来存进会话，
+        # 后面「在线补音频」就拿不到 .osu，也就读不出图集 id。
+        resolved_bm = beatmap_path or _resolve_bm(payload, songs_root)
+        sid = self.sessions.create(payload, audio, background, note_skin,
+                                   beatmap_path=resolved_bm or "",
+                                   beatmap_md5=(payload.get("replay") or {}).get("beatmapMd5") or "")
+        payload["session"] = sid
+        cols = note_skin.get("columns") or []
+        payload["media"] = {
+            "audio": bool(audio),
+            "background": bool(background),
+            # 每列的 note 素材 URL（没找到的列为 null，前端回退到色块）
+            "noteImages": [("/api/media/%s/note%d" % (sid, i)) if p else None for i, p in enumerate(cols)],
+            "lnBody": ("/api/media/%s/lnbody" % sid) if note_skin.get("lnBody") else None,
+            "lnTail": ("/api/media/%s/lntail" % sid) if note_skin.get("lnTail") else None,
+        }
+        return self._json(payload)
+
+    # ---- 在线补音频 -----------------------------------------------------------
+    # 只在 lazer 里下载过的谱面，音频和谱面各自按内容哈希存放、彼此没有关联信息，
+    # 本地永远配不上音频。这里按谱面信息去镜像站取一次 .osz，只把音频留下。
+
+    # ---- 相似谱面 -------------------------------------------------------
+    # 难度轴是"段位"，而段位由前端用 Sunny 算（后端没有 JS 运行时），
+    # 所以这里接收前端传来的段位标签，用会话里已有的键型构成去索引里找。
+    def _recommend(self):
+        req = _parse_json(self._read_body()) or {}
+        sid = _field(req, "session")
+        sess = self._session(sid)
+        if not sess:
+            return self._error("会话已过期，请重新分析", 404)
+        dan = _field(req, "dan")
+        try:
+            items = recommend.for_session(sess.get("analysis") or {}, dan, limit=5)
+        except Exception as e:  # noqa: BLE001 - 推荐失败不能影响分析结果
+            log("[recommend] 失败：%r" % (e,))
+            items = []
+        return self._json({"ok": True, "items": items})
+
+    # ---- 备用通道：直接读 _replays 目录 ---------------------------------
     def _local_replays(self):
         """列出备用目录里的回放（不经过浏览器上传）。"""
         items = []
@@ -641,7 +751,7 @@ class _AnalysisApiMixin:
         req = _parse_json(self._read_body())
         if req is None:
             return self._error("请求体不是合法 JSON")
-        name = os.path.basename((req.get("name") or "").strip())
+        name = os.path.basename(_field(req, "name"))
         if not name.lower().endswith(".osr"):
             return self._error("请选择 _replays 目录里的 .osr 文件")
         replay_path = os.path.join(LOCAL_REPLAY_DIR, name)
@@ -649,15 +759,148 @@ class _AnalysisApiMixin:
             return self._error("找不到这个文件：" + name)
         t0 = time.time()
         log("[analyze-local] " + name)
-        resp = self._finish_analyze(replay_path, None, (req.get("songsRoot") or None))
+        resp = self._finish_analyze(replay_path, None, _field(req, "songsRoot") or None)
         log("[analyze-local] 完成 用时 %.0f ms" % ((time.time() - t0) * 1000))
         return resp
 
 
-class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
-    """HTTP 传输层：路由、响应头、错误码、日志，以及分片上传。
+class _AudioApiMixin(_SessionView):
+    """在线补音频接口。
 
-    业务接口在 _AnalysisApiMixin，静态与媒体在 _AssetMixin —— 这个类只负责"怎么收发"。
+    只在 lazer 里下载过的谱面，音频和谱面各自按内容哈希存放、彼此没有关联信息，
+    本地永远配不上音频。这里按会话里记的谱面路径去镜像站取一次 .osz，只把音频留下。
+    """
+
+    def _audio_fetch(self):
+        req = _parse_json(self._read_body())
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+        sid = _field(req, "session")
+        sess = self._session(sid)
+        if not sess:
+            return self._error("会话已过期，请重新分析", 404)
+        if sess.get("audio"):
+            return self._json({"ok": True, "already": True, "source": "local",
+                               "url": "/api/media/%s/audio" % sid})
+        if not audio_fetch.is_enabled(CACHE_DIR):
+            return self._json({"ok": False, "disabled": True, "error": "在线补音频已关闭"})
+
+        md5 = (sess.get("beatmapMd5") or "").strip()
+        log("[audio] 尝试补音频 %s …" % (md5[:8] or "(无 MD5)"))
+        try:
+            result = audio_fetch.fetch_audio(sess.get("beatmapPath") or "", md5, CACHE_DIR,
+                                             force=bool(req.get("force")))
+        except Exception as e:  # noqa: BLE001
+            log("[audio] 异常：%s" % e)
+            return self._json({"ok": False, "error": "补音频时出错：%s" % e})
+
+        if result.get("ok"):
+            self.sessions.set_audio(sid, result["path"])
+            result["url"] = "/api/media/%s/audio" % sid
+            log("[audio] 已补上：%s（%s）" % (os.path.basename(result["path"]), result.get("source")))
+        else:
+            log("[audio] 没补到：%s" % result.get("error"))
+        return self._json(result)
+
+    def _audio_pref(self):
+        req = _parse_json(self._read_body()) or {}
+        if "enabled" in req:
+            audio_fetch.set_enabled(CACHE_DIR, bool(req.get("enabled")))
+            log("[audio] 在线补音频 = %s" % audio_fetch.is_enabled(CACHE_DIR))
+        return self._json({"ok": True, "enabled": audio_fetch.is_enabled(CACHE_DIR),
+                           "stats": audio_fetch.stats(CACHE_DIR)})
+
+
+class _ChunkUploadMixin:
+    """分片上传（兜底通道）：把回放切成小片逐个发。
+
+    为什么需要这条通道：直接上传 /api/analyze 时，个别机器上的安全软件/代理会把较大的
+    POST 体整包吞掉（server.log 里表现为 health 之后没有任何 POST 到达）。每片都是独立的
+    小请求，能绕开这种「整包拦截」，还能逐片重试。
+
+    与路由分开的另一个原因：这里的状态全在磁盘上（`_cache/chunks/<sid>/`），
+    与 Handler 的收发逻辑没有交集，混在一起时最难查的是「目录里到底剩了哪些片」。
+    """
+
+    def _upload_chunk(self):
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        sid = re.sub(r"[^0-9a-zA-Z]", "", (qs.get("sid") or [""])[0])[:40]
+        idx = (qs.get("i") or ["0"])[0]
+        if not sid or not idx.isdigit():
+            return self._error("分片参数无效")
+        body = self._read_body(CHUNK_MAX + 1024)
+        if not body:
+            return self._error("分片内容为空")
+        d = os.path.join(CHUNK_DIR, sid)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "%05d.part" % int(idx)), "wb") as f:
+            f.write(body)
+        return self._json({"ok": True, "i": int(idx), "bytes": len(body)})
+
+    @staticmethod
+    def _collect_chunks(directory: str) -> tuple[list[str], str]:
+        """按序号收齐分片，返回（文件名列表, 错误说明）。
+
+        必须按**序号**排（文件名字典序会把第 10 片排到第 2 片前面），
+        并且要求 0..n-1 连续：缺片时直接把剩下的拼起来，会得到一份"能解出前半段"的残卷，
+        结果看起来正常、实际只分析了其中一部分。
+        """
+        numbered = []
+        for fn in os.listdir(directory):
+            if not fn.endswith(".part"):
+                continue
+            stem = fn[: -len(".part")]
+            if stem.isdigit():
+                numbered.append((int(stem), fn))
+        numbered.sort()
+        if not numbered:
+            return [], "分片数据为空，请重新上传"
+        idxs = [i for i, _ in numbered]
+        if idxs != list(range(len(idxs))):
+            missing = sorted(set(range(max(idxs) + 1)) - set(idxs))[:5]
+            return [], "分片不连续（缺第 %s 片），请重新上传" % "、".join(str(i) for i in missing)
+        return [fn for _, fn in numbered], ""
+
+    def _analyze_chunked(self):
+        req = _parse_json(self._read_body())
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+        sid = re.sub(r"[^0-9a-zA-Z]", "", _field(req, "sid"))[:40]
+        d = os.path.join(CHUNK_DIR, sid)
+        if not sid or not os.path.isdir(d):
+            return self._error("分片数据丢失，请重新上传")
+        parts, problem = self._collect_chunks(d)
+        if problem:
+            return self._error(problem)
+
+        replay_path = _write_temp(os.path.join(CACHE_DIR, "uploads"), ".osr", b"")
+        with open(replay_path, "wb") as out:
+            for fn in parts:
+                with open(os.path.join(d, fn), "rb") as f:
+                    out.write(f.read())
+        try:
+            return self._finish_analyze(replay_path, beatmap_path=None, songs_root=_field(req, "songsRoot") or None)
+        finally:
+            try:
+                for fn in parts:
+                    os.remove(os.path.join(d, fn))
+                os.rmdir(d)
+            except OSError:
+                pass
+
+
+class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _AssetMixin,
+              BaseHTTPRequestHandler):
+    """HTTP 传输层：路由、响应头、错误码、日志。
+
+    业务分在四个 mixin 里，这个类只负责"怎么收发"与"往哪儿转"：
+      * _ApiMixin          曲库、游戏目录、谱面查询
+      * _AnalyzeApiMixin   分析、会话、media URL
+      * _AudioApiMixin     在线补音频
+      * _AssetMixin        静态文件与媒体（Range）
+      * _ChunkUploadMixin  分片上传兜底通道
+    它们都只用这里定义的四个原语：_read_body / _json / _error / _send。
     """
 
     server_version = "ManiaReplayLab/" + __version__
@@ -676,9 +919,15 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
             pass
 
     # ---- 基础设施 -------------------------------------------------------
-    def log_message(self, fmt, *args):  # 安静一点，只留错误
-        if args and str(args[0]).startswith("4"):
-            sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
+    def log_message(self, fmt, *args):
+        """只把 5xx 打到 stderr（4xx 已经在 server.log 里，属于正常反馈）。
+
+        http.server 的调用形式是 log_message('"%s" %s %s', 请求行, 状态码, 长度)，
+        所以状态码在 args[1]，不是 args[0]（args[0] 永远是格式串）。
+        """
+        code = str(args[1]) if len(args) > 1 else ""
+        if code.startswith("5"):
+            _write_err("[%s] %s" % (time.strftime("%H:%M:%S"), fmt % args))
 
     def log_request(self, code="-", size="-"):
         """每个请求都进日志（含 GET 与错误码），这样"页面到底请求了什么"一目了然。"""
@@ -696,9 +945,8 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.send_header("X-Asset-Version", self._asset_version())
-        # API 一律带 CORS 头：万一页面是从 file:// 或别的端口打开的，POST 也不会被浏览器拦
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # 这里刻意不发 Access-Control-Allow-Origin：页面是同源打开的，本来不需要；
+        # 发了 "*" 等于允许任意网站读本机数据（见 _guard）。只有 OPTIONS 会按需回显。
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -708,7 +956,7 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
             pass
 
     def _json(self, obj, code: int = 200):
-        self._send(code, json.dumps(obj, ensure_ascii=False, default=_json_default).encode("utf-8"),
+        self._send(code, json_safe.dumps(obj, default=_json_default).encode("utf-8"),
                    "application/json; charset=utf-8")
 
     def _error(self, msg: str, code: int = 400, **extra):
@@ -724,10 +972,28 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
         return self.rfile.read(length) if length > 0 else b""
 
     # ---- 路由 -----------------------------------------------------------
+    def _guard(self) -> bool:
+        """挡住"别的网站借用户浏览器读本机数据"。
+
+        两条就够：Host 必须是回环地址（否则 DNS rebinding 能把任意域名解析到 127.0.0.1，
+        连 CORS 都绕过去）；Origin 如果带了，主机部分也必须是回环。
+        """
+        if not _host_ok(self.headers.get("Host") or ""):
+            self._error("只接受本机访问（Host 不是回环地址）", 403)
+            return False
+        origin = self.headers.get("Origin") or ""
+        if not _origin_ok(origin):
+            log("[guard] 拒绝跨站请求：Origin=%s" % origin[:80])
+            self._error("拒绝跨站请求：这个页面不在本机", 403)
+            return False
+        return True
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
         qs = urllib.parse.parse_qs(parsed.query)
+        if not self._guard():
+            return
         try:
             if path == "/favicon.ico":
                 # 浏览器每次开页面都会要它，没有就会在控制台刷一条 404
@@ -771,15 +1037,33 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
             if path.startswith("/api/media/"):
                 return self._serve_media(path[len("/api/media/"):])
             return self._error("未知路径: " + path, 404)
+        except Exception as e:  # noqa: BLE001
+            report = _report_crash("请求处理失败（GET）", e, self._crash_context())
+            return self._error(self._internal_error(e, report), 500)
+
+    def _crash_context(self) -> dict:
+        """报告里"这次请求长什么样"，够定位就行，不记 body 内容（可能有回放数据）。"""
+        ctx = {"请求": "%s %s" % (self.command or "?", (self.path or "?").split("?")[0])}
+        try:
+            ctx["请求体"] = "%s 字节" % (self.headers.get("Content-Length") or 0)
         except Exception:  # noqa: BLE001
-            sys.stderr.write(traceback.format_exc())
-            return self._error("服务器内部错误", 500)
+            pass
+        return ctx
+
+    def _internal_error(self, exc: BaseException, report: str | None) -> str:
+        tail = "（详情见 crashreport\\%s）" % os.path.basename(report) if report else ""
+        return "服务器内部错误：%s%s" % (crashreport.summary(exc), tail)
 
     def do_OPTIONS(self):
-        log("[req] OPTIONS %s  Origin=%s" % (self.path, self.headers.get("Origin")))
+        origin = self.headers.get("Origin") or ""
+        # 只有本机来源才回显 CORS 头；别的网站连预检都过不去
+        if not _host_ok(self.headers.get("Host") or "") or not _origin_ok(origin):
+            return self._error("拒绝跨站请求", 403)
         self.close_connection = True
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
@@ -790,6 +1074,8 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        if not self._guard():
+            return
         # 一到达就记一行：这样"请求有没有跑到后端"一眼能看出来
         declared = self.headers.get("Content-Length")
         log("[req] POST %s  Content-Length=%s" % (path, declared))
@@ -806,6 +1092,8 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
                 return self._paths_save(_parse_json(self._read_body()) or {})
             if path == "/api/beatmap-meta":
                 return self._beatmap_meta()
+            if path == "/api/recommend":
+                return self._recommend()
             if path == "/api/analyze-local":
                 return self._analyze_local()
             if path == "/api/audio-fetch":
@@ -825,72 +1113,9 @@ class Handler(_AnalysisApiMixin, _AssetMixin, BaseHTTPRequestHandler):
             return self._error(str(e), 200, needsInput=True)
         except OsrError as e:
             return self._error("回放文件解析失败：%s" % e, 200)
-        except Exception:  # noqa: BLE001
-            sys.stderr.write(traceback.format_exc())
-            return self._error("服务器内部错误：" + traceback.format_exc(limit=2).strip().splitlines()[-1], 500)
-
-
-    # ---- 分片上传（兜底通道） -------------------------------------------
-    # 直接上传 /api/analyze 时，个别机器上的安全软件/代理会把较大的 POST 体整包吞掉
-    # （server.log 里表现为 health 之后没有任何 POST 到达）。把回放切成小片逐个发，
-    # 每片都是独立的小请求，能绕开这种「整包拦截」，还能逐片重试。
-    def _upload_chunk(self):
-        parsed = urllib.parse.urlparse(self.path)
-        qs = urllib.parse.parse_qs(parsed.query)
-        sid = re.sub(r"[^0-9a-zA-Z]", "", (qs.get("sid") or [""])[0])[:40]
-        idx = (qs.get("i") or ["0"])[0]
-        if not sid or not idx.isdigit():
-            return self._error("分片参数无效")
-        body = self._read_body(CHUNK_MAX + 1024)
-        if not body:
-            return self._error("分片内容为空")
-        d = os.path.join(CHUNK_DIR, sid)
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "%05d.part" % int(idx)), "wb") as f:
-            f.write(body)
-        return self._json({"ok": True, "i": int(idx), "bytes": len(body)})
-
-    def _analyze_chunked(self):
-        req = _parse_json(self._read_body())
-        if req is None:
-            return self._error("请求体不是合法 JSON")
-        sid = re.sub(r"[^0-9a-zA-Z]", "", (req.get("sid") or ""))[:40]
-        d = os.path.join(CHUNK_DIR, sid)
-        if not sid or not os.path.isdir(d):
-            return self._error("分片数据丢失，请重新上传")
-        # 按序号排（不是按文件名字典序），并且要求 0..n-1 连续。
-        # 缺片时直接把剩下的拼起来，会得到一份"能解出前半段"的残卷，
-        # 结果看起来正常、实际只分析了其中一部分。
-        numbered = []
-        for fn in os.listdir(d):
-            if not fn.endswith(".part"):
-                continue
-            stem = fn[: -len(".part")]
-            if stem.isdigit():
-                numbered.append((int(stem), fn))
-        numbered.sort()
-        idxs = [i for i, _ in numbered]
-        if not numbered:
-            return self._error("分片数据为空，请重新上传")
-        if idxs != list(range(len(idxs))):
-            missing = sorted(set(range(max(idxs) + 1)) - set(idxs))[:5]
-            return self._error("分片不连续（缺第 %s 片），请重新上传" % "、".join(str(i) for i in missing))
-        parts = [fn for _, fn in numbered]
-
-        replay_path = _write_temp(os.path.join(CACHE_DIR, "uploads"), ".osr", b"")
-        with open(replay_path, "wb") as out:
-            for fn in parts:
-                with open(os.path.join(d, fn), "rb") as f:
-                    out.write(f.read())
-        try:
-            return self._finish_analyze(replay_path, beatmap_path=None, songs_root=(req.get("songsRoot") or None))
-        finally:
-            try:
-                for fn in parts:
-                    os.remove(os.path.join(d, fn))
-                os.rmdir(d)
-            except OSError:
-                pass
+        except Exception as e:  # noqa: BLE001
+            report = _report_crash("请求处理失败（POST）", e, self._crash_context())
+            return self._error(self._internal_error(e, report), 500)
 
 
 def _resolve_media(payload: dict, beatmap_path: str | None, songs_root: str | None) -> tuple[str, str, dict]:
@@ -995,17 +1220,67 @@ def _clean_chunks() -> None:
         pass
 
 
+def _probe_port(port: int) -> bool:
+    """这个端口上是不是已经跑着本程序（而不是别的什么服务）。"""
+    if port <= 0:
+        return False
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/health" % port, timeout=0.5) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - 连不上、超时、返回不是 JSON，都当"不是本程序"
+        return False
+    # 只认自家 /api/health 的形状：有 ok 且有 assetV（别家服务恰好有 /api/health 也不会误判）
+    return bool(data.get("ok")) and "assetV" in data
+
+
+def _running_instance(port: int) -> int | None:
+    """已有一个实例在跑就返回它的端口。
+
+    同时看两处：这次要用的端口，以及 port.txt 里记的那个（端口被占时程序会往后挪，
+    所以"上次在 8807"和"这次想用 8806"完全可以同时成立）。
+    """
+    try:
+        with open(PORT_FILE, encoding="ascii") as f:
+            last = int(f.read().strip())
+    except (OSError, ValueError):
+        last = 0
+    for candidate in (last, port):
+        if _probe_port(candidate):
+            return candidate
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="mania 回放分析器本地服务")
     ap.add_argument("--port", type=int, default=8806)
     ap.add_argument("--no-open", action="store_true")
     ap.add_argument("--songs", default="", help="手动指定 osu! Songs 目录")
+    ap.add_argument("--allow-multi", action="store_true",
+                    help="即使已经有实例在跑也照常启动（调试用，正常使用不需要）")
     args = ap.parse_args()
 
     if args.songs:
         os.environ["MANIA_SONGS_ROOT"] = args.songs
 
+    if paths.CACHE_FALLBACK:
+        # 只读安装位置（例如被放进 Program Files、或只读共享盘）：
+        # 缓存退到 %TEMP%，否则 import 阶段就会 PermissionError 起不来。
+        print("[mania-replay-lab] 程序目录不可写，缓存改到：%s" % paths.CACHE_DIR, flush=True)
+        log("[startup] 程序目录不可写，缓存目录改为 %s" % paths.CACHE_DIR)
+
     _clean_chunks()
+
+    # 多开检测：已经有一个实例在跑就直接复用，不再起第二个。
+    # 两个实例会各占一份内存、各扫一遍曲库，port.txt 还会被后起的覆盖，
+    # 结果是"先起的那个对启动器隐身"——用户点停止也停不掉它。
+    running = None if args.allow_multi else _running_instance(args.port)
+    if running:
+        url = "http://127.0.0.1:%d/" % running
+        print("[mania-replay-lab] 已经有实例在 %d 端口运行，这次不再启动：%s" % (running, url), flush=True)
+        log("[startup] 检测到已有实例（端口 %d），本次启动跳过" % running)
+        if not args.no_open:
+            webbrowser.open(url)
+        return 0
 
     port = args.port
     for _ in range(20):
@@ -1013,7 +1288,14 @@ def main() -> int:
             break
         port += 1
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        report = crashreport.write("启动失败：端口绑定不上", e, context={"端口": port})
+        print("[mania-replay-lab] 启动失败：%r%s" % (
+            e, "\n报告：%s" % report if report else ""), flush=True)
+        log("[startup] 端口 %d 绑定失败：%r" % (port, e))
+        return 1
     httpd.daemon_threads = True
     url = "http://127.0.0.1:%d/" % port
     # 端口被占时会往后挪，把真实端口写出去，免得打开的是上一次的旧服务
@@ -1040,8 +1322,9 @@ def main() -> int:
                       % (len(lib.entries), st["hashed"], st["reused"], st["buildMs"]), flush=True)
                 log("[startup] 曲库索引 %d 张（新算 %d 复用 %d，%.0f ms）"
                     % (len(lib.entries), st["hashed"], st["reused"], st["buildMs"]))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                # 预热失败不影响主流程（第一次搜索会重扫），但不能一点痕迹都不留
+                log("[startup] 曲库预热失败：%r" % (e,))
 
     threading.Thread(target=warm, daemon=True).start()
 

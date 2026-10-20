@@ -53,6 +53,8 @@ _LOCK = threading.Lock()
 _LIB = None
 _LIB_ERROR = ""
 _CALC = None
+# 最近一次算不出来的原因（键数不支持、DLL 调用崩了……）。给页面显示"为什么不可用"。
+_LAST_ERROR = ""
 
 
 def _load():
@@ -124,19 +126,40 @@ class MsdResult:
         }
 
 
+def last_error() -> str:
+    """上一次 calc() 为什么没算出结果（成功时是空串）。"""
+    return _LAST_ERROR
+
+
 def calc(beatmap: Beatmap, rate: float = 1.0) -> MsdResult | None:
-    """算一张谱的 MSD（rate=1.0 即原速）。DLL 不可用时返回 None。"""
+    """算一张谱的 MSD（rate=1.0 即原速）。算不出来时返回 None，原因见 last_error()。
+
+    这里必须把 C 调用包在 try 里：MinaCalc 对不认识的输入不是返回错误码，而是直接
+    访问违例（1 键谱就会崩）。ctypes 把它报成 OSError，接住就只是"这张图算不了"，
+    不接的话整个分析请求会变成 500。
+    """
+    global _LAST_ERROR
+    _LAST_ERROR = ""
     lib = _load()
     if lib is None:
         return None
+    keys = int(beatmap.keys or 4)
     rows = _rows_from_beatmap(beatmap)
     if not rows:
+        return None
+    # 1 键谱没有任何"跨列"可言，MinaCalc 内部会除以 0；先挡掉，别指望 DLL 自己报错
+    if keys < 2:
+        _LAST_ERROR = "MinaCalc 至少要 2 键（这张图是 %d 键）" % keys
         return None
     arr = (_NoteInfo * len(rows))()
     for i, (mask, t) in enumerate(rows):
         arr[i].notes = mask
         arr[i].rowTime = t
-    with _LOCK:
-        ssr = lib.calc_ssr(_CALC, arr, len(rows), float(rate), float(SCORE_GOAL), int(beatmap.keys or 4))
+    try:
+        with _LOCK:
+            ssr = lib.calc_ssr(_CALC, arr, len(rows), float(rate), float(SCORE_GOAL), keys)
+    except (OSError, ValueError) as exc:
+        _LAST_ERROR = "MinaCalc 调用失败（%s）" % exc
+        return None
     skills = {k: float(getattr(ssr, k)) for k in SKILL_KEYS if k != "overall"}
     return MsdResult(overall=float(ssr.overall), skillsets=skills, rows=len(rows), rate=rate)

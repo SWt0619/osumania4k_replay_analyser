@@ -16,7 +16,12 @@ import time
 from dataclasses import dataclass, field
 
 from .beatmap import AUDIO_EXTS, compute_md5_variants, long_path, parse_osu_file, resolve_audio
-from .osu_dirs import default_export_roots, default_lazer_file_roots, default_songs_roots
+from .osu_dirs import (
+    default_export_roots,
+    default_lazer_file_roots,
+    default_songs_roots,
+    detected_songs_roots,
+)
 
 CACHE_VERSION = 3
 
@@ -151,6 +156,56 @@ def _resolve_md5_conflicts(entries: list[LibraryEntry]) -> dict[str, LibraryEntr
     return by_md5
 
 
+def _load_cache_file(cache_path: str, root: str) -> dict[str, LibraryEntry]:
+    """读落盘索引。版本号或根目录对不上就整份作废（宁可从算，也不用可疑数据）。"""
+    if not cache_path or not os.path.isfile(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+    if data.get("version") != CACHE_VERSION or data.get("root") != root:
+        return {}
+    out: dict[str, LibraryEntry] = {}
+    for item in data.get("files", []):
+        try:
+            out[item["p"]] = LibraryEntry(
+                path=item["p"],
+                md5_raw=item["raw"],
+                md5_lf=item["lf"],
+                md5_crlf=item["crlf"],
+                size=int(item["size"]),
+                mtime=float(item["mtime"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _save_cache_file(cache_path: str, lib: "Library") -> None:
+    """整份覆盖写。先写 .tmp 再 replace，读的一方不会看到半个文件。"""
+    if not cache_path:
+        return
+    data = {
+        "version": CACHE_VERSION,
+        "root": lib.root,
+        "builtAt": lib.built_at,
+        "files": [
+            {"p": e.path, "raw": e.md5_raw, "lf": e.md5_lf, "crlf": e.md5_crlf, "size": e.size, "mtime": e.mtime}
+            for e in lib.entries
+        ],
+    }
+    tmp = cache_path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, cache_path)
+    except OSError:
+        pass
+
+
 @dataclass
 class Library:
     root: str = ""
@@ -166,55 +221,6 @@ class Library:
     _set_audio_cache: dict[str, str] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
-    # ---- 缓存读写 -------------------------------------------------------
-    @staticmethod
-    def _load_cache(cache_path: str, root: str) -> dict[str, LibraryEntry]:
-        if not cache_path or not os.path.isfile(cache_path):
-            return {}
-        try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:  # noqa: BLE001
-            return {}
-        if data.get("version") != CACHE_VERSION or data.get("root") != root:
-            return {}
-        out: dict[str, LibraryEntry] = {}
-        for item in data.get("files", []):
-            try:
-                out[item["p"]] = LibraryEntry(
-                    path=item["p"],
-                    md5_raw=item["raw"],
-                    md5_lf=item["lf"],
-                    md5_crlf=item["crlf"],
-                    size=int(item["size"]),
-                    mtime=float(item["mtime"]),
-                )
-            except (KeyError, TypeError, ValueError):
-                continue
-        return out
-
-    @staticmethod
-    def _save_cache(cache_path: str, lib: "Library") -> None:
-        if not cache_path:
-            return
-        data = {
-            "version": CACHE_VERSION,
-            "root": lib.root,
-            "builtAt": lib.built_at,
-            "files": [
-                {"p": e.path, "raw": e.md5_raw, "lf": e.md5_lf, "crlf": e.md5_crlf, "size": e.size, "mtime": e.mtime}
-                for e in lib.entries
-            ],
-        }
-        tmp = cache_path + ".tmp"
-        try:
-            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp, cache_path)
-        except OSError:
-            pass
-
     # ---- 构建 -----------------------------------------------------------
     def build(self, root: str, force: bool = False, cache_path: str = "") -> None:
         with self._lock:
@@ -222,7 +228,7 @@ class Library:
             if not force and self.root == root and self.entries and (time.time() - self.built_at) < 3600:
                 return
 
-            cached = {} if force else self._load_cache(cache_path, root)
+            cached = {} if force else _load_cache_file(cache_path, root)
             entries, stats = self._scan_all(root, cached)
             by_md5 = _resolve_md5_conflicts(entries)
 
@@ -236,13 +242,15 @@ class Library:
             self.scanned_files, self.reused_files, self.hashed_files = stats
             self.build_ms = (time.time() - started) * 1000
             if entries:
-                self._save_cache(cache_path, self)
+                _save_cache_file(cache_path, self)
 
     def _scan_all(self, root: str, cached: dict[str, LibraryEntry]) -> tuple[list[LibraryEntry], tuple[int, int, int]]:
-        """扫三处来源，返回（条目, (总数, 复用数, 新算哈希数)）。
+        """扫多处来源，返回（条目, (总数, 复用数, 新算哈希数)）。
 
-        Songs 之后还要扫 lazer 的导出目录与 files 存储：只在 lazer 里玩的人的谱面
+        除了主根，还会扫 lazer 的导出目录与 files 存储：只在 lazer 里玩的人的谱面
         根本不在 Songs 下，漏掉就会永远提示"曲库里没有这张谱面"。
+        这两处与主根是**不同种类的存储**，所以无条件合并；
+        而"其它 Songs 根"只在主根本身就是自动探测到的曲库时才合并（见下面的注释）。
         """
         entries: list[LibraryEntry] = []
         counts = [0, 0, 0]   # scanned / reused / hashed
@@ -256,8 +264,9 @@ class Library:
         collect(*_scan_regular(root, cached))
         # 同时装了 lazer 与 stable 的人，两边 Songs 是两棵完全不同的树。
         # 只扫主根的话，另一个客户端里的谱面会永远"曲库里没有这张谱面"。
-        # 仅在"主根本身就是默认曲库之一"时合并，传自定义目录（测试/指定目录）时不受影响。
-        defaults = default_songs_roots()
+        # 仅在"主根本身就是自动探测到的曲库之一"时合并：玩家手填的目录（--songs、
+        # 网页里指定）不算，否则一次指定会把整机所有曲库都卷进来。
+        defaults = detected_songs_roots()
         if any(os.path.abspath(root or "") == os.path.abspath(d) for d in defaults):
             for extra in defaults:
                 if os.path.abspath(extra) != os.path.abspath(root or ""):

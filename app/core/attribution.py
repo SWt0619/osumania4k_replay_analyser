@@ -1,25 +1,29 @@
-"""失误归因：把每个「有瑕疵的击打」判成 分神 / 节奏感弱 / 超出能力范围。
+"""失误归因：把每个「有瑕疵的击打」判成 分神 / 节奏感弱 / 超出能力范围 / 随机失手。
 
 设计原则
 --------
 1. **只用可观测、可复现的量**：误差、局部密度、pattern、邻域行为、同类片段的历史表现。
    没有黑箱；每条判据都能在报告里说清"凭什么这么判"。
-2. **三类的判别边界**：
+2. **判别边界**：
    - 超出能力：失误集中在高密度 / 高难度 pattern 上，**同类片段里他反复吃亏**，
      且错误率随密度上升；成片出现、不像是"掉了一下线"。
    - 节奏感弱：误差**方向稳定地偏**（同一段一直偏早或偏晚），换到不同密度也照样偏；
      失误散布而不是成簇。
    - 分神：失误**成簇突发**、伴随长时间没有输入、难度不高、之后立刻恢复；
      同一类片段平时并不失误。
-3. **互相制衡**：三类各自算分，取最高者；证据不足时置信度低，报告里如实标注。
+   - 随机失手：前三类的签名都不成立的残差。它必须单独存在，否则"手抖了一下"
+     会被硬塞进另外三类，把那一类的占比抬高。
+3. **互相制衡**：四类各自算分，取最高者；证据不足时置信度低，报告里如实标注。
 """
 
 from __future__ import annotations
 
 import bisect
+import math
 from dataclasses import dataclass, field
 
 from . import patterns
+from .labels import CATEGORY_COLOR, CATEGORY_LABEL
 from .match import JudgedNote, MatchResult
 from .metrics import (
     clamp,
@@ -30,15 +34,6 @@ from .metrics import (
     stdev,
     trend_significance,
 )
-
-CATEGORY_LABEL = {
-    "ability": "超出能力范围",
-    "rhythm": "节奏感弱",
-    "distraction": "分神",
-    # 第四类：三类签名都不成立的孤立小失误。它必须单独存在 —— 真实回放里最常见
-    # 的瑕疵就是"手抖了一下"，把它硬塞进另外三类，会让高手局的分布全是"分神"。
-    "slip": "随机失手",
-}
 
 # ---------------------------------------------------------------------------
 # 可重拟合参数
@@ -51,14 +46,6 @@ P_BIN_EXCESS = 0.10        # 绝对失误率要比全谱基线高出多少，才
 P_REL_ATTEN = 0.30         # 没到自己的水位时，相对分位项保留多少
 P_NO_SIG_PENALTY = 0.45    # 分神没有任何"断片签名"时的衰减
 P_RHYTHM_BG = 0.0          # 失误不成簇时的背景分（重拟合结果：给分会挤掉分神类）
-
-CATEGORY_COLOR = {
-    "ability": "#ff9f6e",
-    "rhythm": "#6ee7ff",
-    "distraction": "#c792ff",
-    "slip": "#8b93b5",
-}
-
 
 @dataclass
 class ErrorFeature:
@@ -383,6 +370,12 @@ def _fill_neighborhood(f: ErrorFeature, i: int, ctx: _FeatureContext) -> None:
     lo = bisect.bisect_left(ctx.note_times, t - 4000)
     hi = bisect.bisect_right(ctx.note_times, t + 4000)
     win = notes[lo:hi]
+    if hi - lo > PASSAGE_WINDOW_CAP:
+        # 退化谱面（所有物件挤在同一时刻）或坏文件会让这个窗口装下整张图，
+        # 那么"每个失误扫一遍窗口"就退化成 O(n²)：20k 失误实测 37 秒、50k 要几分钟。
+        # 正常谱面 4 秒内只有几十个物件，永远走不到这个分支；真走到就等距抽样，
+        # 保住"这一片大概什么水平"，代价是精度。
+        win = notes[lo:hi:(hi - lo) // PASSAGE_WINDOW_CAP + 1]
     wd = [x.delta for x in win if x.delta is not None]
     if wd:
         f.passage_bias = median(wd)
@@ -635,11 +628,12 @@ def _score_ability(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
     if f.recent_abs_median > 16:
         s += 0.06 * clamp((f.recent_abs_median - 16) / 30.0, 0.0, 1.0)
 
-    # 7c) 耐力不足：整首的后 1/3 失误率明显爬升（并不是"这里难"，见 _stamina_profile）。
-    #     只在**确实落到后段**的失误上给分，而且这一条本身四道闸门都过了才会出现在 profile 里，
+    # 7c) 耐力不足：同一类键型连续 6 段之后，失误明显高于前面那 6 段（见 _stamina_profile）。
+    #     只在**对照窗口之后**的失误上给分，而且只有统计上站得住才会写进 profile，
     #     所以权重不必给太高——它解释的是"为什么这时候会错"，不是"这一击有多难"。
     st = profile.get("stamina") or {}
-    if st.get("drop") and f.note.note_time >= st.get("lateFrom", float("inf")):
+    late_from = st.get("lateFrom")
+    if st.get("drop") and late_from is not None and f.note.note_time >= late_from:
         s += 0.18
         reasons.append(st.get("reason") or "歌曲后段的失误明显增多，是耐力问题")
 
@@ -822,103 +816,206 @@ def _score_slip(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
 # --------------------------------------------------------------------------- 画像
 
 
+# ---------------------------------------------------------------------------
+# 耐力：同一大类连续 6 段之后，失误有没有明显爬升
+#
+# 老做法把整首按时间三等分，再卡四条固定阈值（后段 ≥12%、≥前段 1.45 倍……）。
+# 问题在于三段的键型构成常完全不同：后 1/3 往往就是全曲最难的叠/切，失误本来就该高，
+# 四条一起卡的结果是几乎永远不触发。现在改成**在同一类键型内部对照**：
+# 连续 6 段（每段约 64 个物件）都是同一个大类时，前 6 段就是"这类写法平时什么水平"
+# 的基线，从第 7 段起是"同样的写法、打了一阵之后"，两者才真的可比。
+# ---------------------------------------------------------------------------
+STAMINA_RUN_BLOCKS = 6             # 先攒够 6 段做基线，第 7 段起才拿来对照
+STAMINA_MIN_TEST_NOTES = 40        # 对照组太小时，两个 200 就能把比例翻倍
+STAMINA_MIN_TEST_FLAWS = 3
+STAMINA_MIN_RISE = 0.02            # "明显提升"：至少多 2 个百分点
+STAMINA_MIN_Z = 2.0                # 且两比例检验单侧 z ≥ 2（约 97.5%）
+STAMINA_DENSITY_TOLERANCE = 1.25   # 同一大类里密度涨了 25% 以上 → 是变难，不是没体力
+
+# ±4 秒窗口最多看多少个物件。正常谱面 4 秒里只有几十个（就算 30 音符/秒也只有 120 个），
+# 这个上限只在退化谱面（物件全挤在同一时刻）或坏文件上生效：那种图上"每个失误切一次窗口"
+# 会退化成 O(n²)，20k 失误实测 37 秒、50k 要几分钟。超限就等距抽样，保住量级、牺牲精度。
+PASSAGE_WINDOW_CAP = 512
+
+
+@dataclass
+class _Segment:
+    """一段键型（来自 build_blocks 的一块，或按同类音符重新切的窗口）。"""
+
+    category: str
+    start_index: int
+    end_index: int
+    start_time: float
+    end_time: float
+
+
+def _mmss(t: float) -> str:
+    sec = max(0, int(t // 1000))
+    return "%d:%02d" % (sec // 60, sec % 60)
+
+
+def _segments_from_blocks(blocks) -> list[_Segment]:
+    """分块结果 → 段。一块就是一段，重叠区只用来切点，不会重复计数。"""
+    return [
+        _Segment(b.category, b.start_index, b.end_index, b.start_time, b.end_time)
+        for b in blocks
+    ]
+
+
+def _segments_from_contexts(contexts: list[patterns.NoteContext],
+                            size: int = 64) -> list[_Segment]:
+    """没有分块结果时的兜底：按"同类连续音符"重新切段。
+
+    只在直接调用 build_profile 的场合用到（正常分析会把 build_blocks 的结果传进来）。
+    规则与分块一致：同一大类连续 64 个物件为一段，尾巴不足半段就丢掉。
+    """
+    segs: list[_Segment] = []
+    i = 0
+    n = len(contexts)
+    while i < n:
+        cat = contexts[i].coarse or ""
+        if not cat:
+            # 没有粗分类的上下文（调用方漏了 assign_coarse）不做耐力判断：
+            # 一整张图标成同一类，比不判更容易给出误导结论。
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and (contexts[j + 1].coarse or "") == cat:
+            j += 1
+        k = i
+        while j - k + 1 >= size // 2:
+            end = min(k + size - 1, j)
+            segs.append(_Segment(cat, k, end, contexts[k].time, contexts[end].time))
+            k = end + 1
+        i = j + 1
+    return segs
+
+
+def _same_category_runs(segments: list[_Segment]) -> list[list[_Segment]]:
+    """相邻且同大类的段归成一段连续区间。"""
+    runs: list[list[_Segment]] = []
+    for seg in segments:
+        if runs and runs[-1][-1].category == seg.category:
+            runs[-1].append(seg)
+        else:
+            runs.append([seg])
+    return runs
+
+
+def _window_stats(notes_by_index: dict[int, JudgedNote], lo: int, hi: int,
+                  density_of: dict[int, float]) -> tuple[int, int, float]:
+    """统计一段下标区间里的（音符数, 失误数, 平均密度）。"""
+    if hi < lo:
+        return 0, 0, 0.0
+    n = flaws = 0
+    dens_sum = 0.0
+    dens_n = 0
+    for idx in range(lo, hi + 1):
+        note = notes_by_index.get(idx)
+        if note is None:
+            continue
+        n += 1
+        if note.is_flaw:
+            flaws += 1
+        d = density_of.get(idx)
+        if d is not None:
+            dens_sum += d
+            dens_n += 1
+    return n, flaws, (dens_sum / dens_n if dens_n else 0.0)
+
+
+def _two_proportion_z(n0: int, f0: int, n1: int, f1: int) -> float:
+    """两比例检验的 z（合并方差）。样本不足或没有方差时返回 0。"""
+    if n0 <= 0 or n1 <= 0:
+        return 0.0
+    p0 = f0 / n0
+    p1 = f1 / n1
+    pooled = (f0 + f1) / (n0 + n1)
+    se = math.sqrt(pooled * (1.0 - pooled) * (1.0 / n0 + 1.0 / n1))
+    if se <= 1e-9:
+        return 0.0
+    return (p1 - p0) / se
+
+
 def _stamina_profile(
     notes: list[JudgedNote],
+    segments: list[_Segment],
     density_of: dict[int, float],
-    density_profile: list[dict],
 ) -> dict:
-    """耐力：把谱面按**时间**三等分，看后 1/3 的失误率有没有明显爬升。
+    """耐力：在**同一种键型**的长段里，看后半程失误有没有明显高于前半程。
 
-    为什么必须谨慎：谱面后段本来就常更难，高手局的失误又稀少，
-    "前面一个 200 都没出、后面出一个"完全可能是正常波动。所以四道闸门：
+    判据（都过了才算）：
+      1. 同一大类连续 > 6 段（约 450 个物件），前 6 段建基线、第 7 段起做对照；
+      2. 对照组至少 40 个音符且至少 3 个失误（否则比例不可信）；
+      3. 失误率至少高 2 个百分点，且两比例检验单侧 z ≥ 2；
+      4. 同一大类里密度没有明显上升（≤ 基线的 1.25 倍）——
+         BPM 往上爬导致同一类键型变难时，不算体力问题。
 
-      1. 样本量：全曲 >= 400 个音符，后段 >= 40 个音符且 >= 8 个失误；
-      2. 绝对水位：后段失误率 >= 12%（否则从 1% 翻到 3% 没有意义）；
-      3. 相对涨幅：后段 >= 前段 1.45 倍，且 >= 中段 1.25 倍；
-      4. 难度校正：后段实际失误率 >= 该段按密度档**预期**失误率的 1.5 倍。
-         闸门 4 是关键——它把"后面本来就更难"从"耐力掉了"里分出去。
-
-    四条全中才算耐力不足；任一不满足就 drop=False。宁可漏判，也不要把
-    "结尾难"或"偶然一个 200"说成体力问题。
+    多条长段都满足时取 z 最大的那条；"过渡"段不参与（低密度段的失误更像走神）。
     """
     empty = {
-        "drop": False, "lateFrom": float("inf"),
-        "early": 0.0, "mid": 0.0, "late": 0.0, "expected": 0.0, "reason": "",
+        # lateFrom 用 None 表示"没有这个窗口"。不能写 inf：那个值会一路进 JSON，
+        # 浏览器按标准 JSON 解析会报错（Python 自己读得回来，所以后端看不出来）。
+        "drop": False, "lateFrom": None, "category": "", "label": "",
+        "fromTime": 0.0, "toTime": 0.0,
+        "baseNotes": 0, "baseFlaws": 0, "baseRate": 0.0, "baseDensity": 0.0,
+        "testNotes": 0, "testFlaws": 0, "testRate": 0.0, "testDensity": 0.0,
+        "rise": 0.0, "z": 0.0, "blocks": 0, "reason": "",
     }
-    if len(notes) < 400:
+    if not notes or not segments:
         return empty
 
-    t0 = notes[0].note_time
-    t1 = notes[-1].note_time
-    span = t1 - t0
-    if span <= 0:
+    by_index = {n.obj_index: n for n in notes}
+    best: dict | None = None
+    for run in _same_category_runs(segments):
+        if len(run) <= STAMINA_RUN_BLOCKS or run[0].category == "calm":
+            continue
+        split = run[STAMINA_RUN_BLOCKS].start_index
+        n0, f0, d0 = _window_stats(by_index, run[0].start_index, split - 1, density_of)
+        n1, f1, d1 = _window_stats(by_index, split, run[-1].end_index, density_of)
+        if n0 <= 0 or n1 < STAMINA_MIN_TEST_NOTES or f1 < STAMINA_MIN_TEST_FLAWS:
+            continue
+        p0 = f0 / n0
+        p1 = f1 / n1
+        rise = p1 - p0
+        if rise < STAMINA_MIN_RISE:
+            continue
+        if d0 > 0 and d1 > d0 * STAMINA_DENSITY_TOLERANCE:
+            continue
+        z = _two_proportion_z(n0, f0, n1, f1)
+        if z < STAMINA_MIN_Z:
+            continue
+        cand = {
+            **empty,
+            "drop": True,
+            "lateFrom": run[STAMINA_RUN_BLOCKS].start_time,
+            "category": run[0].category,
+            "label": patterns.CATEGORY_LABEL.get(run[0].category, run[0].category),
+            "fromTime": run[0].start_time,
+            "toTime": run[-1].end_time,
+            "baseNotes": n0, "baseFlaws": f0, "baseRate": round(p0, 3),
+            "baseDensity": round(d0, 1),
+            "testNotes": n1, "testFlaws": f1, "testRate": round(p1, 3),
+            "testDensity": round(d1, 1),
+            "rise": round(rise, 3), "z": round(z, 2), "blocks": len(run),
+        }
+        if best is None or cand["z"] > best["z"]:
+            best = cand
+
+    if best is None:
         return empty
-    cut_early = t0 + span / 3.0
-    cut_late = t0 + 2.0 * span / 3.0
-
-    seg = {"early": [0, 0], "mid": [0, 0], "late": [0, 0]}  # [音符数, 失误数]
-    late_expected: list[float] = []
-    for n in notes:
-        if n.note_time >= cut_late:
-            key = "late"
-        elif n.note_time >= cut_early:
-            key = "mid"
-        else:
-            key = "early"
-        seg[key][0] += 1
-        if n.is_flaw:
-            seg[key][1] += 1
-        if key == "late":
-            d = density_of.get(n.obj_index)
-            if d is not None:
-                for b in density_profile:
-                    if b["low"] <= d <= b["high"]:
-                        late_expected.append(b["errorRate"])
-                        break
-
-    counts = {k: v[0] for k, v in seg.items()}
-    rates = {k: (v[1] / v[0] if v[0] else 0.0) for k, v in seg.items()}
-    expected = mean(late_expected) if late_expected else 0.0
-
-    # 闸门 1：样本量
-    if counts["late"] < 40 or seg["late"][1] < 8 or counts["early"] < 60:
-        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
-                "mid": round(rates["mid"], 3), "late": round(rates["late"], 3),
-                "expected": round(expected, 3)}
-
-    late_rate = rates["late"]
-    # 闸门 2：绝对水位
-    if late_rate < 0.12:
-        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
-                "mid": round(rates["mid"], 3), "late": round(late_rate, 3),
-                "expected": round(expected, 3)}
-
-    # 闸门 3：相对涨幅（前段和中段都要比过）
-    if late_rate < rates["early"] * 1.45 or late_rate < rates["mid"] * 1.25:
-        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
-                "mid": round(rates["mid"], 3), "late": round(late_rate, 3),
-                "expected": round(expected, 3)}
-
-    # 闸门 4：难度校正——后段失误率要明显高于"按这一档密度本来就该有的失误率"
-    if expected <= 0 or late_rate < expected * 1.5:
-        return {**empty, "lateFrom": cut_late, "early": round(rates["early"], 3),
-                "mid": round(rates["mid"], 3), "late": round(late_rate, 3),
-                "expected": round(expected, 3)}
-
-    return {
-        "drop": True,
-        "lateFrom": cut_late,
-        "early": round(rates["early"], 3),
-        "mid": round(rates["mid"], 3),
-        "late": round(late_rate, 3),
-        "expected": round(expected, 3),
-        "reason": "后 1/3 失误率 %.0f%%，前两段只有 %.0f%% / %.0f%%（同密度的预期是 %.0f%%），"
-                  "是耐力撑不住了" % (late_rate * 100, rates["early"] * 100,
-                                      rates["mid"] * 100, expected * 100),
-    }
+    best["reason"] = (
+        "%s 起连续 %d 段都是「%s」：前 %d 段的失误率是 %.0f%%，之后升到 %.0f%%"
+        "（多 %.0f 个百分点，同期密度 %.1f → %.1f 没有明显上升），是耐力撑不住了"
+        % (_mmss(best["fromTime"]), best["blocks"], best["label"], STAMINA_RUN_BLOCKS,
+           best["baseRate"] * 100, best["testRate"] * 100, best["rise"] * 100,
+           best["baseDensity"], best["testDensity"])
+    )
+    return best
 
 
-def build_profile(match: MatchResult, contexts: list[patterns.NoteContext]) -> dict:
+def build_profile(match: MatchResult, contexts: list[patterns.NoteContext],
+                  blocks: list | None = None) -> dict:
     notes = match.notes
     deltas = match.deltas()
     bits_severe = [1 if n.is_error else 0 for n in notes]
@@ -942,10 +1039,10 @@ def build_profile(match: MatchResult, contexts: list[patterns.NoteContext]) -> d
         }
         for b in prof
     ]
-    # 耐力：后 1/3 的失误率有没有在"同密度"的前提下明显爬升（判据见 _stamina_profile）
-    stamina = _stamina_profile(
-        notes, {c.index: c.density_1s for c in contexts}, density_bins
-    )
+    # 耐力：同一大类连续 6 段之后，失误有没有明显爬升（判据见 _stamina_profile）。
+    # 分段优先用 build_blocks 的结果；直接调 build_profile 时按同类音符兜底重切。
+    segments = _segments_from_blocks(blocks) if blocks else _segments_from_contexts(contexts)
+    stamina = _stamina_profile(notes, segments, {c.index: c.density_1s for c in contexts})
 
     # 稳定上限：失误率第一次明显超过基线的那一档的下边界
     ceiling = 0.0
@@ -973,7 +1070,7 @@ def build_profile(match: MatchResult, contexts: list[patterns.NoteContext]) -> d
 
 
 def _decide(f: ErrorFeature, profile: dict) -> Attribution:
-    """给一条失误定类别：三类各自打分 → 互相制衡 → 归一成概率与置信度。"""
+    """给一条失误定类别：四类各自打分 → 互相制衡 → 归一成概率与置信度。"""
     a_s, a_r = _score_ability(f, profile)
     b_s, b_r = _score_rhythm(f, profile)
     c_s, c_r = _score_distraction(f, profile)
@@ -1024,8 +1121,9 @@ def _decide(f: ErrorFeature, profile: dict) -> Attribution:
     )
 
 
-def classify_all(match: MatchResult, contexts: list[patterns.NoteContext]) -> tuple[list[Attribution], dict]:
-    profile = build_profile(match, contexts)
+def classify_all(match: MatchResult, contexts: list[patterns.NoteContext],
+                 blocks: list | None = None) -> tuple[list[Attribution], dict]:
+    profile = build_profile(match, contexts, blocks)
     feats = build_features(match, contexts, profile.get("density_profile", []))
     out = [_decide(f, profile) for f in feats]
     return out, summarize(out, profile)

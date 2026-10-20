@@ -72,13 +72,20 @@
           try {
             data = JSON.parse(xhr.responseText || "{}");
           } catch (e) {
-            reject(new Error("服务器返回的不是 JSON（HTTP " + xhr.status + "）"));
+            // 有 HTTP 状态码就说明请求已经到达服务端，这是"服务端答复"而不是"传输失败"，
+            // 调用方据此决定要不要改走分片重发（answered=true 就不该重发）
+            const err = new Error("服务器返回的不是 JSON（HTTP " + xhr.status + "）");
+            err.answered = true;
+            err.status = xhr.status;
+            reject(err);
             return;
           }
           if (data && data.ok === false) {
             const err = new Error(data.error || "分析失败");
             err.needsInput = !!data.needsInput;
             err.payload = data;
+            err.answered = true;
+            err.status = xhr.status;
             reject(err);
             return;
           }
@@ -262,6 +269,22 @@
           }
         })();
       });
+    },
+
+    // 相似谱面：难度轴是段位，而段位在前端用 Sunny 算，所以这里要把段位标签回传给后端。
+    // 推荐失败只是少一张卡片，不该弹错误、也不该影响页面上其他任何东西。
+    async similar(session, dan) {
+      if (!session || !dan) return [];
+      try {
+        const data = await jsonFetch("/api/recommend", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: session, dan: dan }),
+        });
+        return (data && data.items) || [];
+      } catch (e) {
+        return [];
+      }
     },
 
     beatmapSearch(query) {

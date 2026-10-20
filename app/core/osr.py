@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import lzma
+import math
 import struct
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -75,8 +76,9 @@ class Replay:
     def rate(self) -> float:
         """速度倍率（DT/NC=1.5，HT=0.75）。
 
-        注意：回放帧时间与谱面时间都处在**谱面时间轴**上（audio clock），
-        所以比对时**不需要**按倍率换算；这个值只用于展示与"感知难度"说明。
+        回放帧时间与谱面时间都处在**谱面时间轴**上（audio clock），所以配对时
+        **不需要**按倍率换算。它还有两个真实用途：UR 要按官方口径除以倍率
+        （见 analyze._summary / _section_stats），以及页面上的「等效难度」说明。
         """
         if self.mods & MOD_DT or self.mods & MOD_NC:
             return 1.5
@@ -91,11 +93,14 @@ class Replay:
         mania 下 lazer 的 SetCount300 会把 geki(MAX) 合并进 count300，
         所以这里给出原始值与"合计"两种口径。头里计数全为 0 时退化到 lazer 的 JSON 统计。
         """
+        # mania 的 legacy 六元组顺序是 geki=MAX、count300=300、katu=200、count100=100、count50=50。
+        # 以前把 count100 当成 200、把 katu 丢掉，200 与 100 两档整体错位一级：
+        # 实测一份全连回放里游戏记的 2 个 100，被读成了 2 个 200。
         raw = {
             "perfect": self.geki,
             "great": max(0, self.count300),
-            "good": self.count100,
-            "ok": 0,
+            "good": self.katu,
+            "ok": self.count100,
             "meh": self.count50,
             "miss": self.count_miss,
         }
@@ -104,13 +109,6 @@ class Replay:
             if got:
                 return got
         return raw
-
-    def mask_columns(self) -> int:
-        """出现过的最宽列数（用于在谱面缺失时也能知道键数）。"""
-        m = 0
-        for f in self.frames:
-            m |= f.mask
-        return m.bit_length()
 
 
 # --------------------------------------------------------------------------- 位定义
@@ -130,6 +128,9 @@ MOD_FL = 1 << 10
 MOD_SO = 1 << 12
 MOD_AP = 1 << 13
 MOD_PF = 1 << 14
+# Random：mania 下把四列的顺序随机重排。回放里记的是重排之后的列号，
+# 重排结果不写进 .osr，所以分析前要靠按键与音符的吻合度反推（见 match.infer_random_order）。
+MOD_RANDOM = 1 << 21
 # Mirror：mania 下会把整个键位镜像（第 0 列和第 keys-1 列互换）。
 # 回放里记的按键是镜像后的坐标系，谱面文件本身没变，配对前必须翻回来。
 MOD_MR = 1 << 30
@@ -161,6 +162,7 @@ MOD_NAMES = {
     MOD_SO: "SO",
     MOD_AP: "AP",
     MOD_PF: "PF",
+    MOD_RANDOM: "RD",
     MOD_MR: "MR",
 }
 
@@ -178,6 +180,7 @@ MOD_DESC = {
     "SO": "旋转",
     "AP": "自瞄",
     "RX": "自动",
+    "RD": "列序随机",
 }
 
 
@@ -402,7 +405,13 @@ def _lzma_salvage(blob: bytes, step: int = 512) -> bytes:
 
 
 def _parse_frames(text: str) -> list[RawFrame]:
-    """带位置判断的帧解析（与 lazer 的行为一致）。"""
+    """带位置判断的帧解析（与 lazer 的行为一致）。
+
+    两条容错规则都来自真实文件：
+      * 第一帧常是 `-12345|...` 的种子帧，它不是按键状态（x 恒为 0），跳过；
+      * 开头偶尔夹着 x=256、y=-500 的占位帧，会造成"凭空松手"，同样丢掉。
+        但只允许丢开头连续的两帧 —— 中间出现同样的坐标是正常按键，不能顺手删。
+    """
     frames: list[RawFrame] = []
     xs: list[float] = []
     ys: list[float] = []
@@ -421,13 +430,19 @@ def _parse_frames(text: str) -> list[RawFrame]:
             x = float(parts[1])
         except ValueError:
             continue
+        # 100000 位的数字能过 float()（得到 inf），但 int(inf) 会抛 OverflowError。
+        # 这种帧只可能来自损坏的文件，直接丢掉 —— 别让它把整次解析变成 500。
+        if not (math.isfinite(delta) and math.isfinite(x)):
+            continue
         try:
             y = float(parts[2])
         except ValueError:
             y = 0.0
+        if not math.isfinite(y):
+            y = 0.0
         try:
             button = int(float(parts[3]))
-        except ValueError:
+        except (ValueError, OverflowError):
             button = 0
         t += delta
         frames.append(RawFrame(time=t, mask=int(x), button=button))
@@ -442,12 +457,31 @@ def _parse_frames(text: str) -> list[RawFrame]:
     return [frames[i] for i in keep]
 
 
-def parse_osr(path: str) -> Replay:
-    with open(long_path(path), "rb") as f:
-        data = f.read()
-    if not data:
-        raise OsrError("文件是空的")
-    r = _Reader(data)
+@dataclass
+class _Header:
+    """回放头的原始字段（还没做解压与容错处理）。"""
+
+    mode: int
+    version: int
+    beatmap_md5: str
+    player: str
+    replay_md5: str
+    count300: int
+    count100: int
+    count50: int
+    geki: int
+    katu: int
+    count_miss: int
+    score: int
+    max_combo: int
+    perfect: bool
+    mods: int
+    ticks: int
+    compressed: bytes
+
+
+def _read_header(r: _Reader) -> _Header:
+    """按固定字段顺序读完文件头。字段顺序见模块说明。"""
     try:
         mode = r.byte()
         version = r.i32()
@@ -471,7 +505,12 @@ def parse_osr(path: str) -> Replay:
         raise
     except Exception as e:  # noqa: BLE001
         raise OsrError("读取回放头失败：%r" % (e,)) from e
+    return _Header(mode, version, beatmap_md5, player, replay_md5, c300, c100, c50,
+                   geki, katu, cmiss, score, max_combo, perfect, mods, ticks, compressed)
 
+
+def _read_tail(r: _Reader, version: int) -> tuple[int, bool, dict | None]:
+    """读头之后的两个可选块：在线 id 与 lazer 的 scoreInfo。返回三者与"有没有 scoreInfo"。"""
     online_id = 0
     if version >= 20140721 and r.remaining() >= 8:
         online_id = r.i64()
@@ -494,10 +533,16 @@ def parse_osr(path: str) -> Replay:
                     score_info = None
         except OsrError:
             has_score_info = False
+    return online_id, has_score_info, score_info
 
-    # 头部声明的压缩块长度超过实际字节：文件在写/传输途中被截断了。
-    # 即使下面"解压成功"，解出来的也只是前缀，必须按残卷处理。
-    truncated = r.truncated
+
+def _decode_replay_block(compressed: bytes, declared_truncated: bool) -> tuple[list[RawFrame], bool]:
+    """解压 + 解析帧。返回（帧, 是否残卷）。
+
+    文件没写完时 `lzma.decompress` 会一个字节都不给，所以还要走一遍流式抢救；
+    两条路都拿不到足够事件时才算失败。
+    """
+    truncated = declared_truncated
     try:
         text = _lzma_decompress(compressed).decode("utf-8", errors="replace")
     except OsrError:
@@ -511,35 +556,50 @@ def parse_osr(path: str) -> Replay:
             ) from None
         text = salvaged.decode("utf-8", errors="replace")
         truncated = True
+
     frames = _parse_frames(text)
     if truncated and len(frames) < 30:
         # 救出来的东西连一小段都拼不成，那就别硬着头皮分析了
         raise OsrError("回放数据解压失败（只解出 %d 个事件）。文件可能还没写完，等游戏完全退出后再试" % len(frames))
+    return frames, truncated
+
+
+def parse_osr(path: str) -> Replay:
+    with open(long_path(path), "rb") as f:
+        data = f.read()
+    if not data:
+        raise OsrError("文件是空的")
+    r = _Reader(data)
+    head = _read_header(r)
+    online_id, has_score_info, score_info = _read_tail(r, head.version)
+    # 头部声明的压缩块长度超过实际字节：文件在写/传输途中被截断了。
+    # 即使"解压成功"，解出来的也只是前缀，必须按残卷处理。
+    frames, truncated = _decode_replay_block(head.compressed, r.truncated)
 
     stamp = None
-    if ticks > 0:
+    if head.ticks > 0:
         try:
-            stamp = datetime(1, 1, 1) + timedelta(microseconds=ticks // 10)
+            stamp = datetime(1, 1, 1) + timedelta(microseconds=head.ticks // 10)
         except (OverflowError, ValueError):
             stamp = None
 
     return Replay(
         path=path,
-        mode=mode,
-        version=version,
-        beatmap_md5=beatmap_md5,
-        player=player,
-        replay_md5=replay_md5,
-        count300=c300,
-        count100=c100,
-        count50=c50,
-        geki=geki,
-        katu=katu,
-        count_miss=cmiss,
-        score=score,
-        max_combo=max_combo,
-        perfect=perfect,
-        mods=mods,
+        mode=head.mode,
+        version=head.version,
+        beatmap_md5=head.beatmap_md5,
+        player=head.player,
+        replay_md5=head.replay_md5,
+        count300=head.count300,
+        count100=head.count100,
+        count50=head.count50,
+        geki=head.geki,
+        katu=head.katu,
+        count_miss=head.count_miss,
+        score=head.score,
+        max_combo=head.max_combo,
+        perfect=head.perfect,
+        mods=head.mods,
         timestamp=stamp,
         frames=frames,
         online_id=online_id,
