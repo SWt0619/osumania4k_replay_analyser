@@ -51,6 +51,9 @@ P_RHYTHM_BG = 0.0          # 失误不成簇时的背景分（重拟合结果：
 class ErrorFeature:
     note: JudgedNote
     ctx: patterns.NoteContext | None
+    # 判定口径：v1 / v2。归因按当前口径判断"这一击算不算失误"，
+    # 两套会分别跑一遍，页面切换时不用重算。
+    mode: str = "v1"
     density: float = 0.0
     density_pct: float = 0.0
     difficulty: float = 0.0
@@ -166,7 +169,7 @@ def _build_jack_chains(
     return chain_id, chain_members
 
 
-def _late_streaks(notes: list[JudgedNote]) -> list[int]:
+def _late_streaks(notes: list[JudgedNote], mode: str = "v1") -> list[int]:
     """漏接之前连续偏晚（>10ms）的击打数。
 
     从每个 miss 往回数——"被越拖越晚、最后一格没按到"这个形状只有往回看才看得见。
@@ -175,7 +178,7 @@ def _late_streaks(notes: list[JudgedNote]) -> list[int]:
     """
     out = [0] * len(notes)
     for i, n in enumerate(notes):
-        if n.judgement != "miss":
+        if n.judged(mode) != "miss":
             continue
         k = i - 1
         while k >= 0:
@@ -187,7 +190,8 @@ def _late_streaks(notes: list[JudgedNote]) -> list[int]:
     return out
 
 
-def _signature_stats(notes: list[JudgedNote], by_obj: dict, sig_edges: list[float]) -> dict[tuple, list[int]]:
+def _signature_stats(notes: list[JudgedNote], by_obj: dict, sig_edges: list[float],
+                     mode: str = "v1") -> dict[tuple, list[int]]:
     """同类片段的历史表现：签名 → [总条数, 失误条数]。"""
     stats: dict[tuple, list[int]] = {}
     for n in notes:
@@ -196,7 +200,7 @@ def _signature_stats(notes: list[JudgedNote], by_obj: dict, sig_edges: list[floa
             continue
         bucket = stats.setdefault(patterns.signature(c, sig_edges), [0, 0])
         bucket[0] += 1
-        if n.is_flaw:
+        if n.is_flaw_for(mode):
             bucket[1] += 1
     return stats
 
@@ -277,6 +281,7 @@ class _FeatureContext:
     chain_members: dict[int, list[int]]
     late_streak: list[int]
     window: _WindowStats
+    mode: str = "v1"
 
     def pct(self, value: float, vals: list[float]) -> float:
         if not vals:
@@ -284,7 +289,8 @@ class _FeatureContext:
         return bisect.bisect_left(vals, value) / len(vals)
 
 
-def _build_feature_context(match: MatchResult, contexts: list[patterns.NoteContext], profile_bins: list[dict]) -> _FeatureContext:
+def _build_feature_context(match: MatchResult, contexts: list[patterns.NoteContext],
+                           profile_bins: list[dict], mode: str = "v1") -> _FeatureContext:
     notes = match.notes
     by_obj = {c.index: c for c in contexts}
     # 同一个纯函数算两遍（分位排序 + 逐条赋值）会得到两份可能不同步的数，所以只算一遍
@@ -297,13 +303,13 @@ def _build_feature_context(match: MatchResult, contexts: list[patterns.NoteConte
         by_obj=by_obj,
         presses=sorted(n.press_time for n in notes if n.press_time is not None),
         note_times=[n.note_time for n in notes],
-        flaw_times=[n.note_time for n in notes if n.is_flaw],
+        flaw_times=[n.note_time for n in notes if n.is_flaw_for(mode)],
         recent_mean=recent_mean,
         recent_absmed=recent_absmed,
         recent_std=recent_std,
         sig_edges=sig_edges,
-        sig_stats=_signature_stats(notes, by_obj, sig_edges),
-        global_rate=sum(1 for n in notes if n.is_flaw) / max(1, len(notes)),
+        sig_stats=_signature_stats(notes, by_obj, sig_edges, mode),
+        global_rate=sum(1 for n in notes if n.is_flaw_for(mode)) / max(1, len(notes)),
         # 整局中位偏差：用来区分"整局都在偏"（节奏）和"这一带比平常更晚"（被拖垮）
         global_bias=median([n.delta for n in notes if n.delta is not None]),
         global_abs_median=median([abs(n.delta) for n in notes if n.delta is not None]),
@@ -318,8 +324,9 @@ def _build_feature_context(match: MatchResult, contexts: list[patterns.NoteConte
         profile_bins=profile_bins,
         chain_id=chain_id,
         chain_members=chain_members,
-        late_streak=_late_streaks(notes),
+        late_streak=_late_streaks(notes, mode),
         window=_WindowStats(notes, [n.note_time for n in notes], by_obj),
+        mode=mode,
     )
 
 
@@ -381,7 +388,7 @@ def _fill_neighborhood(f: ErrorFeature, i: int, ctx: _FeatureContext) -> None:
         f.passage_bias = median(wd)
         f.passage_ur = stdev(wd) * 10
     if win:
-        f.passage_error_rate = sum(1 for x in win if x.is_flaw) / len(win)
+        f.passage_error_rate = sum(1 for x in win if x.is_flaw_for(ctx.mode)) / len(win)
 
     for b in ctx.profile_bins:
         if b["low"] <= f.density <= b["high"]:
@@ -399,7 +406,7 @@ def _fill_neighborhood(f: ErrorFeature, i: int, ctx: _FeatureContext) -> None:
 
     after = notes[i + 1 : i + 7]
     if after:
-        f.recovery = sum(1 for x in after if not x.is_flaw) / len(after)
+        f.recovery = sum(1 for x in after if not x.is_flaw_for(ctx.mode)) / len(after)
 
 
 def _fill_fingerprints(f: ErrorFeature, i: int, ctx: _FeatureContext) -> None:
@@ -412,9 +419,9 @@ def _fill_fingerprints(f: ErrorFeature, i: int, ctx: _FeatureContext) -> None:
     run_pos = members.index(i)
     # ≥4 连、且至少第 3 个才崩：3 连里"前面只有 1 个干净音"不构成"耐力跟不上"，
     # 那更可能只是这一下没打准（实测 3 连会在整局偏早的回放里被大量误触发）
-    if run_len >= 4 and run_pos >= 2 and f.note.judgement in ("good", "miss"):
+    if run_len >= 4 and run_pos >= 2 and f.note.judged(f.mode) in ("good", "miss"):
         head = members[:run_pos]
-        if all(ctx.notes[j].severity == 0 for j in head):
+        if all(ctx.notes[j].severity_for(f.mode) == 0 for j in head):
             f.jack_run_len = run_len
             f.jack_run_pos = run_pos
             f.jack_collapse = True
@@ -435,18 +442,19 @@ def _fill_fingerprints(f: ErrorFeature, i: int, ctx: _FeatureContext) -> None:
 
 
 def build_features(
-    match: MatchResult, contexts: list[patterns.NoteContext], profile_bins: list[dict] | None = None
+    match: MatchResult, contexts: list[patterns.NoteContext],
+    profile_bins: list[dict] | None = None, mode: str = "v1"
 ) -> list[ErrorFeature]:
     """给每个"有瑕疵"的击打算一组可解释的特征（完美击打不需要归因，直接跳过）。"""
     if not match.notes:
         return []
-    ctx = _build_feature_context(match, contexts, profile_bins or [])
+    ctx = _build_feature_context(match, contexts, profile_bins or [], mode)
 
     feats: list[ErrorFeature] = []
     for i, n in enumerate(ctx.notes):
-        if not n.is_flaw:
+        if not n.is_flaw_for(mode):
             continue
-        f = ErrorFeature(note=n, ctx=ctx.by_obj.get(n.obj_index))
+        f = ErrorFeature(note=n, ctx=ctx.by_obj.get(n.obj_index), mode=mode)
         _fill_context_feature(f, ctx)
         _fill_neighborhood(f, i, ctx)
         _fill_fingerprints(f, i, ctx)
@@ -589,7 +597,7 @@ def _ability_collapse_terms(f: ErrorFeature, reasons: list[str]) -> float:
         reasons.append(
             "纵连（%d 连）打到最后才崩：前面 %d 个都打干净了，这一下直接%s，"
             "是手指耐力跟不上这条链，不是拍子没对齐"
-            % (f.jack_run_len, f.jack_run_pos, "漏了" if f.note.judgement == "miss" else "爆了 200")
+            % (f.jack_run_len, f.jack_run_pos, "漏了" if f.note.judged(f.mode) == "miss" else "爆了 200")
         )
 
     # 9) 连续偏晚之后漏接（用户指定优先判能力）
@@ -903,7 +911,7 @@ def _same_category_runs(segments: list[_Segment]) -> list[list[_Segment]]:
 
 
 def _window_stats(notes_by_index: dict[int, JudgedNote], lo: int, hi: int,
-                  density_of: dict[int, float]) -> tuple[int, int, float]:
+                  density_of: dict[int, float], mode: str = "v1") -> tuple[int, int, float]:
     """统计一段下标区间里的（音符数, 失误数, 平均密度）。"""
     if hi < lo:
         return 0, 0, 0.0
@@ -915,7 +923,7 @@ def _window_stats(notes_by_index: dict[int, JudgedNote], lo: int, hi: int,
         if note is None:
             continue
         n += 1
-        if note.is_flaw:
+        if note.is_flaw_for(mode):
             flaws += 1
         d = density_of.get(idx)
         if d is not None:
@@ -941,6 +949,7 @@ def _stamina_profile(
     notes: list[JudgedNote],
     segments: list[_Segment],
     density_of: dict[int, float],
+    mode: str = "v1",
 ) -> dict:
     """耐力：在**同一种键型**的长段里，看后半程失误有没有明显高于前半程。
 
@@ -971,8 +980,8 @@ def _stamina_profile(
         if len(run) <= STAMINA_RUN_BLOCKS or run[0].category == "calm":
             continue
         split = run[STAMINA_RUN_BLOCKS].start_index
-        n0, f0, d0 = _window_stats(by_index, run[0].start_index, split - 1, density_of)
-        n1, f1, d1 = _window_stats(by_index, split, run[-1].end_index, density_of)
+        n0, f0, d0 = _window_stats(by_index, run[0].start_index, split - 1, density_of, mode)
+        n1, f1, d1 = _window_stats(by_index, split, run[-1].end_index, density_of, mode)
         if n0 <= 0 or n1 < STAMINA_MIN_TEST_NOTES or f1 < STAMINA_MIN_TEST_FLAWS:
             continue
         p0 = f0 / n0
@@ -1015,10 +1024,10 @@ def _stamina_profile(
 
 
 def build_profile(match: MatchResult, contexts: list[patterns.NoteContext],
-                  blocks: list | None = None) -> dict:
+                  blocks: list | None = None, mode: str = "v1") -> dict:
     notes = match.notes
-    deltas = match.deltas()
-    bits_severe = [1 if n.is_error else 0 for n in notes]
+    deltas = match.deltas(mode)
+    bits_severe = [1 if n.is_error_for(mode) else 0 for n in notes]
     runs = runs_test(bits_severe)
 
     samples: list[tuple[float, bool]] = []
@@ -1026,7 +1035,7 @@ def build_profile(match: MatchResult, contexts: list[patterns.NoteContext],
     for n in notes:
         c = by_obj.get(n.obj_index)
         if c is not None:
-            samples.append((c.density_1s, n.is_flaw))
+            samples.append((c.density_1s, n.is_flaw_for(mode)))
     prof = density_error_profile(samples, n_bins=6)
     trend = trend_significance(prof)
     density_bins = [
@@ -1042,7 +1051,7 @@ def build_profile(match: MatchResult, contexts: list[patterns.NoteContext],
     # 耐力：同一大类连续 6 段之后，失误有没有明显爬升（判据见 _stamina_profile）。
     # 分段优先用 build_blocks 的结果；直接调 build_profile 时按同类音符兜底重切。
     segments = _segments_from_blocks(blocks) if blocks else _segments_from_contexts(contexts)
-    stamina = _stamina_profile(notes, segments, {c.index: c.density_1s for c in contexts})
+    stamina = _stamina_profile(notes, segments, {c.index: c.density_1s for c in contexts}, mode)
 
     # 稳定上限：失误率第一次明显超过基线的那一档的下边界
     ceiling = 0.0
@@ -1060,7 +1069,7 @@ def build_profile(match: MatchResult, contexts: list[patterns.NoteContext],
         "ceiling": ceiling,
         "global_bias": median(deltas) if deltas else 0.0,
         "global_ur": stdev(deltas) * 10 if deltas else 0.0,
-        "flaw_rate": (sum(1 for n in notes if n.is_flaw) / len(notes)) if notes else 0.0,
+        "flaw_rate": (sum(1 for n in notes if n.is_flaw_for(mode)) / len(notes)) if notes else 0.0,
         "severe_rate": (sum(bits_severe) / len(notes)) if notes else 0.0,
         "runs": runs.as_dict(),
         "density_profile": density_bins,
@@ -1122,9 +1131,9 @@ def _decide(f: ErrorFeature, profile: dict) -> Attribution:
 
 
 def classify_all(match: MatchResult, contexts: list[patterns.NoteContext],
-                 blocks: list | None = None) -> tuple[list[Attribution], dict]:
-    profile = build_profile(match, contexts, blocks)
-    feats = build_features(match, contexts, profile.get("density_profile", []))
+                 blocks: list | None = None, mode: str = "v1") -> tuple[list[Attribution], dict]:
+    profile = build_profile(match, contexts, blocks, mode)
+    feats = build_features(match, contexts, profile.get("density_profile", []), mode)
     out = [_decide(f, profile) for f in feats]
     return out, summarize(out, profile)
 
