@@ -111,6 +111,7 @@
       <p class="muted">支持 osu!mania 的 <code>.osr</code> 回放。谱面会按回放里的 MD5 自动从你的曲库里匹配。</p>
       <div class="empty-actions">
         <button class="btn btn-primary" id="btnPickFile">选择回放文件</button>
+        <button class="btn btn-ghost" id="btnPickChart" title="不分析成绩，只看谱面的难度与键型构成">只看谱面（.osu）</button>
       </div>
       <p class="fineprint">文件只在本机处理，不会上传到任何服务器。</p>
       <div class="local-folder" id="localFolder">
@@ -119,6 +120,10 @@
         <div class="local-path-row">
           <code id="localFolderPath">—</code>
           <button class="btn btn-ghost" id="btnOpenFolder2">打开文件夹</button>
+        </div>
+        <div class="local-search">
+          <input id="localSearch" class="mini-input" type="search" placeholder="搜索回放文件名…" autocomplete="off" aria-label="搜索本地回放">
+          <span class="tag" id="localCount">—</span>
         </div>
         <ul class="bm-list" id="localReplayList"></ul>
       </div>
@@ -307,6 +312,10 @@
           <div class="card-head">
             <h2>回放</h2>
             <div class="card-tools">
+              <div class="seg-toggle" id="judgeToggle" title="长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）">
+                <button class="seg-btn is-active" data-judge="v1">V1</button>
+                <button class="seg-btn" data-judge="v2">V2</button>
+              </div>
               <button class="chip chip-btn" id="btnToggleErrors" title="只高亮失误">只看失误</button>
               <button class="chip chip-btn" id="btnCompare" title="上传同一张谱面的另一份回放，两路并排同步播放对比">对比</button>
               <span class="tag" id="playTime">0:00 / 0:00</span>
@@ -401,14 +410,40 @@
       </article>
     </div>
 
+    <!-- 只看谱面（.osu）：不读回放，只给难度与键型 -->
+    <div class="tab-panel" id="panel-chartonly" hidden>
+      <article class="card glass">
+        <div class="card-head">
+          <h2 id="coTitle">谱面</h2>
+          <p class="muted" id="coMeta">只分析谱面，不读取回放与成绩</p>
+        </div>
+        <div class="card-body">
+          <div class="msd-top">
+            <div class="msd-cell msd-big"><strong id="coMsd">—</strong><span>综合 MSD</span></div>
+            <div class="msd-cell msd-dan"><strong id="coDan">—</strong><span id="coDanNote">段位估计</span></div>
+            <div class="msd-cell msd-meta"><span id="coInfo">—</span></div>
+          </div>
+          <canvas id="coRadar" height="360"></canvas>
+        </div>
+      </article>
+      <article class="card glass">
+        <div class="card-head">
+          <h2>键型构成</h2>
+          <p class="muted" id="coClass"></p>
+        </div>
+        <div class="card-body">
+          <div class="pattern-bar" id="coBar"></div>
+          <ul class="pattern-legend" id="coLegend"></ul>
+        </div>
+      </article>
+    </div>
+
     <!-- 细节 -->
     <div class="tab-panel" id="panel-details" hidden>
       <article class="card glass" id="patternCard">
         <div class="card-head">
           <h2>键型构成</h2>
-          <p class="muted">先按段落判断大方向（LN / Calm / Jack / Speed / Stamina / Tech），再在段内细分；每段约 64 个物件</p>
           <p class="muted" id="mapClass" hidden></p>
-          <p class="muted" id="patternHint"><strong>LN 较多的图，请把下面的数据看作权重，而不是实际的键型比例</strong>——长条跨度长、物件少，按音符数算会低估它实际占的时间。</p>
         </div>
         <div class="card-body">
           <div class="pattern-bar" id="patternBar"></div>
@@ -443,7 +478,11 @@
           <dl class="about-kv">
             <div>
               <dt>版本</dt>
-              <dd id="aboutVersion">—</dd>
+              <dd>
+                <span id="aboutVersion">—</span>
+                <span id="aboutUpdate" class="about-update" hidden></span>
+                <button class="btn btn-sm" id="btnCheckUpdate" type="button">检查更新</button>
+              </dd>
             </div>
             <div>
               <dt>项目地址</dt>
@@ -499,8 +538,9 @@
         <div class="card-body">
           <p class="muted">
             回放、谱面与统计结果都只在本机处理，不会上传到任何服务器；服务只监听 <code>127.0.0.1</code>。
-            唯一的联网行为是「本地缺音频时去谱面镜像站补一份」，可以在 <code>app\_cache\config.json</code> 里用
-            <code>{"autoFetchAudio": false}</code> 关掉。
+            联网只有两种情况：本地缺音频时去谱面镜像站补一份（可用
+            <code>{"autoFetchAudio": false}</code> 关掉）；打开「关于」页或点「检查更新」时，
+            向 GitHub 查询一次最新版本号，不上传任何本地数据。
           </p>
         </div>
       </article>
@@ -511,6 +551,7 @@
 <!-- 隐藏的 file input -->
 <input type="file" id="fileOsr" accept=".osr" hidden>
 <input type="file" id="fileOsu" accept=".osu" hidden>
+<input type="file" id="fileChartOsu" accept=".osu" hidden>
 
 <!-- 拖拽遮罩 -->
 <div class="dropzone" id="dropzone" hidden>
