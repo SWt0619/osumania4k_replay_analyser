@@ -147,6 +147,88 @@ def _same_map(titles: list, artists: list, version: str, row: list) -> bool:
     return r_artist in a_set
 
 
+# 难度名里的常见词，不能当歌名用（否则两个不同曲的 Insane 会被判成同一首）
+_DIFFICULTY_WORDS = {
+    "easy", "normal", "hard", "insane", "another", "lunatic", "expert",
+    "advanced", "beginner", "extra", "hyper", "master", "ultimate", "novice",
+    "intermediate", "challenge", "practice",
+}
+
+
+def _core_songs(version: str) -> set[str]:
+    """从难度名里抽出可能的歌名（可能有多个候选）。
+
+    图包类谱面常把歌名写进难度名（`Blue Star feat. Hatsune Miku ([Crz]Rachel)`），
+    而 title 是图包名（`Vocaloid Chordjack Pack Vol. 1`）。这时只比 title 永远认不出
+    「同一首歌的另一个图包版本」，用户看到的就是"推荐自己，还推了两次"。
+
+    返回集合而不是单个串：`[Lv.2] [Crz]Rachel - Blue Star` 去掉标签后还剩
+    `Rachel - Blue Star`，按分隔符拆开才能把作者名与歌名分开。
+    """
+    t = str(version or "")
+    t = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", t)          # 去作者/标签括号
+    t = re.split(r"\bfeat\.?\b|\bft\.?\b", t, flags=re.I)[0]
+    out: set[str] = set()
+    for part in re.split(r"[-/|:]+", t):
+        core = _norm(part)
+        if len(core) < 5 or core in _DIFFICULTY_WORDS:
+            continue
+        # 纯段位/等级名（Reform 9、Lv.14、8dan）不是歌名
+        if core.startswith(("reform", "dan", "lv", "level")):
+            continue
+        if re.fullmatch(r"\d+[a-z]*", core):
+            continue
+        out.add(core)
+    return out
+
+
+def _author_tags(version: str) -> set[str]:
+    """难度名括号里的作者/谱师标签。
+
+    同歌不同谱师是合理的推荐（不同 interpretation），只有「同一首歌 + 同一谱师」
+    才算重复。标签抽不出来时不敢排，宁可多留一张。
+    """
+    t = str(version or "")
+    chunks = []
+    for a, b in re.findall(r"\(([^)]*)\)|\[([^\]]*)\]", t):
+        chunks.append(a or b)
+    out: set[str] = set()
+    for chunk in chunks:
+        chunk = chunk.replace("[", " ").replace("]", " ")
+        for part in re.split(r"[\s,，/&+]+", chunk):
+            core = _norm(part)
+            if len(core) < 3 or core in _DIFFICULTY_WORDS:
+                continue
+            if re.fullmatch(r"(lv|level)?\d+[a-z]*", core):
+                continue
+            out.add(core)
+    return out
+
+
+def _same_song(version: str, row: list) -> bool:
+    """候选是不是同一首歌、同一个谱师的另一个图包版本。
+
+    只在难度名能抽出歌名时启用：`Blue Star` 会从
+    `Blue Star feat. Hatsune Miku ([Crz]Rachel)` 与 `([Crz]Rachel) Blue Star`
+    抽出同一个 `bluestar`，且两边的 `[Crz]Rachel` 标签也对得上，于是同一首歌的
+    两个图包只留一个。同曲不同谱师（标签对不上）会保留。
+    """
+    mine = _core_songs(version)
+    if not mine:
+        return False
+    theirs = _core_songs(row[4])
+    if not theirs:
+        return False
+    same_song = bool(mine & theirs) or any(a in b or b in a for a in mine for b in theirs)
+    if not same_song:
+        return False
+    mine_tags = _author_tags(version)
+    theirs_tags = _author_tags(row[4])
+    if not mine_tags or not theirs_tags:
+        return False
+    return bool(mine_tags & theirs_tags)
+
+
 def pattern_similarity(a: dict, b: dict) -> float:
     """五类占比的相似度：0 = 完全不像，1 = 构成一模一样。"""
     l1 = sum(abs(float(a.get(c) or 0.0) - float(b.get(c) or 0.0)) for c in CATS)
@@ -191,6 +273,8 @@ def _pick(rows: list, q_rank: float, share: dict, artists: list, titles: list, v
         if exclude_sid is not None and row[1] == exclude_sid:
             continue
         if _same_map(titles, artists, version, row):
+            continue
+        if _same_song(version, row):
             continue
         gap = abs(rank - q_rank)
         if gap > gate:
