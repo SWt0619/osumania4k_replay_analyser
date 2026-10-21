@@ -41,6 +41,10 @@
   </div>
 
   <div class="topbar-actions">
+    <div class="seg-toggle topbar-judge" id="judgeToggle" title="长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）">
+      <button class="seg-btn is-active" data-judge="v1">V1</button>
+      <button class="seg-btn" data-judge="v2">V2</button>
+    </div>
     <div class="chip" id="libChip" title="osu! 曲库状态">
       <svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
       <span id="libChipText">曲库…</span>
@@ -312,10 +316,6 @@
           <div class="card-head">
             <h2>回放</h2>
             <div class="card-tools">
-              <div class="seg-toggle" id="judgeToggle" title="长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）">
-                <button class="seg-btn is-active" data-judge="v1">V1</button>
-                <button class="seg-btn" data-judge="v2">V2</button>
-              </div>
               <button class="chip chip-btn" id="btnToggleErrors" title="只高亮失误">只看失误</button>
               <button class="chip chip-btn" id="btnCompare" title="上传同一张谱面的另一份回放，两路并排同步播放对比">对比</button>
               <span class="tag" id="playTime">0:00 / 0:00</span>
