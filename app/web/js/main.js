@@ -1149,6 +1149,7 @@
     const view = state.data;
 
     window.UI.renderHero(view);
+    window.UI.renderMeta(view);
     window.UI.renderCategories(view);
     window.UI.renderSections(view);
     window.UI.renderPatternShare(view);
