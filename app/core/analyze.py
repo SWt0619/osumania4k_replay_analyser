@@ -1203,7 +1203,9 @@ def analyze(
     # notes 只存一份：时间/列/误差共用，判定与归因各留两套短字段
     common["notes"] = _compact_notes(match, atts_by_mode["v1"], atts_by_mode["v2"])
     for mode in ("v1", "v2"):
-        view = {**common, **views[mode]}
+        # judgeMode 必须一起传：评语里的“准确率 (v1/v2)”徽章与正文都靠它，
+        # 漏了就会在 V2 视图里继续写 v1。
+        view = {**common, **views[mode], "judgeMode": mode}
         views[mode]["evaluation"] = report.build_evaluation(view)
 
     payload = {
