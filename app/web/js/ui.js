@@ -229,6 +229,19 @@
       if (card) card.hidden = true;
       return;
     }
+    // 整图大类：LN 占压倒性就是 LN 图，RC 与 LN 都不占压倒性就是 Hybrid
+    const mc = $("mapClass");
+    if (mc) {
+      const info = (data && data.mapClass) || null;
+      if (info && info.label) {
+        mc.textContent = info.key === "hybrid"
+          ? "整图类型：" + info.label + "（长条占 " + info.lnShare + "%，常规键型占 " + (100 - info.lnShare).toFixed(1) + "%）"
+          : "整图类型：" + info.label + (info.key === "ln" ? "（长条占 " + info.lnShare + "%）" : "");
+        mc.hidden = false;
+      } else {
+        mc.hidden = true;
+      }
+    }
     const total = items.reduce((s, x) => s + Number(x.share || 0), 0) || 1;
     const detail = new Map(((data && data.patternDetail) || []).map((x) => [x.key, x]));
     items.forEach((it) => {
@@ -248,8 +261,9 @@
       li.appendChild(name);
       li.appendChild(document.createTextNode(" " + it.share + "%"));
 
-      // 大类下面再列细分键型（只取前两个，够看且不挤）
-      const d = detail.get(it.key);
+      // 大类下面再列细分键型（只取前两个，够看且不挤）。
+      // LN 段不列：它下面永远是"LN 100%"，和左边的类名重复。
+      const d = it.key === "ln" ? null : detail.get(it.key);
       if (d && d.items && d.items.length) {
         const sub = document.createElement("em");
         sub.className = "pattern-sub";
@@ -551,6 +565,11 @@
         const gap = Number(it.danGap);
         bits.push(it.dan + (gap > 0 ? "（差 " + gap + " 档）" : "（同档）"));
       }
+      // BPM 差：同一首曲子的倍速版 dan 可能完全对上，但手感差很远，这里直接摊开
+      if (it.bpm && Number(it.bpm) > 0) {
+        const bg = it.bpmGap;
+        bits.push("BPM " + Math.round(it.bpm) + (bg === null || bg === undefined ? "" : "（" + (bg > 0 ? "+" : "") + bg + "%）"));
+      }
       if (it.similarity) bits.push("相似度 " + Math.round(it.similarity * 100) + "%");
       const line = el("div", "s-meta", bits.join(" · "));
       // MSD 只作参考、不参与排序，放悬浮说明里，不占正文
@@ -558,6 +577,7 @@
         it.msd ? "这张图 MSD " + Number(it.msd).toFixed(1) : "",
         it.shareLabel ? "键型构成 " + it.shareLabel : "",
         it.relaxed ? "候选不够，已放宽段位门槛" : "",
+        it.bpmTerm !== null && it.bpmTerm !== undefined ? "BPM 接近度 " + Math.round(it.bpmTerm * 100) + "%（计入排序）" : "",
       ].filter(Boolean).join("\n");
       main.appendChild(line);
       li.appendChild(main);
