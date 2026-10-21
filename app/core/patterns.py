@@ -389,9 +389,43 @@ CATEGORY_LABEL = {
     "calm": "Calm",
     "stack": "Jack",
     "spam": "Speed",
-    "cut": "Stream",
+    "cut": "Stamina",   # 长连打一类，按用户口径叫 Stamina（键名保持 cut，不动索引格式）
     "tech": "Tech",
+    "hybrid": "Hybrid",
 }
+
+# 「Hybrid」不是块级判出来的，是整张图的结论：RC 与 LN 谁都不占压倒性优势。
+# 为什么要有：以前只有 LN 一类，一张 40% 长条 + 60% 双押的图会被归到 LN 或 Jack，
+# 两种说法都只讲了一半。实测 7 张公认的 hybrid 图，LN 占比是 32%~68%，
+# 而全库 LN 占比的分位是 p85 = 0.30、p90 = 0.48、p95 = 0.80——
+# 取 [0.30, 0.70) 这一段正好是"两边都有得打"的区间，约占全库 8.6%。
+HYBRID_LN_MIN = 0.30
+HYBRID_LN_FULL = 0.70
+# 第二条通道：长条**音符**占比高，但块级没凑够 45%（块里全是长条才判 LN 块）。
+# 一局里 38% 的音是长条、手感上一半时间在按长条，按块算却只有 23% —— 这类图
+# 归到 Jack 只讲了一半。实测全库长条占比 ≥35% 的只占 8.3%，不会把 Hybrid 撑爆。
+HYBRID_HOLD_MIN = 0.35
+HYBRID_HOLD_LN_MIN = 0.15
+RC_CLASSES = ("cut", "stack", "spam", "tech")
+
+
+def dominant_class(share: dict, hold_ratio: float = 0.0) -> str:
+    """整张图归到哪一大类。share 的取值是 0~1（不是百分比）。
+
+    LN 占压倒性（≥0.70）就是 LN 图；LN 与 RC 都成规模（0.30~0.70）就是 Hybrid；
+    长条音符本身过半（hold_ratio ≥0.35 且 LN 块占比 ≥0.15）也算 Hybrid ——
+    长条在块里"稀疏"，只按块算会低估它。
+    再往下才按 RC 里最大的那一类比。所以 hybrid 是一个**整图结论**，
+    五类占比仍然照原样给（界面上的堆叠条还能看出 LN 到底占多少）。
+    """
+    ln = float(share.get("ln") or 0.0)
+    if ln >= HYBRID_LN_FULL:
+        return "ln"
+    if ln >= HYBRID_LN_MIN:
+        return "hybrid"
+    if float(hold_ratio or 0.0) >= HYBRID_HOLD_MIN and ln >= HYBRID_HOLD_LN_MIN:
+        return "hybrid"
+    return max(RC_CLASSES, key=lambda k: float(share.get(k) or 0.0))
 
 
 @dataclass
