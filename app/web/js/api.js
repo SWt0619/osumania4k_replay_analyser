@@ -302,5 +302,19 @@
         body: JSON.stringify({ beatmap: beatmapBase64 }),
       });
     },
+
+    // 只看谱面：不传回放，后端只返回难度与键型构成
+    chartOnly(osuBase64) {
+      return jsonFetch("/api/chart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ osu: osuBase64 }),
+      });
+    },
+
+    // 检查更新：只请求 GitHub 的 latest release，失败由调用方静默处理
+    checkUpdate() {
+      return jsonFetch("/api/check-update");
+    },
   };
 })();
