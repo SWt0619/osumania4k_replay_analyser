@@ -22,6 +22,7 @@ SRC_DIR = os.path.join(HERE, "launcher")
 
 START_NAME = "启动分析器.exe"
 STOP_NAME = "停止分析器.exe"
+ICON = os.path.join(HERE, "icon", "app.ico")
 
 # 只用到 .NET Framework 里一直存在的两个程序集；System.dll 默认也带，显式写出来更稳
 REFS_COMMON = ["System.dll"]
@@ -50,6 +51,12 @@ def compile_one(csc: str, source: str, target: str, refs: list[str]) -> None:
         "/out:" + target,
         "/lib:" + lib_dir,
     ]
+    # 图标是发布质量的一部分：有就嵌进去，没生成过就提醒一句，不阻塞编译
+    if os.path.isfile(ICON):
+        cmd.append("/win32icon:" + ICON)
+    else:
+        print("  提醒：没找到 packaging\\icon\\app.ico，本次产物不带图标")
+        print("        需要图标时先跑 python packaging\\make_icon.py")
     for ref in refs:
         cmd.append("/r:" + ref)
     cmd.append(os.path.join(SRC_DIR, source))
