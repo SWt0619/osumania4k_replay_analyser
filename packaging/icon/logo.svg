@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <radialGradient id="pg" cx="38%" cy="30%" r="78%">
+      <stop offset="0%" stop-color="#ff8fc0"/>
+      <stop offset="62%" stop-color="#ff66aa"/>
+      <stop offset="100%" stop-color="#e0508f"/>
+    </radialGradient>
+  </defs>
+  <circle cx="320" cy="320" r="264" fill="url(#pg)"/>
+  <circle cx="320" cy="320" r="228" fill="none" stroke="#ffffff" stroke-width="16" opacity="0.96"/>
+  <polyline points="192,360 240,322 286,374 332,280 378,308 434,230" fill="none" stroke="#ffffff"
+            stroke-width="15" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="192" cy="360" r="12" fill="#ffffff"/><circle cx="192" cy="360" r="5" fill="#ff66aa"/>
+  <circle cx="240" cy="322" r="12" fill="#ffffff"/><circle cx="240" cy="322" r="5" fill="#ff66aa"/>
+  <circle cx="286" cy="374" r="12" fill="#ffffff"/><circle cx="286" cy="374" r="5" fill="#ff66aa"/>
+  <circle cx="332" cy="280" r="12" fill="#ffffff"/><circle cx="332" cy="280" r="5" fill="#ff66aa"/>
+  <circle cx="378" cy="308" r="12" fill="#ffffff"/><circle cx="378" cy="308" r="5" fill="#ff66aa"/>
+  <circle cx="434" cy="230" r="15" fill="#ffffff"/><circle cx="434" cy="230" r="7" fill="#ff66aa"/>
+</svg>
