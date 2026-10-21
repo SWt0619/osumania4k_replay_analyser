@@ -13,11 +13,14 @@ import threading
 import time
 from dataclasses import dataclass
 
+from types import SimpleNamespace
+
 from . import attribution, dan, msd, patterns, report
 from .beatmap import JUDGEMENT_LABEL, Beatmap, long_path, parse_osu_file
 from .library import get_library
 from .match import (
     V1_WEIGHTS,
+    V2_ACC_VALUE,
     MatchResult,
     compare_with_header,
     infer_random_order,
@@ -30,6 +33,17 @@ from .osr import MOD_MR, MOD_RANDOM, Replay, extract_events, mods_human, parse_o
 from ..version import __version__
 
 JUDGEMENT_CODE = {"perfect": 0, "great": 1, "good": 2, "ok": 3, "meh": 4, "miss": 5}
+
+
+def _weight(note, mode: str = "v1") -> float:
+    """当前口径下一击在准确率里的权重（0..1）。
+
+    V1 用官方 ScoreV1 权重（MAX 与 300 同权）；V2 用判定分 ÷ 305，
+    所以 V2 下只有全 MAX 才是 100%。分开写是为了时间轴、分段、总评都用同一把尺子。
+    """
+    if mode == "v2":
+        return V2_ACC_VALUE.get(note.judged("v2"), 0) / 305.0
+    return v1_weight(note)
 
 # 时间轴分段：每段目标约 6 个音符（按密度反推时长），并夹在 250ms~2000ms 之间。
 # 固定 2 秒一段的话，慢歌上粗糙到看不出起伏、12 NPS 上又会把 24 个音压成一个点。
@@ -191,7 +205,7 @@ class _BucketAccum:
 
 
 def _accumulate_buckets(
-    notes, n_buckets: int, t0: float, bucket_ms: float, cat_by_note
+    notes, n_buckets: int, t0: float, bucket_ms: float, cat_by_note, mode: str = "v1"
 ) -> _BucketAccum:
     """把每个物件投进它所属的桶，得到逐桶的原始计数（还不含累计量）。"""
     acc = _BucketAccum(
@@ -209,12 +223,13 @@ def _accumulate_buckets(
         if idx < 0 or idx >= n_buckets:
             continue
         acc.notes[idx] += 1
-        if n.is_error:
+        if n.is_error_for(mode):
             acc.errors[idx] += 1
         # 单独记「漏接」和「长条断连」：时间轴上只给这两类画节点，其余判定的点太密看不出东西
-        if n.is_hold and n.dropped:
+        broken = n.body_break if mode == "v2" else n.dropped
+        if n.is_hold and broken:
             acc.breaks[idx] += 1
-        elif n.judgement == "miss":
+        elif n.judged(mode) == "miss":
             acc.miss[idx] += 1
         if cat_by_note:
             cat = cat_by_note.get(id(n))
@@ -222,7 +237,7 @@ def _accumulate_buckets(
                 acc.cats[idx][cat] += 1
         if n.delta is not None:
             acc.deltas[idx].append(n.delta)
-        acc.v1[idx] += v1_weight(n)
+        acc.v1[idx] += _weight(n, mode)
     return acc
 
 
@@ -280,7 +295,8 @@ def _bucket_rows(
 
 
 
-def _timeline(match: MatchResult, bucket_ms: float | None = None, cat_by_note=None, rate: float = 1.0) -> dict:
+def _timeline(match: MatchResult, bucket_ms: float | None = None, cat_by_note=None,
+              rate: float = 1.0, mode: str = "v1") -> dict:
     """时间轴：按时间分段统计 NPS / 失误 / 准确率 / UR。
 
     bucket_ms 传 None 时按密度自适应（见 _pick_bucket_ms）。
@@ -293,7 +309,7 @@ def _timeline(match: MatchResult, bucket_ms: float | None = None, cat_by_note=No
             "npsSeries": {"bucket": NPS_WINDOW_MS, "points": []},
         }
     t0, t1, bucket_ms, n_buckets = _timeline_span(match, bucket_ms)
-    acc = _accumulate_buckets(notes, n_buckets, t0, bucket_ms, cat_by_note)
+    acc = _accumulate_buckets(notes, n_buckets, t0, bucket_ms, cat_by_note, mode)
     buckets = _bucket_rows(acc, t0, bucket_ms, rate)
     return {
         "bucket": bucket_ms,
@@ -303,8 +319,9 @@ def _timeline(match: MatchResult, bucket_ms: float | None = None, cat_by_note=No
     }
 
 
-def _offset_histogram(match: MatchResult, lo: float = -200.0, hi: float = 200.0, bins: int = 80) -> dict:
-    deltas = match.deltas()
+def _offset_histogram(match: MatchResult, lo: float = -200.0, hi: float = 200.0,
+                      bins: int = 80, mode: str = "v1") -> dict:
+    deltas = match.deltas(mode)
     return {
         "lo": lo,
         "hi": hi,
@@ -314,13 +331,13 @@ def _offset_histogram(match: MatchResult, lo: float = -200.0, hi: float = 200.0,
     }
 
 
-def _column_stats(match: MatchResult) -> list[dict]:
+def _column_stats(match: MatchResult, mode: str = "v1") -> list[dict]:
     keys = max(1, match.beatmap.keys)
     out = []
     for col in range(keys):
         seg = [n for n in match.notes if n.column == col]
         ds = [n.delta for n in seg if n.delta is not None]
-        errors = sum(1 for n in seg if n.is_error)
+        errors = sum(1 for n in seg if n.is_error_for(mode))
         out.append(
             {
                 "column": col,
@@ -335,7 +352,8 @@ def _column_stats(match: MatchResult) -> list[dict]:
     return out
 
 
-def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3) -> list[dict]:
+def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3,
+                   mode: str = "v1") -> list[dict]:
     notes = match.notes
     if not notes:
         return []
@@ -350,11 +368,9 @@ def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3) -> lis
         if not seg:
             continue
         ds = [n.delta for n in seg if n.delta is not None]
-        errors = sum(1 for n in seg if n.is_error)
-        # 这里必须是 v1 加权准确率，和顶部「准确率 (v1)」、报告正文用同一把尺子。
-        # 以前算的是"1 − 严重失误率"，吃了 200 仍显示 100% —— 同一屏上两个不同的
-        # "准确率"（比如图里 66.7%、面板 94.5%）会让人以为工具算错了。
-        seg_acc = sum(v1_weight(n) for n in seg) / len(seg) * 100.0
+        errors = sum(1 for n in seg if n.is_error_for(mode))
+        # 与顶部准确率、报告正文用同一把尺子：切换口径时这里的数字也要跟着变
+        seg_acc = sum(_weight(n, mode) for n in seg) / len(seg) * 100.0
         out.append(
             {
                 "index": i,
@@ -372,20 +388,31 @@ def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3) -> lis
     return out
 
 
-def _combo_breaks(match: MatchResult, limit: int = 200) -> list[dict]:
+def _combo_breaks(match: MatchResult, limit: int = 200, mode: str = "v1") -> list[dict]:
     out = []
     for n in match.notes:
-        if n.judgement == "miss" or n.dropped:
-            out.append(
-                {
-                    "t": round(n.note_time),
-                    "column": n.column,
-                    "reason": "漏接" if n.judgement == "miss" else "长按提前松手",
-                    "delta": round(n.delta, 1) if n.delta is not None else None,
-                }
-            )
-            if len(out) >= limit:
-                break
+        reason = ""
+        if mode == "v2":
+            if n.head_judgement == "miss":
+                reason = "漏接"
+            elif n.tail_judgement == "miss":
+                reason = "长按尾判失误"
+            elif n.body_break:
+                reason = "长按提前松手"
+        elif n.judgement == "miss" or n.dropped:
+            reason = "漏接" if n.judgement == "miss" else "长按提前松手"
+        if not reason:
+            continue
+        out.append(
+            {
+                "t": round(n.note_time),
+                "column": n.column,
+                "reason": reason,
+                "delta": round(n.delta, 1) if n.delta is not None else None,
+            }
+        )
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -403,35 +430,46 @@ def _warnings(replay: Replay, beatmap: Beatmap, presses) -> str:
     return warn
 
 
-def _compact_notes(match: MatchResult, atts: list) -> list[dict]:
+def _compact_notes(match: MatchResult, atts: list, atts_v2: list | None = None) -> list[dict]:
     """播放器与热力图用的紧凑 notes。
 
     键名压到一个字母是刻意的：完整 payload 里这一项占体积的大头（几千条 × 每条约 80 字节），
     短键名能把它砍掉一半以上，而前端只读这几个字段。
+
+    归因类别给两份（cat / cat2）：两套判定下的"失误"集合不同，切换口径时
+    失误清单的分类也要跟着变。时间、列、误差这些共用，不重复存。
     """
     att_by_note = {id(a.note): a for a in atts}
+    att2_by_note = {id(a.note): a for a in (atts_v2 or [])}
     out = []
     for n in match.notes:
         a = att_by_note.get(id(n))
+        a2 = att2_by_note.get(id(n))
         out.append(
             {
                 "t": round(n.note_time, 2),
                 "c": n.column,
                 "j": JUDGEMENT_CODE.get(n.judgement, 5),
+                # V2 判定：切到 ScoreV2 口径时播放器读这个，颜色与失误过滤都用它
+                "j2": JUDGEMENT_CODE.get(n.judgement_v2 or n.judgement, 5),
                 "d": round(n.delta, 2) if n.delta is not None else None,
                 "h": round(n.end_time, 2) if n.is_hold and n.end_time is not None else None,
                 # 松手偏差（ms）：回放页要按它画出"实际松手的位置"，只有长按才有
                 "rd": round(n.release_delta, 2) if n.is_hold and n.release_delta is not None else None,
                 "e": 1 if n.is_flaw else 0,
                 "sev": n.severity,
+                "e2": 1 if n.is_flaw_for("v2") else 0,
+                "sev2": n.severity_for("v2"),
+                "bb": 1 if n.body_break else 0,
                 "cat": a.category if a else None,
+                "cat2": a2.category if a2 else None,
             }
         )
     return out
 
 
 def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext],
-                   stamina: dict | None = None) -> list[dict]:
+                   stamina: dict | None = None, mode: str = "v1") -> list[dict]:
     """每条失误的完整说明：判定、误差、所在 pattern、归因与"凭什么这么判"。
 
     这里叠了 a.as_dict()，所以 category/scores/reasons 都在同一层，前端不必再嵌套取值。
@@ -450,21 +488,25 @@ def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext],
     for a in atts:
         n = a.note
         ctx = ctx_by_index.get(n.obj_index)
+        judged = n.judged(mode)
         out.append(
             {
                 "t": round(n.note_time, 2),
                 "column": n.column,
-                "judgement": n.judgement,
-                "judgementLabel": JUDGEMENT_LABEL.get(n.judgement, n.judgement),
+                "judgement": judged,
+                "judgementLabel": JUDGEMENT_LABEL.get(judged, judged),
                 "delta": round(n.delta, 2) if n.delta is not None else None,
                 "pattern": patterns.pattern_label(ctx) if ctx else "散音",
                 # 机器可读的键型 key（longjack / jumpstream / chordjack…），中文名见 patterns.PATTERN_LABEL
                 "patternKey": patterns.classify(ctx),
+                # 所属大块（cut/stack/spam/tech/ln），按段匹配要按大类统计，细分太碎
+                "coarse": ctx.coarse if ctx else None,
                 "density": round(ctx.density_1s, 2) if ctx else None,
                 "chord": ctx.chord_size if ctx else None,
                 "isHold": n.is_hold,
-                "dropped": n.dropped,
-                "severity": n.severity,
+                "dropped": (n.body_break if mode == "v2" else n.dropped),
+                "bodyBreak": n.body_break,
+                "severity": n.severity_for(mode),
                 # 落在耐力窗口里才给：null 表示这条与耐力无关
                 "stamina": hint if in_stamina and n.note_time >= st["lateFrom"] else None,
                 **a.as_dict(),
@@ -473,12 +515,13 @@ def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext],
     return out
 
 
-def _summary(match: MatchResult, replay: Replay, atts: list, combo_breaks: list[dict]) -> dict:
+def _summary(match: MatchResult, replay: Replay, atts: list, combo_breaks: list[dict],
+             mode: str = "v1") -> dict:
     """头部数字块。
 
     deltas 只取一次：它在下文被用了七八次，每次都重新扫全表在 5000 物件上要多花几十毫秒。
     """
-    deltas = match.deltas()
+    deltas = match.deltas(mode)
     notes = match.notes
     v2_parts = match.score_v2_parts()
     # ScoreV2：osu! 现行计分，两段式（连击分 + 准度分），长按算头尾两次判定。
@@ -486,7 +529,7 @@ def _summary(match: MatchResult, replay: Replay, atts: list, combo_breaks: list[
     score_v2, grade_v2 = match.score_v2()
     score_v2_lazer, _ = match.score_v2(lazer=True)
     return {
-        "accuracy": round(match.accuracy(), 2),
+        "accuracy": round(match.accuracy(mode), 2),
         # UR 官方口径：误差总体标准差 ×10，DT/HT 下还要除以倍率
         # （lazer UnstableRate.cs 把 timeOffset 先 ÷ GameplayRate；这里等价于对 UR 除以 rate）
         "ur": round(unstable_rate(deltas) / (replay.rate or 1.0), 1) if len(deltas) > 1 else 0.0,
@@ -495,12 +538,12 @@ def _summary(match: MatchResult, replay: Replay, atts: list, combo_breaks: list[
         "absMedian": round(median([abs(d) for d in deltas]), 2) if deltas else 0.0,
         "p10": round(percentile(deltas, 0.10), 1) if deltas else 0.0,
         "p90": round(percentile(deltas, 0.90), 1) if deltas else 0.0,
-        "counts": match.counts(),
-        "maxCombo": match.max_combo(),
-        "errors": sum(1 for n in notes if n.is_error),
+        "counts": match.counts(mode),
+        "maxCombo": match.max_combo(mode),
+        "errors": sum(1 for n in notes if n.is_error_for(mode)),
         "flaws": len(atts),
         "errorRate": round(len(atts) / max(1, len(notes)) * 100, 2),
-        "severeRate": round(sum(1 for n in notes if n.is_error) / max(1, len(notes)) * 100, 2),
+        "severeRate": round(sum(1 for n in notes if n.is_error_for(mode)) / max(1, len(notes)) * 100, 2),
         "ghosts": len(match.ghosts),
         "comboBreaks": len(combo_breaks),
         "scoreV2": score_v2,
@@ -692,13 +735,16 @@ def msd_for(beatmap_md5: str, beatmap) -> dict:
     return payload
 
 
-def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str] | None = None) -> dict:
+def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str] | None = None,
+                mode: str = "v1") -> dict:
     """把"容易解决的失误"当成已经修好，重算准确率与 v1 分数。
 
     口径要说清楚，否则就是个画饼的数字：
       * 三类成因各只修 **10%（至少 1 个）**，且优先修「损失最小」的那些。
       * 修好 = 那一击按 300（great）算，而不是 320 —— 保守一点，别拿满分当预期。
       * 连击按修好的那几条重算，断连补上会带来额外分数。
+      * 准确率按当前判定口径算；分数涨幅仍用 ScoreV1 公式，V2 下只看准确率变化。
+
     """
     total = len(match.notes)
     if not total:
@@ -710,7 +756,7 @@ def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str]
             by_cat.setdefault(a.category, []).append(a)
     to_fix = set()
     for cat, items in by_cat.items():
-        items.sort(key=lambda a: (a.note.severity, abs(a.note.delta or 0.0)))
+        items.sort(key=lambda a: (a.note.severity_for(mode), abs(a.note.delta or 0.0)))
         take = max(1, round(len(items) * PROJECTION_FIX_RATE))
         for a in items[:take]:
             to_fix.add(id(a.note))
@@ -720,16 +766,18 @@ def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str]
     cur_w = 0.0
     new_w = 0.0
     fixed = 0
+    fix_weight = (V2_ACC_VALUE["great"] / 305.0) if mode == "v2" else V1_WEIGHTS["great"]
     for n in match.notes:
-        cur_js.append(n.judgement)
-        w = v1_weight(n)
+        judged = n.judged(mode)
+        cur_js.append(judged)
+        w = _weight(n, mode)
         cur_w += w
         if id(n) in to_fix:
             fixed += 1
             new_js.append("great")
-            new_w += V1_WEIGHTS["great"]
+            new_w += fix_weight
         else:
-            new_js.append(n.judgement)
+            new_js.append(judged)
             new_w += w
 
     cur_acc = cur_w / total * 100.0
@@ -794,7 +842,8 @@ def _map_class(pattern_detail: list[dict], holds: int = 0, notes: int = 0) -> di
             "lnShare": round(share.get("ln", 0.0) * 100, 1)}
 
 
-def _pattern_stats(match: MatchResult, ctx_by_index: dict[int, patterns.NoteContext]) -> list[dict]:
+def _pattern_stats(match: MatchResult, ctx_by_index: dict[int, patterns.NoteContext],
+                   mode: str = "v1") -> list[dict]:
     """每种键型：有多少物件、失误率多少、相对全谱平均"吃亏几倍"。
 
     为什么必须给 lift（相对倍数）而不是"失误条数占比"：
@@ -809,7 +858,7 @@ def _pattern_stats(match: MatchResult, ctx_by_index: dict[int, patterns.NoteCont
         key = patterns.classify(ctx_by_index.get(n.obj_index))
         b = buckets.setdefault(key, [0, 0])
         b[0] += 1
-        if n.is_flaw:
+        if n.is_flaw_for(mode):
             b[1] += 1
 
     global_rate = sum(b[1] for b in buckets.values()) / total
@@ -1024,6 +1073,47 @@ def _verify_against_header(match: MatchResult, replay: Replay, warn: str) -> tup
     return verify, warn
 
 
+def analyze_chart(osu_path: str) -> dict:
+    """只分析谱面：难度、段位、键型构成与分段，完全不碰回放。
+
+    给「导入 .osu 看难度」用。字段刻意与完整分析保持同名（beatmap / msd /
+    patternShare / patternDetail / mapClass / blocks），前端可以用同一套渲染函数。
+    """
+    beatmap = parse_osu_file(osu_path)
+    ensure_supported(beatmap)
+    if not beatmap.objects:
+        raise AnalyzeError("这份谱面里没有任何物件，确认一下选的是不是 mania 难度")
+
+    contexts, blocks = _build_contexts(beatmap)
+    detail = _pattern_breakdown(contexts)
+    # _peak_nps 只读 note_time，这里没有 JudgedNote，用轻量对象代替
+    peak = _peak_nps([SimpleNamespace(note_time=o.time) for o in beatmap.objects])
+    bm = _beatmap_summary(beatmap, "上传的 .osu", peak)
+    return {
+        "ok": True,
+        "chartOnly": True,
+        "version": __version__,
+        "beatmap": bm,
+        "msd": msd_for(beatmap.md5, beatmap),
+        "patternShare": [
+            {"key": x["key"], "label": x["label"], "share": x["share"]} for x in detail
+        ],
+        "patternDetail": detail,
+        "mapClass": _map_class(detail, bm["holds"], bm["notes"]),
+        "blocks": [
+            {
+                "start": round(b.start_time),
+                "end": round(b.end_time),
+                "category": b.category,
+                "label": b.label,
+                "notes": b.notes,
+                "nps": round(b.nps, 2),
+            }
+            for b in blocks
+        ],
+    }
+
+
 def analyze(
     replay_path: str,
     beatmap_path: str | None = None,
@@ -1043,35 +1133,17 @@ def analyze(
 
     # 按 obj_index 建一次索引：后面逐条失误都要取上下文，用 next() 扫全表是 O(n²)
     ctx_by_index = {c.index: c for c in contexts}
-    atts, cat_summary = attribution.classify_all(match, contexts, blocks)
-    watch.mark("classify")
-
     verify, warn = _verify_against_header(match, replay, warn)
-    combo_breaks = _combo_breaks(match)
-    cat_by_note = {id(a.note): a.category for a in atts}
-    timeline = _timeline(match, None, cat_by_note, replay.rate)
-    sections = _section_stats(match, replay.rate)
-    columns = _column_stats(match)
-    histo = _offset_histogram(match)
     beatmap_payload = _beatmap_summary(beatmap, source, _peak_nps(match.notes))
-    watch.mark("assemble")
-
     pattern_detail = _pattern_breakdown(contexts)
 
-    payload = {
+    # 这些与判定口径无关：谱面、回放头、键型构成、MSD、分段。两套视图共用。
+    common = {
         "ok": True,
         "version": __version__,
         "warnings": [w for w in [warn] if w],
         "replay": _replay_block(replay, verify, column_order),
         "beatmap": beatmap_payload,
-        "summary": _summary(match, replay, atts, combo_breaks),
-        "timeline": timeline,
-        "offsetHistogram": histo,
-        "sections": sections,
-        "columnStats": columns,
-        "notes": _compact_notes(match, atts),
-        "errors": _error_payload(atts, ctx_by_index, (cat_summary.get("profile") or {}).get("stamina")),
-        "patterns": _pattern_stats(match, ctx_by_index),
         # 分段的粗分类（叠 / 乱 / 切 / tech）：键型判断先看整段再挑细分，
         # 前端可以在时间轴上把这条带画出来，让人一眼看出这首歌由哪几段构成。
         "blocks": [
@@ -1081,6 +1153,8 @@ def analyze(
                 "category": b.category,
                 "label": b.label,
                 "notes": b.notes,
+                # 段内平均密度与段长：按段匹配要用它把"失误段"换成可比较的特征
+                "nps": round(b.nps, 2),
                 "jack": b.jack_ratio,
                 "chord": b.chord_ratio,
                 "regular": b.regularity,
@@ -1095,11 +1169,49 @@ def analyze(
         "patternDetail": pattern_detail,
         # 整图大类（Stream / Jack / Speed / Tech / LN / Hybrid）——界面上直接告诉用户"这是什么图"
         "mapClass": _map_class(pattern_detail, beatmap_payload["holds"], beatmap_payload["notes"]),
-        "comboBreaks": combo_breaks,
-        "categories": cat_summary,
-        "projection": _projection(match, atts, replay.score, replay.mod_names),
         # 谱面难度（MinaCalc MSD）：与回放无关，纯看谱面；页面上画成雷达图
         "msd": msd_for(replay.beatmap_md5, beatmap),
+    }
+
+    # 两套判定视图：V1（stable 合并口径）与 V2（头尾分判）。
+    # 归因、时间轴、失误清单、评语都按各自口径重算一遍，
+    # 这样页面切换时只是换一份数据，不会出现"判定变了、准确率没变"的矛盾。
+    views: dict[str, dict] = {}
+    atts_by_mode: dict[str, list] = {}
+    for mode in ("v1", "v2"):
+        atts, cat_summary = attribution.classify_all(match, contexts, blocks, mode)
+        atts_by_mode[mode] = atts
+        combo_breaks = _combo_breaks(match, mode=mode)
+        cat_by_note = {id(a.note): a.category for a in atts}
+        stamina = (cat_summary.get("profile") or {}).get("stamina")
+        views[mode] = {
+            "summary": _summary(match, replay, atts, combo_breaks, mode),
+            "timeline": _timeline(match, None, cat_by_note, replay.rate, mode),
+            "offsetHistogram": _offset_histogram(match, mode=mode),
+            "sections": _section_stats(match, replay.rate, 3, mode),
+            "columnStats": _column_stats(match, mode),
+            "errors": _error_payload(atts, ctx_by_index, stamina, mode),
+            "patterns": _pattern_stats(match, ctx_by_index, mode),
+            "comboBreaks": combo_breaks,
+            "categories": cat_summary,
+            # 分数投影仍按 ScoreV1 公式；V2 下只留准确率变化，避免两个计分口径混在一起
+            "projection": _projection(match, atts, replay.score, replay.mod_names, mode)
+            if mode == "v1" else {},
+        }
+    watch.mark("classify")
+
+    # notes 只存一份：时间/列/误差共用，判定与归因各留两套短字段
+    common["notes"] = _compact_notes(match, atts_by_mode["v1"], atts_by_mode["v2"])
+    for mode in ("v1", "v2"):
+        view = {**common, **views[mode]}
+        views[mode]["evaluation"] = report.build_evaluation(view)
+
+    payload = {
+        **common,
+        # 顶层保留 V1 字段，旧版前端（以及单文件报告）不用改就能继续读
+        **views["v1"],
+        "modes": views,
+        "judge": {"default": "v1", "modes": ["v1", "v2"]},
         "elapsedMs": watch.elapsed_ms(),
         "timings": watch.timings,
     }
@@ -1110,6 +1222,5 @@ def analyze(
             "等游戏完全退出后重新拖入可以拿到完整结果。" % len(replay.frames)
         )
 
-    payload["evaluation"] = report.build_evaluation(payload)
     # 相似谱面不在这里算：难度要用前端 Sunny 算出的段位，等页面拿到段位后调 /api/recommend
     return payload
