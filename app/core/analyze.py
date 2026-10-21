@@ -785,6 +785,15 @@ def _pattern_breakdown(contexts) -> list[dict]:
     return out
 
 
+def _map_class(pattern_detail: list[dict], holds: int = 0, notes: int = 0) -> dict:
+    """整张图归到哪一类。Hybrid = RC 与 LN 都不占压倒性（见 patterns.dominant_class）。"""
+    share = {x["key"]: float(x["share"]) / 100.0 for x in pattern_detail}
+    hold_ratio = (float(holds) / notes) if notes else 0.0
+    key = patterns.dominant_class(share, hold_ratio)
+    return {"key": key, "label": patterns.CATEGORY_LABEL.get(key, key),
+            "lnShare": round(share.get("ln", 0.0) * 100, 1)}
+
+
 def _pattern_stats(match: MatchResult, ctx_by_index: dict[int, patterns.NoteContext]) -> list[dict]:
     """每种键型：有多少物件、失误率多少、相对全谱平均"吃亏几倍"。
 
@@ -1084,6 +1093,8 @@ def analyze(
         ],
         # 每个大类下的细分键型（纵连 / 小叠 / 多押叠 · 单双三四押切 …）
         "patternDetail": pattern_detail,
+        # 整图大类（Stream / Jack / Speed / Tech / LN / Hybrid）——界面上直接告诉用户"这是什么图"
+        "mapClass": _map_class(pattern_detail, beatmap_payload["holds"], beatmap_payload["notes"]),
         "comboBreaks": combo_breaks,
         "categories": cat_summary,
         "projection": _projection(match, atts, replay.score, replay.mod_names),
