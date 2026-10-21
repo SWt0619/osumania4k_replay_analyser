@@ -10,7 +10,9 @@
 
   const state = {
     data: null,
+    chartOnly: null,      // 只看谱面（.osu）时的精简结果；与 data 互斥
     replayBase64: null,
+    localItems: [],       // _replays 目录的原始列表，搜索时在内存里过滤
     tab: "overview",
     errorFilter: { cat: "all", severe: false },
     errorShown: 50,
@@ -45,6 +47,10 @@
     _tlFallbackAt: 0,
     _searchTimer: null,
     _accShown: null,
+    // 判定口径：v1（stable 合并）/ v2（头尾分判）。两套结果后端都已算好，
+    // 切换只是换一份视图，不重新请求分析。
+    judgeMode: "v1",
+    baseData: null,
   };
 
   // 回放页的两个滑杆记在本地，下次打开还是上次的设置
@@ -57,6 +63,7 @@
       if (typeof p.scrollMs === "number" && p.scrollMs >= 300 && p.scrollMs <= 2600) state.scrollMs = p.scrollMs;
       if (typeof p.audioOffset === "number" && p.audioOffset >= -500 && p.audioOffset <= 500) state.audioOffset = p.audioOffset;
       if (typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1) state.volume = p.volume;
+      if (p.judgeMode === "v1" || p.judgeMode === "v2") state.judgeMode = p.judgeMode;
     } catch (e) { /* 隐私模式下拿不到就算了 */ }
   }
   function savePrefs() {
@@ -65,6 +72,7 @@
         scrollMs: state.scrollMs,
         audioOffset: state.audioOffset,
         volume: state.volume,
+        judgeMode: state.judgeMode,
       }));
     } catch (e) { /* ignore */ }
   }
@@ -114,14 +122,15 @@
     document.querySelectorAll(".rail-btn").forEach((b) => {
       b.classList.toggle("is-active", b.dataset.tab === name);
     });
-    ["overview", "timeline", "errors", "replay", "chart", "details", "about"].forEach((t) => {
+    ["overview", "timeline", "errors", "replay", "chart", "chartonly", "details", "about"].forEach((t) => {
       const p = $("panel-" + t);
       if (p) p.hidden = t !== name;
     });
-    // 「关于」不依赖分析结果：没导入回放时也要能看，所以它开着就别显示空状态
-    $("emptyState").hidden = !!state.data || name === "about";
+    // 「关于」不依赖分析结果：没导入回放时也要能看；「只看谱面」同理
+    $("emptyState").hidden = !!state.data || name === "about" || name === "chartonly";
+    if (name === "about") checkUpdate(false);
     // 切到某页时补一次重绘（隐藏时 canvas 尺寸是 0）
-    if (state.data) {
+    if (state.data || state.chartOnly) {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           drawChartsForTab(name);
@@ -151,10 +160,10 @@
 
   // ---------------------------------------------------------------- 图表
   function drawChartsForTab(tab) {
-    if (!state.data) return;
+    if (!state.data && !state.chartOnly) return;
     const Charts = window.Charts;
     if (!Charts) return;
-    const d = state.data;
+    const d = state.data || state.chartOnly;
     const theme = readTheme();
 
     const draw = (id, fn) => {
@@ -203,6 +212,16 @@
       );
       return;
     }
+    if (tab === "chartonly") {
+      draw("coRadar", (c) =>
+        Charts.drawRadar(c, d.msd && d.msd.available ? d.msd.skillsets : null, {
+          theme,
+          width: c.clientWidth,
+          height: 360,
+        })
+      );
+      return;
+    }
 
     if (tab === "details") {
       draw("chartColumns", (c) =>
@@ -226,6 +245,13 @@
   const V1_HB = [2, 1, 0, 0, 0, 0];
   const V1_HP = [0, 0, 8, 24, 44, Infinity];
 
+  // 当前判定口径下的判定码（0..5）。后端把两套都放在同一条 note 上：
+  // j 是 V1，j2 是 V2，播放器与实时前缀和都从这里取。
+  function jCodeOf(note) {
+    const v = state.judgeMode === "v2" ? note.j2 : note.j;
+    return v >= 0 && v <= 5 ? v | 0 : 5;
+  }
+
   // 把一份 notes 折成前缀和：任意时刻 t 都能 O(log n) 拿到累计 acc 与累计分
   function buildProgress(notes) {
     const n = notes.length;
@@ -241,7 +267,7 @@
     let w = 0;
     let s = 0;
     for (let i = 0; i < n; i += 1) {
-      const c = notes[i].j >= 0 && notes[i].j <= 5 ? notes[i].j | 0 : 5;
+      const c = jCodeOf(notes[i]);
       run[c] += 1;
       for (let k = 0; k < 6; k += 1) counts[k][i] = run[k];
       if (c === 5) bonus = 0;
@@ -352,7 +378,9 @@
     });
     state.player2.load({
       keys: data2.beatmap.keys,
-      notes: data2.notes,
+      notes: state.judgeMode === "v2"
+        ? (data2.notes || []).map((n) => Object.assign({}, n, { j: n.j2 }))
+        : data2.notes,
       firstObject: data2.beatmap.firstObject,
       lastObject: data2.beatmap.lastObject,
     });
@@ -499,7 +527,10 @@
     }
     state.player.load({
       keys: state.data.beatmap.keys,
-      notes: state.data.notes,
+      // 播放器只认 note.j：切到 V2 时把 j2 换到 j 上，播放器本身不必知道有两套口径
+      notes: state.judgeMode === "v2"
+        ? state.data.notes.map((n) => Object.assign({}, n, { j: n.j2 }))
+        : state.data.notes,
       firstObject: state.data.beatmap.firstObject,
       lastObject: state.data.beatmap.lastObject,
     });
@@ -804,7 +835,7 @@
       const shown = (v === null) ? "—" : v.toFixed(2) + "%";
       if (state._accShown !== shown) {
         state._accShown = shown;
-        accEl.textContent = "此刻 v1 " + shown;
+        accEl.textContent = "此刻 " + (state.judgeMode === "v2" ? "v2 " : "v1 ") + shown;
       }
     }
     const pct = Math.max(0, Math.min(100, (t / dur) * 100));
@@ -1041,6 +1072,120 @@
   }
 
   // ---------------------------------------------------------------- 主渲染
+  // ---------------------------------------------------------------- 检查更新
+  // 打开「关于」页时静默查一次；手动点按钮时失败会 toast。
+  // 只请求 GitHub 的 latest release，不上传任何本地数据。
+  function checkUpdate(manual) {
+    const box = $("aboutUpdate");
+    const btn = $("btnCheckUpdate");
+    if (!box) return;
+    if (state._checkingUpdate) return;
+    // 自动检查 5 分钟内不重复请求：来回切页不该反复打 GitHub
+    if (!manual && state._updateCheckedAt && Date.now() - state._updateCheckedAt < 5 * 60 * 1000) return;
+    state._checkingUpdate = true;
+    state._updateCheckedAt = Date.now();
+    if (btn) { btn.disabled = true; btn.textContent = "检查中…"; }
+    box.hidden = false;
+    box.className = "about-update";
+    box.textContent = "正在检查…";
+    window.API.checkUpdate()
+      .then((res) => {
+        if (!res || !res.ok) throw new Error((res && res.error) || "检查失败");
+        if (res.hasUpdate) {
+          box.className = "about-update is-new";
+          window.UI.clearNode(box);
+          box.appendChild(document.createTextNode("发现新版本 v" + res.latest + " · "));
+          const a = el("a", null, "去下载");
+          a.href = res.url || "https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest";
+          a.target = "_blank";
+          a.rel = "noreferrer noopener";
+          box.appendChild(a);
+          if (manual) window.UI.toast("有新版本 v" + res.latest + "，建议更新");
+        } else {
+          box.className = "about-update is-latest";
+          box.textContent = "已是最新";
+        }
+      })
+      .catch((e) => {
+        box.className = "about-update is-error";
+        box.textContent = "检查失败：" + (e && e.message ? e.message : "网络不可用");
+        if (manual) window.UI.toast("检查更新失败，稍后再试", true);
+      })
+      .finally(() => {
+        state._checkingUpdate = false;
+        if (btn) { btn.disabled = false; btn.textContent = "检查更新"; }
+      });
+  }
+
+  // ---------------------------------------------------------------- 判定口径切换
+  // 后端一次分析会把 V1 / V2 两套统计都算好（data.modes），这里只负责换视图。
+  // 不重新请求分析：同一份回放的判定结果与统计在两次切换之间必须完全一致。
+  function viewOf(data, mode) {
+    if (!data || !data.modes || !data.modes[mode]) return data;
+    return Object.assign({}, data, data.modes[mode], { judgeMode: mode });
+  }
+
+  function updateJudgeToggle() {
+    const box = $("judgeToggle");
+    if (!box) return;
+    box.querySelectorAll("[data-judge]").forEach((btn) => {
+      btn.classList.toggle("is-active", btn.getAttribute("data-judge") === state.judgeMode);
+    });
+  }
+
+  function setJudgeMode(mode, silent) {
+    if (mode !== "v1" && mode !== "v2") return;
+    state.judgeMode = mode;
+    savePrefs();
+    updateJudgeToggle();
+    if (!state.baseData) return;
+
+    const t = currentTimeMs();
+    state.data = viewOf(state.baseData, mode);
+    state._errTimes = null;
+    state._accShown = null;
+    state.selectedError = null;
+    state.errorShown = ERROR_PAGE;
+    const view = state.data;
+
+    window.UI.renderHero(view);
+    window.UI.renderCategories(view);
+    window.UI.renderSections(view);
+    window.UI.renderPatternShare(view);
+    window.UI.renderJudgeBars(view);
+    window.UI.renderRawTable(view);
+
+    const sm = view.summary;
+    $("histMeta").textContent = "中位 " + fmtSigned(sm.medianDelta, 1) + "ms · UR " + Number(sm.ur).toFixed(0);
+    $("timelineMeta").textContent = "共 " + view.beatmap.notes + " 个物件 · " + sm.flaws + " 次有瑕疵";
+
+    renderErrorList();
+    ensurePlayer();
+    // 对比模式：标杆那一路也要换成同一套口径，否则左右两边的判定色对不上
+    if (state.compare && state.player2) {
+      state.prog1 = buildProgress(state.data.notes || []);
+      state.prog2 = buildProgress(state.compare.notes || []);
+      state.player2.load({
+        keys: state.compare.beatmap.keys,
+        notes: state.judgeMode === "v2"
+          ? (state.compare.notes || []).map((n) => Object.assign({}, n, { j: n.j2 }))
+          : state.compare.notes,
+        firstObject: state.compare.beatmap.firstObject,
+        lastObject: state.compare.beatmap.lastObject,
+      });
+      state.player2.setTime(t);
+      state.player2.render();
+    }
+    redrawAllCharts();
+    updateTransport();
+    updateNowPanel(t);
+    if (!silent) {
+      window.UI.toast(mode === "v2"
+        ? "已切到 ScoreV2：长条头尾分判，尾窗口 1.5 倍"
+        : "已切回 ScoreV1：长条头尾合并");
+    }
+  }
+
   function renderAnalysis(data, meta) {
     // 最后一道闸：后端已经拒过 4K 以外的谱面，这里再挡一次是为了"页面连着旧版服务"的情况
     // （改完代码但服务没重启）。宁可什么都不显示，也不要让人看到一份没有依据的报告。
@@ -1051,14 +1196,18 @@
       return;
     }
     closeCompare();     // 换了主回放，对比自然失效
-    state.data = data;
+    // 原始结果留着（含两套判定），当前视图按首选项挑一套；切换时只换视图
+    state.baseData = data;
+    state.data = viewOf(data, state.judgeMode);
+    updateJudgeToggle();
     state.selectedError = null;
+    const view = state.data;
     // 残卷 / 可能配错谱面的提醒都走这里。
     // warnings 以前没有任何前端消费者：MD5 对不上、键数不符这些话只写进了 JSON，
     // 用户看不到，也就等于没提示。
     const notices = [];
-    if (data && data.warning) notices.push(data.warning);
-    if (data && Array.isArray(data.warnings)) notices.push.apply(notices, data.warnings);
+    if (view && view.warning) notices.push(view.warning);
+    if (view && Array.isArray(view.warnings)) notices.push.apply(notices, view.warnings);
     if (notices.length) window.UI.toast(notices.join(" "), true);
     // 上一局的播放状态必须清干净，否则进度条和「此刻」面板还停在上个回放的位置
     // （虚拟时钟不会被换谱自动归零，失误索引缓存按条数判断、条数一样时也会脏）。
@@ -1070,28 +1219,28 @@
     window.UI.loading(false);
     $("emptyState").hidden = true;
 
-    window.UI.renderTrack(data);
-    window.UI.renderHero(data);
-    window.UI.renderMsd(data);
-    window.UI.renderAbout(data.version);
+    window.UI.renderTrack(view);
+    window.UI.renderHero(view);
+    window.UI.renderMsd(view);
+    window.UI.renderAbout(view.version);
     window.UI.renderSimilar(null);   // 段位还没算出来，这张卡片先不显示
-    void loadSimilar(data);          // 异步：算段位 → 要推荐 → 再画
-    window.UI.renderCategories(data);
-    window.UI.renderMeta(data);
-    window.UI.renderSections(data);
-    window.UI.renderPatternShare(data);
-    window.UI.renderJudgeBars(data);
-    window.UI.renderRawTable(data);
+    void loadSimilar(view);          // 异步：算段位 → 要推荐 → 再画
+    window.UI.renderCategories(view);
+    window.UI.renderMeta(view);
+    window.UI.renderSections(view);
+    window.UI.renderPatternShare(view);
+    window.UI.renderJudgeBars(view);
+    window.UI.renderRawTable(view);
 
     // 误差直方图标题里的摘要
-    const sm = data.summary;
+    const sm = view.summary;
     $("histMeta").textContent = "中位 " + fmtSigned(sm.medianDelta, 1) + "ms · UR " + Number(sm.ur).toFixed(0);
-    $("timelineMeta").textContent = "共 " + data.beatmap.notes + " 个物件 · " + data.summary.flaws + " 次有瑕疵";
+    $("timelineMeta").textContent = "共 " + view.beatmap.notes + " 个物件 · " + sm.flaws + " 次有瑕疵";
 
     state.errorShown = ERROR_PAGE;
     renderErrorList();
-    applyReplaySpeed(data.replay);
-    setupAudio(data);
+    applyReplaySpeed(view.replay);
+    setupAudio(view);
     // 先把「总览」切出来：隐藏状态的 canvas 宽度是 0，画出来会是空白
     switchTab("overview");
     ensurePlayer();
@@ -1413,6 +1562,96 @@
     }
   }
 
+  // ---------------------------------------------------------------- 只看谱面
+  // 只解析 .osu：不算成绩、不建会话、不需要音频。
+  async function handleChartFile(file) {
+    if (!file) return;
+    if (!/\.osu$/i.test(file.name)) {
+      window.UI.toast("谱面文件需要是 .osu（你选的是 " + file.name + "）", true);
+      return;
+    }
+    if (state.busy) {
+      window.UI.toast("上一次分析还没结束，稍等一下");
+      return;
+    }
+    state.busy = true;
+    window.UI.loading(true, "正在读取谱面…");
+    try {
+      const b64 = await window.API.fileToBase64(file);
+      const data = await window.API.chartOnly(b64);
+      renderChartOnly(data);
+    } catch (e) {
+      window.UI.loading(false);
+      window.UI.toast(e.message || "谱面读取失败", true);
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  const PATTERN_HEX = {
+    stack: "#f472b6", cut: "#7c5cff", spam: "#22d3ee",
+    tech: "#fbbf24", ln: "#34d399", calm: "#94a3b8",
+  };
+
+  function renderChartOnly(data) {
+    // 谱面模式与回放模式互斥：清掉回放状态，避免播放器/失误面板还挂着上一局
+    closeCompare();
+    state.data = null;
+    state.baseData = null;
+    state.chartOnly = data;
+    state.compare = null;
+    state._errTimes = null;
+    state.selectedError = null;
+    pause();
+    state.virtualTime = 0;
+    window.UI.loading(false);
+    $("emptyState").hidden = true;
+
+    const bm = data.beatmap || {};
+    $("coTitle").textContent =
+      (bm.artist || "") + " - " + (bm.title || "") + " [" + (bm.difficulty || "") + "]";
+    $("coMeta").textContent = "只分析谱面，不读取回放与成绩 · " + (bm.source || "");
+    const msd = data.msd || {};
+    $("coMsd").textContent = msd.available ? Number(msd.overall).toFixed(2) : "—";
+    $("coDan").textContent = (msd.dan && msd.dan.label) || "—";
+    $("coDanNote").textContent = msd.available ? "段位估计（MinaCalc 口径）" : "难度数据不可用";
+    $("coInfo").textContent =
+      bm.keys + "K · " + bm.notes + " 物件 · " + bm.holds + " 长条 · BPM " +
+      bm.bpm + " · " + fmtTime(bm.duration);
+    $("coClass").textContent = window.UI.mapClassText(data.mapClass);
+    renderChartOnlyPattern(data);
+    switchTab("chartonly");
+    window.UI.toast("已读取谱面，未分析成绩");
+  }
+
+  function renderChartOnlyPattern(data) {
+    const bar = $("coBar");
+    const legend = $("coLegend");
+    if (!bar || !legend) return;
+    window.UI.clearNode(bar);
+    window.UI.clearNode(legend);
+    const items = data.patternShare || [];
+    const total = items.reduce((s, x) => s + Number(x.share || 0), 0) || 1;
+    items.forEach((it) => {
+      const color = PATTERN_HEX[it.key] || "var(--accent)";
+      const seg = document.createElement("span");
+      seg.style.width = (Number(it.share || 0) / total) * 100 + "%";
+      seg.style.background = color;
+      seg.title = it.label + " " + it.share + "%";
+      bar.appendChild(seg);
+      const li = document.createElement("li");
+      const dot = document.createElement("i");
+      dot.style.background = color;
+      const name = document.createElement("b");
+      name.textContent = it.label;
+      li.appendChild(dot);
+      li.appendChild(name);
+      li.appendChild(document.createTextNode(" " + it.share + "%"));
+      legend.appendChild(li);
+    });
+    if (!items.length) legend.appendChild(el("li", "muted", "这份谱面没有可用的键型数据"));
+  }
+
   function openBeatmapModal(payload) {
     const hint = $("bmModalHint");
     hint.textContent = "回放里的谱面 MD5 是 " + ((payload && payload.error) || "未知") + "。可以手动选 .osu，或按曲名搜索本机曲库。";
@@ -1589,11 +1828,28 @@
   function bindImportActions() {
     $("btnImport").addEventListener("click", () => $("fileOsr").click());
     $("btnPickFile").addEventListener("click", () => $("fileOsr").click());
+    $("btnPickChart").addEventListener("click", () => $("fileChartOsu").click());
+    $("btnCheckUpdate").addEventListener("click", () => checkUpdate(true));
     $("fileOsr").addEventListener("change", (e) => {
       const f = e.target.files && e.target.files[0];
       e.target.value = "";   // 清空才能连续选同一个文件
       handleReplayFile(f);
     });
+    $("fileChartOsu").addEventListener("change", (e) => {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = "";
+      handleChartFile(f);
+    });
+    const localSearch = $("localSearch");
+    if (localSearch) {
+      localSearch.addEventListener("input", renderLocalReplayList);
+      localSearch.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.target.value = "";
+          renderLocalReplayList();
+        }
+      });
+    }
     $("fileOsu").addEventListener("change", (e) => {
       const f = e.target.files && e.target.files[0];
       e.target.value = "";
@@ -1639,7 +1895,7 @@
       $("dropzone").hidden = true;
       const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
       if (!f) return;
-      if (/\.osu$/i.test(f.name)) handleBeatmapFile(f);
+      if (/\.osu$/i.test(f.name)) handleChartFile(f);
       else handleReplayFile(f);
     });
   }
@@ -1697,6 +1953,16 @@
       updateTransport();
       savePrefs();
     });
+    // 判定口径：点一下就换视图，不重新分析
+    const judgeBox = $("judgeToggle");
+    if (judgeBox) {
+      judgeBox.addEventListener("click", (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest("[data-judge]") : null;
+        if (!btn) return;
+        setJudgeMode(btn.getAttribute("data-judge"));
+      });
+    }
+
     $("btnToggleErrors").addEventListener("click", () => {
       state.errorsOnly = !state.errorsOnly;
       $("btnToggleErrors").classList.toggle("is-on", state.errorsOnly);
@@ -1794,45 +2060,63 @@
     try {
       const res = await window.API.localReplays();
       const box = $("localFolder");
-      const ul = $("localReplayList");
       const pathEl = $("localFolderPath");
       if (!res || !res.items) return;
       state.localDir = res.dir || "";
+      state.localItems = res.items;
       pathEl.textContent = res.dir;
       // 上传被挡的提示里也写着同一个路径：服务端一给出就同步过去，别留占位文案
       const blockedPath = $("blockedPath");
       if (blockedPath && res.dir) blockedPath.textContent = res.dir;
-      window.UI.clearNode(ul);
-      res.items.forEach((it) => {
-        const li = el("li", null, it.name);
-        li.appendChild(el("span", null, Math.round(it.size / 1024) + " KB"));
-        li.addEventListener("click", () => {
-          if (state.busy) return;
-          state.busy = true;
-          window.UI.loading(true, "正在读取本地回放…");
-          setStage("正在分析本地回放");
-          startWaiting();
-          window.API.analyzeLocal(it.name)
-            .then((data) => renderAnalysis(data))
-            .catch((e) => {
-              window.UI.loading(false);
-              if (e.needsInput) openBeatmapModal(e.payload || {});
-              else window.UI.toast(e.message || "分析失败", true);
-            })
-            .finally(() => {
-              stopWaiting();
-              state.busy = false;
-            });
-        });
-        ul.appendChild(li);
-      });
+      renderLocalReplayList();
       box.hidden = false;   // 就算一个文件都没有也显示，让人知道该往哪放
-      if (res.items.length === 0) {
-        const li0 = el("li", "muted", "这个文件夹现在是空的——把 .osr 复制进去，再点「刷新列表」");
-        ul.appendChild(li0);
-      }
     } catch (e) {
       /* 备用通道不可用就不显示 */
+    }
+  }
+
+  // 本地回放列表：搜索框只在内存里过滤，不重新请求目录
+  function renderLocalReplayList() {
+    const ul = $("localReplayList");
+    if (!ul) return;
+    const input = $("localSearch");
+    const q = ((input && input.value) || "").trim().toLowerCase();
+    const all = state.localItems || [];
+    const items = q
+      ? all.filter((it) => String(it.name || "").toLowerCase().includes(q))
+      : all;
+    const count = $("localCount");
+    if (count) count.textContent = q ? items.length + " / " + all.length : all.length + " 个";
+
+    window.UI.clearNode(ul);
+    items.forEach((it) => {
+      const li = el("li", null, it.name);
+      li.appendChild(el("span", null, Math.round(it.size / 1024) + " KB"));
+      li.addEventListener("click", () => {
+        if (state.busy) return;
+        state.busy = true;
+        window.UI.loading(true, "正在读取本地回放…");
+        setStage("正在分析本地回放");
+        startWaiting();
+        window.API.analyzeLocal(it.name)
+          .then((data) => renderAnalysis(data))
+          .catch((e) => {
+            window.UI.loading(false);
+            if (e.needsInput) openBeatmapModal(e.payload || {});
+            else window.UI.toast(e.message || "分析失败", true);
+          })
+          .finally(() => {
+            stopWaiting();
+            state.busy = false;
+          });
+      });
+      ul.appendChild(li);
+    });
+    if (!items.length) {
+      const msg = all.length
+        ? "没有匹配「" + q + "」的回放"
+        : "这个文件夹现在是空的——把 .osr 复制进去，再点「刷新列表」";
+      ul.appendChild(el("li", "muted", msg));
     }
   }
 
@@ -1853,6 +2137,7 @@
     bindEvents();
     setPlayIcon(false);
     loadPrefs();
+    updateJudgeToggle();
     syncScrollUi();
     syncOffsetUi();
     syncVolumeUi();
