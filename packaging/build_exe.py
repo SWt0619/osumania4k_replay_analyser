@@ -15,6 +15,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 NAME = "osumania_replay_analyser"
+ICON = os.path.join(HERE, "icon", "app.ico")
 
 
 def main() -> int:
@@ -55,6 +56,12 @@ def main() -> int:
             cmd += ["--add-binary", p + sep + "."]
         else:
             print("提醒：没找到 python\\%s，目标机缺少 VC 运行库时 MSD 会不可用" % dll)
+    # exe 图标：没有生成过就提醒一句，不阻塞构建
+    if os.path.isfile(ICON):
+        cmd += ["--icon", ICON]
+    else:
+        print("提醒：没找到 packaging\\icon\\app.ico，本次产物不带图标")
+        print("      需要图标时先跑 python packaging\\make_icon.py")
     cmd.append(os.path.join(HERE, "exe_launcher.py"))
 
     print("构建中……（第一次会比较慢）")
