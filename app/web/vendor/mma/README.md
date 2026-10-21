@@ -23,3 +23,25 @@ estimator/intervals/*.js         各键数的 RC / LN 段位标尺
 与 MinaCalc 的 MSD 不是同一套量纲，两者不能互相查表。
 
 原仓库另有 6K / 7K / 10K 的标尺，本项目只做 4K，未使用但一并保留，方便日后扩展。
+
+## 2026-10-21 追加：Daniel / Azusa / Roxy
+
+同样原样复制，未改动任何一行（MIT，见同目录 `LICENSE`）：
+
+```
+rework/danielAlgorithm.js              Daniel 的 JS 移植
+estimator/danielEstimator.js           Daniel 包装（非 4K 回退 Sunny）
+estimator/sunnyEstimator.js            Sunny 包装
+estimator/azusaEstimator.js            Azusa 主算法
+estimator/rcDifficultyFormat.js        numeric ↔ RC 标签
+estimator/marathonCorrection.js        马拉松时长修正
+estimator/roxyEstimator.js             Roxy 主算法
+estimator/roxyMetaModel.generated.js   Roxy 的 Ridge 元模型（111 特征，系数内嵌）
+```
+
+调用链与兜底在 `app/web/js/estimator.js`：
+
+- RC 图：Roxy → Azusa → Sunny。Roxy 只在 numeric 11~17 给出具体值，
+  返回 `< Alpha Low` / `> Emik Zeta high` 时 `numericDifficulty` 为 null，自动回退 Azusa。
+- 面图（LN 占比 >15%）与所有失败路径：保持 Sunny + LN 标尺。
+
