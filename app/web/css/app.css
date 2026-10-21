@@ -433,6 +433,12 @@ canvas { display: block; }
   border-color: rgba(124, 92, 255, .45);
 }
 .badge-v2 strong { font-size: 17px; }
+/* V1 用中性底色：它是历史口径，不应该比现行的 V2 更抢眼 */
+.badge-v1 {
+  background: var(--glass-2, rgba(255, 255, 255, .085));
+  border-color: var(--stroke-2, rgba(255, 255, 255, .16));
+}
+.badge-v1 strong { font-size: 17px; }
 .badge-grade {
   position: absolute; top: -8px; right: -8px;
   min-width: 22px; height: 22px; padding: 0 5px;
@@ -546,8 +552,8 @@ canvas { display: block; }
 .chip-btn.is-on { color: #fff; border-color: rgba(124, 92, 255, .6); background: rgba(124, 92, 255, .22); }
 .chip-btn .sw { width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; display: inline-block; }
 
-/* 判定口径切换：回放页专用。V1 / V2 是两个按钮，不做开关是因为
-   这两个词对玩家本身就是选项名，写出来比一个"关/开"更好认。 */
+/* 判定口径切换：放在顶栏，跟随整页（总览 / 回放 / 时间轴 / 细节）一起换口径。
+   V1 / V2 是两个按钮，不做开关是因为这两个词对玩家本身就是选项名。 */
 .seg-toggle {
   display: inline-flex;
   align-items: center;
@@ -556,6 +562,8 @@ canvas { display: block; }
   border: 1px solid var(--stroke, rgba(255, 255, 255, .10));
   background: var(--glass-2, rgba(255, 255, 255, .085));
 }
+.topbar-judge { height: 30px; padding: 3px; flex: none; }
+.topbar-judge .seg-btn { padding: 4px 10px; }
 .seg-btn {
   border: 0;
   background: transparent;
