@@ -220,6 +220,9 @@ class Library:
     _audio_cache: dict[str, str] = field(default_factory=dict, repr=False)
     _set_audio_cache: dict[str, str] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # 上次扫描时的曲库指纹与缓存路径：用来判断"这中间有没有下过新图"
+    _stamp_at: tuple = field(default=(), repr=False)
+    _cache_path: str = field(default="", repr=False)
 
     # ---- 构建 -----------------------------------------------------------
     def build(self, root: str, force: bool = False, cache_path: str = "") -> None:
@@ -241,6 +244,8 @@ class Library:
             self.built_at = time.time()
             self.scanned_files, self.reused_files, self.hashed_files = stats
             self.build_ms = (time.time() - started) * 1000
+            self._cache_path = cache_path
+            self._stamp_at = self._stamp()
             if entries:
                 _save_cache_file(cache_path, self)
 
@@ -278,6 +283,41 @@ class Library:
         for store in default_lazer_file_roots():
             collect(*_scan_lazer_store(store, cached))
         return entries, (counts[0], counts[1], counts[2])
+
+    # ---- 新鲜度 ---------------------------------------------------------
+    def _stamp(self) -> tuple:
+        """曲库目录的指纹：顶层条目数 + 最新 mtime。
+
+        下载完一张新图，`Songs` 下会多一个目录，这两项都会变 —— 拿它当"该重扫了"的信号，
+        比定时重建便宜得多（几千个目录 stat 一遍，几十毫秒）。
+        """
+        if not self.root:
+            return ()
+        try:
+            names = os.listdir(self.root)
+        except OSError:
+            return ()
+        latest = 0.0
+        for name in names:
+            try:
+                latest = max(latest, os.stat(os.path.join(self.root, name)).st_mtime)
+            except OSError:
+                continue
+        return (self.root, len(names), round(latest, 1))
+
+    def ensure_fresh(self) -> bool:
+        """曲库有变化就重建索引，返回是否重建了。
+
+        用户的真实路径：网页里推了一张图给他 → 他去下载 → 打完导出回放 → 拖回来分析，
+        这时 `Songs` 里已经有这张图，但索引是 1 小时前建的（build 里有 TTL），
+        于是一直提示"曲库里没有这张谱面"。分析前调一次这个就够了。
+        """
+        if not self.root or not self.entries:
+            return False
+        if self._stamp() == self._stamp_at:
+            return False
+        self.build(self.root, force=True, cache_path=self._cache_path)
+        return True
 
     # ---- 查询 -----------------------------------------------------------
     def find(self, md5: str) -> LibraryEntry | None:
