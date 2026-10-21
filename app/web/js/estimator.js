@@ -12,6 +12,8 @@
 import { calculate as calculateRC } from "../vendor/mma/rework/sunnyAlgorithm.js";
 import { calculateLN } from "../vendor/mma/rework/sunnyWindowAlgorithm.js";
 import { estDiff2 } from "../vendor/mma/estimator/reworkEstimatorUtils.js";
+import { runAzusaEstimatorFromText } from "../vendor/mma/estimator/azusaEstimator.js";
+import { runRoxyEstimatorFromText } from "../vendor/mma/estimator/roxyEstimator.js";
 
 const cache = new Map(); // key: session + 倍率
 
@@ -53,7 +55,7 @@ async function estimate(session, rate) {
     return { ok: false, reason: (e && e.message) || "取谱面失败" };
   }
 
-  const t0 = performance.now();
+  const t0Total = performance.now();
   let rc;
   let lnRaw;
   try {
@@ -62,6 +64,7 @@ async function estimate(session, rate) {
   } catch (e) {
     return { ok: false, reason: "估算器解析谱面失败：" + ((e && e.message) || e) };
   }
+  const sunnyMs = Math.round(performance.now() - t0Total);
 
   if (!Number.isFinite(rc.star) || !Number.isFinite(rc.lnRatio) || !Number.isFinite(rc.keys)) {
     return { ok: false, reason: "估算器没有返回有效星级" };
@@ -86,6 +89,72 @@ async function estimate(session, rate) {
   } catch (e) {
     return { ok: false, reason: "段位查表失败：" + ((e && e.message) || e) };
   }
+  const sunnyLabel = label;
+
+  // ---------------------------------------------------------------- 三算法链
+  // 面图（showLN）保持 Sunny：Azusa/Roxy 只做 4K RC，LN 占比 >18% 会直接拒绝。
+  // RC 图依次尝试 Azusa → Roxy；Roxy 只在给出具体数值时胜出，
+  // 它返回 `< Alpha Low` / `> Emik Zeta high` 时 numeric 为 null，自动回退 Azusa。
+  let method = "sunny";
+  let numeric = null;
+  let azusaInfo = null;
+  let roxyInfo = null;
+  let roxyTried = false;
+  let roxyBoundary = false;
+  const timings = { sunny: sunnyMs, azusa: 0, roxy: 0 };
+
+  if (!showLN) {
+    const rcOptions = {
+      speedRate,
+      withGraph: false,
+      // Sunny 已经算过一次，传给 Azusa 省掉重复计算
+      precomputedSunnyResult: { star: rc.star, lnRatio: rc.lnRatio, columnCount: rc.keys },
+    };
+
+    let t0 = performance.now();
+    try {
+      const a = runAzusaEstimatorFromText(text, rcOptions);
+      // 不能用 Number(null)：那是 0，会把"Azusa 拒绝"误判成 Reform 0
+      const raw = a && a.numericDifficulty;
+      const n = typeof raw === "number" && Number.isFinite(raw) ? raw : NaN;
+      if (Number.isFinite(n)) {
+        azusaInfo = { label: a.estDiff, numeric: n, star: Number(a.star) };
+      }
+    } catch (e) {
+      /* Azusa 不可用不影响 Sunny */
+    }
+    timings.azusa = Math.round(performance.now() - t0);
+
+    if (azusaInfo) {
+      method = "azusa";
+      label = azusaInfo.label;
+      numeric = azusaInfo.numeric;
+    }
+
+    t0 = performance.now();
+    roxyTried = true;
+    try {
+      const r = runRoxyEstimatorFromText(text, rcOptions);
+      // Roxy 在 < Alpha Low / > Emik Zeta high 时返回 null，不能转成 0
+      const raw = r && r.numericDifficulty;
+      const n = typeof raw === "number" && Number.isFinite(raw) ? raw : NaN;
+      if (Number.isFinite(n)) {
+        roxyInfo = { label: r.estDiff, numeric: n, star: Number(r.star) };
+      } else {
+        // 边界或拒绝：numeric 为 null，按边界处理并回退 Azusa
+        roxyBoundary = true;
+      }
+    } catch (e) {
+      roxyBoundary = true;
+    }
+    timings.roxy = Math.round(performance.now() - t0);
+
+    if (roxyInfo) {
+      method = "roxy";
+      label = roxyInfo.label;
+      numeric = roxyInfo.numeric;
+    }
+  }
 
   const out = {
     ok: true,
@@ -94,7 +163,16 @@ async function estimate(session, rate) {
     lnStar: showLN ? lnStar : 0,
     lnRatio: rc.lnRatio,
     rate: speedRate,
-    ms: Math.round(performance.now() - t0),
+    // 当前采用的算法与它的数值难度；Sunny 只给星数，没有 numeric
+    method: method,
+    numeric: numeric,
+    sunnyLabel: sunnyLabel,
+    azusa: azusaInfo,
+    roxy: roxyInfo,
+    roxyTried: roxyTried,
+    roxyBoundary: roxyBoundary,
+    timings: timings,
+    ms: Math.round(performance.now() - t0Total),
   };
   cache.set(key, out);
   return out;
