@@ -469,7 +469,7 @@ def parse_osu_file(path: str) -> Beatmap:
 # --------------------------------------------------------------------------- 判定窗口
 
 
-def judgement_windows(od: float) -> dict[str, float]:
+def judgement_windows(od: float, score_v2: bool = False) -> dict[str, float]:
     """mania 六档判定窗口（半窗，毫秒）。来自官方 wiki「osu!mania judgement system」：
 
         PERFECT  16            （固定，不随 OD 变）
@@ -479,20 +479,35 @@ def judgement_windows(od: float) -> dict[str, float]:
         MEH      151 - 3×OD
         MISS     188 - 3×OD
 
+    ScoreV2 只改 PERFECT：OD ≤ 5 时 22.4 - 0.6×OD，OD ≥ 5 时 24.9 - 1.1×OD，
+    其余四档照旧。尾判窗口再额外放大 1.5 倍（见 match 里的尾判）。
+
     两条容易被忽略的细节（wiki 明写）：
       * 「最大打击误差**向下取整**」——OD 8.5 时 GREAT 是 38.5 → 38，不是 38.5；
       * 「打击误差**四舍五入**」——见 judge_offset()。
     这两条决定了边界上那几个音的判定归属，也是准确率能不能和游戏对齐的关键。
     """
     od = max(0.0, min(10.0, od))
+    perfect = 16.0
+    if score_v2:
+        perfect = float(math.floor(22.4 - 0.6 * od if od <= 5 else 24.9 - 1.1 * od))
     return {
-        "perfect": 16.0,
+        "perfect": perfect,
         "great": float(math.floor(64.0 - 3.0 * od)),
         "good": float(math.floor(97.0 - 3.0 * od)),
         "ok": float(math.floor(127.0 - 3.0 * od)),
         "meh": float(math.floor(151.0 - 3.0 * od)),
         "miss": float(math.floor(188.0 - 3.0 * od)),
     }
+
+
+def judge_with_windows(offset_ms: float, windows: dict[str, float], scale: float = 1.0) -> str:
+    """按给定的窗口判档。scale 用来放大尾判窗口（ScoreV2 是 1.5）。"""
+    d = round(abs(offset_ms))
+    for name in ("perfect", "great", "good", "ok", "meh"):
+        if d <= windows[name] * scale:
+            return name
+    return "miss"
 
 
 JUDGEMENT_LABEL = {
