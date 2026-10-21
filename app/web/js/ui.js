@@ -340,6 +340,16 @@
     });
   }
 
+  // V1 视图没有后端算好的 ScoreV1 字段：优先用投影里的“当前分数”，
+  // 投影缺失时退回回放头记录的分数。两种都不是时返回 null，宁可不显示也不写 0。
+  function scoreV1Of(data) {
+    const pj = data && data.projection;
+    const cur = pj && pj.current && pj.current.score;
+    if (Number.isFinite(cur) && cur > 0) return cur;
+    const raw = Number(data && data.replay && data.replay.score);
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  }
+
   function renderHero(data) {
     const ev = data.evaluation || {};
     const sm = data.summary || {};
@@ -372,10 +382,10 @@
     const badges = $("heroBadges");
     clearNode(badges);
 
-    // ScoreV2 现在才是 osu! 实际用的计分，放在最前面：
-    // 一进来就能看到"这把按现行规则值多少分"，不用去细节页翻。
+    // V1 挂 ScoreV1，V2 挂 ScoreV2；两者只出现一个。
+    // 同一个准确率被标成两种口径，正是之前 V1/V2 被混用的原因。
     const v2 = sm.scoreV2;
-    if (v2 !== undefined && v2 !== null) {
+    if (data.judgeMode === "v2" && v2 !== undefined && v2 !== null) {
       const wrap = el("div", "badge badge-v2");
       wrap.appendChild(el("span", null, "Score V2"));
       wrap.appendChild(el("strong", null, fmtInt(v2)));
@@ -387,6 +397,15 @@
         "判定分 MAX=305 / 300=300 / 200=200 / 100=100 / 50=50 / MISS=0；长按算头 + 尾两次判定\n" +
         "连击分 = 200,000 × Σ(判定值 × log4 连击倍率) / Σ(300 × log4 连击倍率)";
       badges.appendChild(wrap);
+    } else if (data.judgeMode !== "v2") {
+      const v1 = scoreV1Of(data);
+      if (v1 !== null) {
+        const wrap = el("div", "badge badge-v1");
+        wrap.appendChild(el("span", null, "Score V1"));
+        wrap.appendChild(el("strong", null, fmtInt(v1)));
+        wrap.title = "Score V1 = 回放里记录的实际分数（长条只算一次判定）";
+        badges.appendChild(wrap);
+      }
     }
 
     (ev.badges || []).forEach((b) => {
@@ -522,14 +541,25 @@
       ["物件 / 长条", bm.notes + " / " + bm.holds],
       ["平均 / 峰值 NPS", bm.nps + " / " + bm.peakNps],
       ["Mod", rp.mods || "无"],
-      ["准确率（ScoreV1 口径）", fmtPct(sm.accuracy)],
-      ["Score V2 准确率", fmtPct(sm.accV2)],
-      ["Score V2（stable）", fmtInt(sm.scoreV2) + (sm.gradeV2 ? "　评级 " + sm.gradeV2 : "")],
-      ["Score V2（lazer 配比）", fmtInt(sm.scoreV2Lazer)],
+    ];
+    // 只展示当前口径的统计：V1 不出现任何 V2 字段，V2 也不再并排显示 V1，
+    // 避免同一个准确率被标成两种口径。
+    if (data.judgeMode === "v2") {
+      rows.push(
+        ["准确率（ScoreV2 口径）", fmtPct(sm.accuracy)],
+        ["Score V2（stable）", fmtInt(sm.scoreV2) + (sm.gradeV2 ? "　评级 " + sm.gradeV2 : "")],
+        ["Score V2（lazer 配比）", fmtInt(sm.scoreV2Lazer)]
+      );
+    } else {
+      rows.push(["准确率（ScoreV1 口径）", fmtPct(sm.accuracy)]);
+      const v1 = scoreV1Of(data);
+      if (v1 !== null) rows.push(["Score V1", fmtInt(v1)]);
+    }
+    rows.push(
       ["最大连击（重算）", String(sm.maxCombo)],
       ["空按", String(sm.ghosts || 0)],
-      ["分析耗时", (data.elapsedMs || 0) + " ms"],
-    ];
+      ["分析耗时", (data.elapsedMs || 0) + " ms"]
+    );
     // Random 会打乱列序：把推断结果留在面板里，别只在弹一下的提示里出现过
     if (rp.columnOrder && rp.columnOrder.length) {
       const at = rows.findIndex(([k]) => k === "Mod");
