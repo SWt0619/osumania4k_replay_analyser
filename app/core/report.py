@@ -249,10 +249,11 @@ _ACC_TIERS = [
 ]
 
 
-def _acc_strength(acc: float) -> str:
+def _acc_strength(acc: float, tag: str = "v1") -> str:
     for floor, fmt in _ACC_TIERS:
         if acc >= floor:
-            return fmt % acc
+            # 文案表按 v1 写的；切到 v2 时只换括号里的口径名，句子其余部分不动
+            return (fmt % acc).replace("（v1）", "（" + tag + "）")
     return ""
 
 
@@ -403,6 +404,7 @@ class _Draft:
     ur: float
     median_delta: float
     has_bias: bool
+    judge_mode: str = "v1"
     paragraphs: list[str] = field(default_factory=list)
     strengths: list[str] = field(default_factory=list)
     weaknesses: list[str] = field(default_factory=list)
@@ -414,9 +416,9 @@ class _Draft:
         s = self.payload.get("summary", {})
         bm = self.payload.get("beatmap", {})
         self.paragraphs.append(
-            "这张 %s 键的「%s」难度，你打出了 %.2f%% 的准确率（v1 口径）、UR %.0f。"
+            "这张 %s 键的「%s」难度，你打出了 %.2f%% 的准确率（%s 口径）、UR %.0f。"
             "击打偏差中位 %.1fms，离散程度属于「%s」。"
-            % (bm.get("keys", "?"), bm.get("difficulty", "?"), self.acc, self.ur,
+            % (bm.get("keys", "?"), bm.get("difficulty", "?"), self.acc, self.judge_mode, self.ur,
                _f(s.get("absMedian")), _stability_word(self.ur))
         )
         bias_text, _ = _bias_sentence(self.median_delta)
@@ -425,14 +427,14 @@ class _Draft:
         # 条件放宽到「说得出口就写」，别让这一栏常年只有一条破折号
         notes_total = max(1, _f(bm.get("notes"), 1))
         max_combo = _f(s.get("maxCombo"))
-        acc_strength = _acc_strength(self.acc)
+        acc_strength = _acc_strength(self.acc, self.judge_mode)
         if acc_strength:
             self.strengths.append(acc_strength)
         else:
             # 90% 以下不再是亮点：这张图对他来说是超纲的，硬刷只会固化错误手感
             self.weaknesses.append(
-                "准确率（v1）%.2f%% 在 90%% 以下，这张图目前超出你的能力承受范围：建议先降速（0.85 倍）"
-                "或换低一档难度，把准确率做到 93%% 以上再回来。" % self.acc
+                "准确率（%s）%.2f%% 在 90%% 以下，这张图目前超出你的能力承受范围：建议先降速（0.85 倍）"
+                "或换低一档难度，把准确率做到 93%% 以上再回来。" % (self.judge_mode, self.acc)
             )
         if self.ur and self.ur < 110:
             self.strengths.append("稳定性好（UR %.0f），说明手指控制已经成型。" % self.ur)
@@ -619,6 +621,7 @@ def build_evaluation(payload: dict) -> dict:
         ur=ur,
         median_delta=median_delta,
         has_bias=_bias_sentence(median_delta)[1],
+        judge_mode=str(payload.get("judgeMode") or "v1"),
     )
     # 顺序即版面顺序，改顺序会改变报告读起来的高低起伏
     draft.add_accuracy()
@@ -663,9 +666,9 @@ def build_evaluation(payload: dict) -> dict:
         "weaknesses": draft.weaknesses[:4],
         "advice": advice[:5],
         "badges": [
-            # 顶部这个数字走的是 ScoreV1 口径（MAX/300 同权），旁边还挂着 ScoreV2 的
-            # 准确率——不标注的话两者很容易被当成同一个数。用户要求必须写明 (v1)。
-            {"key": "acc", "label": "准确率 (v1)", "value": "%.2f%%" % acc},
+            # 顶部的准确率跟着当前判定口径走；旁边还挂着 ScoreV2 的独立评分，
+            # 不标口径的话两个数字很容易被当成同一个。
+            {"key": "acc", "label": "准确率 (%s)" % draft.judge_mode, "value": "%.2f%%" % acc},
             {"key": "ur", "label": "UR", "value": "%.0f" % ur},
             {"key": "bias", "label": "中位偏差", "value": "%+.1fms" % median_delta},
             {"key": "combo", "label": "最大连击", "value": str(s.get("maxCombo", 0))},
