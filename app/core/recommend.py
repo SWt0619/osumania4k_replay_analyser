@@ -24,9 +24,16 @@ import os
 import re
 
 from .. import paths
+from . import patterns
 
-W_PATTERN = 0.65
-W_DAN = 0.35
+W_PATTERN = 0.55
+W_DAN = 0.30
+# 第三个维度：BPM 接近度。
+# 为什么需要：一批谱面是同一首曲子的"倍速版"（1.1x / 1.2x / x0.796…），它们的 dan 可以
+# 完全对上，但玩家实际打起来的节奏密度完全不同 —— 玩 1.1x 的人被推一张 0.796x，
+# 数值上"同难度"，手感上是另一回事。BPM 差一倍时按 log 距离直接压到很低。
+W_BPM = 0.15
+BPM_SCALE = 0.25
 # 段位门槛（单位：档，一档 = low / mid-low / mid / mid-high / high 之一）
 DAN_GATE = 4
 DAN_GATE_LOOSE = 8
@@ -150,7 +157,7 @@ def recommend(dan: str | None, share: dict, ln_ratio: float = 0.0,
               artist: str = "", title: str = "", version: str = "",
               artist_alt: str = "", title_alt: str = "",
               exclude_bid: int | None = None, exclude_sid: int | None = None,
-              limit: int = 5) -> list[dict]:
+              limit: int = 5, bpm: float = 0.0) -> list[dict]:
     """按段位与键型找最接近的谱面。段位认不出、或索引缺失时返回空列表。"""
     rows = _load()
     q_rank = rank_of(dan)
@@ -165,7 +172,7 @@ def recommend(dan: str | None, share: dict, ln_ratio: float = 0.0,
     best: list[dict] = []
     for gate, min_pat, relaxed in tiers:
         got = _pick(rows, q_rank, share, [artist, artist_alt], [title, title_alt],
-                    version, exclude_bid, exclude_sid, limit, gate, min_pat, relaxed)
+                    version, exclude_bid, exclude_sid, limit, gate, min_pat, relaxed, bpm)
         if len(got) > len(best):
             best = got
         if len(best) >= limit:
@@ -175,7 +182,7 @@ def recommend(dan: str | None, share: dict, ln_ratio: float = 0.0,
 
 def _pick(rows: list, q_rank: float, share: dict, artists: list, titles: list, version: str,
           exclude_bid: int | None, exclude_sid: int | None, limit: int, gate: int,
-          min_pat: float, relaxed: bool) -> list[dict]:
+          min_pat: float, relaxed: bool, bpm: float = 0.0) -> list[dict]:
     q_ln = float(share.get("ln") or 0.0)
     scored = []
     for row, rank, cand in rows:
@@ -193,17 +200,28 @@ def _pick(rows: list, q_rank: float, share: dict, artists: list, titles: list, v
         pat = pattern_similarity(share, cand)
         if pat < min_pat:
             continue
-        score = W_PATTERN * pat + W_DAN * math.exp(-gap / DAN_SCALE)
-        scored.append((score, pat, gap, row, cand))
+        dan_term = math.exp(-gap / DAN_SCALE)
+        if bpm > 0 and float(row[8] or 0) > 0:
+            # BPM 按比例算距离：220 对 180 与 110 对 90 是同一种差别
+            bpm_term = math.exp(-abs(math.log(bpm / float(row[8]))) / BPM_SCALE)
+            score = W_PATTERN * pat + W_DAN * dan_term + W_BPM * bpm_term
+        else:
+            bpm_term = None
+            # 不知道本局 BPM 时退回原来的两维权重（等比放大，保持 0~1）
+            score = (W_PATTERN * pat + W_DAN * dan_term) / (W_PATTERN + W_DAN)
+        scored.append((score, pat, gap, row, cand, bpm_term))
 
     scored.sort(key=lambda x: -x[0])
     out = []
     seen_sid = set()
-    for score, pat, gap, row, cand in scored:
+    for score, pat, gap, row, cand, bpm_term in scored:
         if row[1] in seen_sid:          # 同一图集只留最像的那个难度
             continue
         seen_sid.add(row[1])
-        dominant = max(CATS, key=lambda c: cand[c])
+        # Hybrid 是整图结论（RC 与 LN 都不占压倒性），所以不能只取五类里最大的那个
+        dominant = patterns.dominant_class(cand, float(row[7] or 0.0))
+        # hybrid 没有单一"占比"，用 LN 占比代表这一类的强度
+        dom_share = float(cand.get(dominant) or cand.get("ln") or 0.0)
         out.append({
             "bid": row[0],
             "sid": row[1],
@@ -216,12 +234,15 @@ def _pick(rows: list, q_rank: float, share: dict, artists: list, titles: list, v
             "similarity": round(score, 3),
             "patternSimilarity": round(pat, 3),
             "danGap": int(round(gap)),
+            "bpm": round(float(row[8] or 0), 1),
+            "bpmGap": (int(round((float(row[8]) / bpm - 1) * 100)) if bpm > 0 and float(row[8] or 0) > 0 else None),
+            "bpmTerm": (round(bpm_term, 3) if bpm_term is not None else None),
             "relaxed": bool(relaxed),
             "dominant": dominant,
-            "dominantShare": round(cand[dominant], 3),
+            "dominantShare": round(dom_share, 3),
             "share": {c: round(v, 3) for c, v in cand.items()},
+            # 下载走镜像；详情给官网页面（sayobot 只有站内弹窗，没有按 sid 的路由）
             "downloadUrl": "https://dl.sayobot.cn/beatmaps/download/novideo/%s" % row[1],
-            # 详情给官网页面（sayobot 只有站内弹窗，没有按 sid 的路由）；下载走镜像
             "pageUrl": "https://osu.ppy.sh/beatmapsets/%s" % row[1],
         })
         if len(out) >= limit:
@@ -231,14 +252,16 @@ def _pick(rows: list, q_rank: float, share: dict, artists: list, titles: list, v
 
 def for_session(payload: dict, dan: str | None, limit: int = 5) -> list[dict]:
     """从一份分析结果里取查询特征（键型构成、长条占比、曲名）。"""
-    from . import patterns
 
     bm = payload.get("beatmap") or {}
     notes = float(bm.get("notes") or 0)
     ln_ratio = (float(bm.get("holds") or 0) / notes) if notes else 0.0
     share = {x.get("key"): float(x.get("share") or 0) / 100.0
              for x in (payload.get("patternShare") or [])}
-    items = recommend(dan=dan, share=share, ln_ratio=ln_ratio,
+    rate = float((payload.get("replay") or {}).get("rate") or 1.0) or 1.0
+    # 本局的真实密度 = 谱面 BPM × 倍率：DT 1.5x 打 200bpm 的图，手感是 300bpm
+    bpm = float(bm.get("bpm") or 0) * rate
+    items = recommend(dan=dan, share=share, ln_ratio=ln_ratio, bpm=bpm,
                       artist=bm.get("artist") or "", title=bm.get("title") or "",
                       version=bm.get("difficulty") or "",
                       artist_alt=bm.get("artistAlt") or "",
