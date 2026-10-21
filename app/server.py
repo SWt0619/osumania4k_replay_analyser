@@ -703,7 +703,24 @@ class _AnalyzeApiMixin(_SessionView):
     分开写会拼出「会话存在、URL 指向另一个 id」这种只在播放时才暴露的问题。
     """
 
+    # ---- 曲库新鲜度 -----------------------------------------------------
+    def _refresh_library(self):
+        """分析前先看一眼曲库有没有变化（新下载的谱面）。
+
+        索引默认有 1 小时 TTL，用户"下载推荐图 → 打完回放拖回来"通常在这个窗口内，
+        不刷新就会一直提示"曲库里没有这张谱面"。这里只做一次目录指纹比对，
+        没变化时几乎不花时间。
+        """
+        try:
+            roots = default_songs_roots()
+            lib = get_library(roots[0] if roots else None)
+            if lib.ensure_fresh():
+                log("[library] 检测到曲库有变化，已重新扫描（%d 个谱面）" % len(lib.entries))
+        except Exception:  # noqa: BLE001 - 刷新失败不该挡住分析
+            log("[library] 刷新失败：\n" + traceback.format_exc())
+
     def _analyze(self):
+        self._refresh_library()
         raw = self._read_body()
         log("[analyze] 收到请求体 %.1f KB" % (len(raw) / 1024.0))
         req = _parse_json(raw)
@@ -916,6 +933,7 @@ class _ChunkUploadMixin:
         return [fn for _, fn in numbered], ""
 
     def _analyze_chunked(self):
+        self._refresh_library()
         req = _parse_json(self._read_body())
         if req is None:
             return self._error("请求体不是合法 JSON")
