@@ -28,11 +28,12 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from app import paths  # noqa: E402
-from app.core import audio_fetch, config_store, crashreport, json_safe, osu_dirs, recommend  # noqa: E402
+from app.core import audio_fetch, config_store, crashreport, history, json_safe, osu_dirs, recommend  # noqa: E402
 from app.core.analyze import (  # noqa: E402
     SUPPORTED_KEYS,
     AnalyzeError,
     analyze,
+    analyze_chart,
     set_msd_cache_path,
     unsupported_keys_message,
 )
@@ -205,6 +206,12 @@ def _origin_ok(value: str) -> bool:
         return False
     return (parts.scheme in ("http", "https")
             and (parts.hostname or "").lower() in ("127.0.0.1", "localhost", "::1"))
+
+
+def _version_key(text: str) -> tuple[int, ...]:
+    """把 1.5.0 / v1.5.0-beta 变成可比较的元组（只取前三段数字）。"""
+    parts = re.findall(r"\d+", str(text or ""))
+    return tuple(int(x) for x in parts[:3]) or (0,)
 
 
 def _field(req: dict, key: str) -> str:
@@ -675,6 +682,55 @@ class _ApiMixin(_SessionView):
             }
         )
 
+    # ---- 只分析谱面（不看成绩） -----------------------------------------
+    # 用户手里只有 .osu、没有回放时也能看难度与键型构成。
+    # 不做成绩分析，所以不需要会话、音频、媒体路由。
+    def _chart_only(self):
+        req = _parse_json(self._read_body())
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+        b64 = _field(req, "osu")
+        if not b64:
+            return self._error("没有收到谱面文件")
+        try:
+            raw = base64.b64decode(b64, validate=True)
+        except Exception:  # noqa: BLE001
+            return self._error("谱面文件的 base64 解码失败")
+        if not raw:
+            return self._error("谱面文件是空的")
+        path = _write_temp(os.path.join(CACHE_DIR, "uploads"), ".osu", raw)
+        try:
+            return self._json(analyze_chart(path))
+        except AnalyzeError as e:
+            return self._error(str(e))
+        except Exception as e:  # noqa: BLE001
+            return self._error("谱面解析失败：%s" % e)
+
+    # ---- 检查更新 --------------------------------------------------------
+    # 只有用户打开「关于」页时才会请求，且只问 GitHub 的 latest release。
+    def _check_update(self):
+        api = ("https://api.github.com/repos/SWt0619/osumania4k_replay_analyser"
+               "/releases/latest")
+        try:
+            req = urllib.request.Request(api, headers={
+                "User-Agent": "osumania-replay-analyser/" + __version__,
+                "Accept": "application/vnd.github+json",
+            })
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            latest = str(data.get("tag_name") or "").lstrip("vV")
+            return self._json({
+                "ok": True,
+                "current": __version__,
+                "latest": latest,
+                "hasUpdate": _version_key(latest) > _version_key(__version__),
+                "url": data.get("html_url") or (
+                    "https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest"),
+                "notes": (data.get("body") or "")[:600],
+            })
+        except Exception as e:  # noqa: BLE001 - 没网/被墙/限流都不该影响页面
+            return self._json({"ok": False, "current": __version__, "error": str(e)[:160]})
+
     # ---- 段位估算用的谱面原文 -------------------------------------------
     # 段位估算是前端算的（算法是 JS），它要的是谱面原文而不是我们解析后的 JSON；
     # 所以单独开一个接口，按会话把 .osu 文本给过去。页面只在打开难度页时才请求。
@@ -772,6 +828,9 @@ class _AnalyzeApiMixin(_SessionView):
                                    beatmap_path=resolved_bm or "",
                                    beatmap_md5=(payload.get("replay") or {}).get("beatmapMd5") or "")
         payload["session"] = sid
+        # 每局摘要落一份本地存档（`_cache/history.db`）。这一层只存不分析，
+        # 写失败也不影响本次分析，所以走 record_safely。
+        history.record_safely(payload)
         cols = note_skin.get("columns") or []
         payload["media"] = {
             "audio": bool(audio),
@@ -1115,6 +1174,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 return self._library_info()
             if path == "/api/local-replays":
                 return self._local_replays()
+            if path == "/api/check-update":
+                return self._check_update()
             if path == "/api/open-replays":
                 try:
                     os.makedirs(LOCAL_REPLAY_DIR, exist_ok=True)
@@ -1180,6 +1241,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 return self._paths_save(_parse_json(self._read_body()) or {})
             if path == "/api/beatmap-meta":
                 return self._beatmap_meta()
+            if path == "/api/chart":
+                return self._chart_only()
             if path == "/api/recommend":
                 return self._recommend()
             if path == "/api/analyze-local":
