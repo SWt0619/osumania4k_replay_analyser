@@ -203,19 +203,35 @@
     if (!res || !res.ok) return null;
     cell.textContent = res.label;
     const speed = rate === 1 ? "原速" : (rate > 1 ? "DT " : "HT ") + rate.toFixed(2) + "×";
-    const parts = ["Sunny " + res.rcStar.toFixed(2)];
-    if (res.lnStar > 0) parts.push("LN " + res.lnStar.toFixed(2));
-    note.textContent = parts.join(" / ") + " · " + speed;
+    const parts = [];
+    const methodName = res.method === "roxy" ? "Roxy" : (res.method === "azusa" ? "Azusa" : "Sunny");
+    if (res.method === "roxy") {
+      parts.push("Roxy " + Number(res.numeric).toFixed(2));
+    } else if (res.method === "azusa") {
+      parts.push("Azusa " + Number(res.numeric).toFixed(2));
+    } else {
+      parts.push("Sunny " + Number(res.rcStar).toFixed(2) + " 星");
+    }
+    if (res.lnStar > 0) parts.push("LN " + Number(res.lnStar).toFixed(2));
+    note.textContent = parts.join(" · ") + " · " + speed;
     note.title =
-      "段位由 Sunny 星级查表得到：RC 用 RC 标尺，LN 用 LN 标尺，两者是同一根横轴上的两张表。\n" +
-      "本次按键占比 " + (res.lnRatio * 100).toFixed(1) + "%，倍率 " + speed + "（开 DT/HT 时按实际密度算）。\n" +
-      "左边的 MSD 来自 MinaCalc，只看谱面本身，不随倍率变化，所以两个数字的口径不同。";
+      "段位来源：" + methodName + "。\n" +
+      "本次按键占比 " + (res.lnRatio * 100).toFixed(1) + "%，倍率 " + speed + "。\n" +
+      "Sunny 给的是星级，Azusa/Roxy 给的是 RC 数值难度，两者不是同一量纲；" +
+      "左边的 MSD 来自 MinaCalc，只看谱面本身，不随倍率变化。";
     return res;
   }
 
   // 键型构成：把块级粗分类按物件数汇总成一条堆叠条 + 图例。
   // 四大类的颜色固定，和「分段」里的颜色一致，方便对上号。
   const PATTERN_COLORS = { stack: "#f472b6", cut: "#7c5cff", spam: "#22d3ee", tech: "#fbbf24", ln: "#34d399", calm: "#94a3b8" };
+
+  function mapClassText(info) {
+    if (!info || !info.label) return "";
+    return info.key === "hybrid"
+      ? "整图类型：" + info.label + "（长条占 " + info.lnShare + "%，常规键型占 " + (100 - info.lnShare).toFixed(1) + "%）"
+      : "整图类型：" + info.label + (info.key === "ln" ? "（长条占 " + info.lnShare + "%）" : "");
+  }
 
   function renderPatternShare(data) {
     const bar = $("patternBar");
@@ -232,15 +248,9 @@
     // 整图大类：LN 占压倒性就是 LN 图，RC 与 LN 都不占压倒性就是 Hybrid
     const mc = $("mapClass");
     if (mc) {
-      const info = (data && data.mapClass) || null;
-      if (info && info.label) {
-        mc.textContent = info.key === "hybrid"
-          ? "整图类型：" + info.label + "（长条占 " + info.lnShare + "%，常规键型占 " + (100 - info.lnShare).toFixed(1) + "%）"
-          : "整图类型：" + info.label + (info.key === "ln" ? "（长条占 " + info.lnShare + "%）" : "");
-        mc.hidden = false;
-      } else {
-        mc.hidden = true;
-      }
+      const text = mapClassText((data && data.mapClass) || null);
+      mc.textContent = text;
+      mc.hidden = !text;
     }
     const total = items.reduce((s, x) => s + Number(x.share || 0), 0) || 1;
     const detail = new Map(((data && data.patternDetail) || []).map((x) => [x.key, x]));
@@ -339,7 +349,8 @@
     $("gradeLetter").textContent = ev.grade || "–";
     $("heroHeadline").textContent = ev.headline || "";
     $("heroDesc").textContent = ev.gradeDesc
-      ? ev.gradeDesc + " · 准确率(v1) " + fmtPct(sm.accuracy) + " · UR " + Number(sm.ur || 0).toFixed(0)
+      ? ev.gradeDesc + " · 准确率(" + (data.judgeMode === "v2" ? "v2" : "v1") + ") "
+        + fmtPct(sm.accuracy) + " · UR " + Number(sm.ur || 0).toFixed(0)
       : "";
 
     // 圆环：按**评级**给角度，不再拿准确率硬映射 ——
@@ -441,8 +452,12 @@
       const v = counts[k] || 0;
       if (!v) return;
       const angle = (v / sum) * Math.PI * 2;
+      // 相邻段之间留一点缝，但缝隙不能超过这一段的四分之一：
+      // distraction 只有 2/482 时角度约 0.026，固定减 0.02 会让终点跑到起点前面，
+      // canvas 会按顺时针补一整圈 —— 表现就是"一小段紫色盖住整张图"。
+      const pad = Math.min(0.02, angle * 0.2);
       ctx.beginPath();
-      ctx.arc(cx, cy, r, start + 0.02, start + angle - 0.02);
+      ctx.arc(cx, cy, r, start + pad, start + angle - pad);
       ctx.strokeStyle = catHex(k);
       ctx.lineWidth = lineWidth;
       ctx.lineCap = "butt";
@@ -811,6 +826,7 @@
     renderMsd,
     applySunnyDan,
     renderPatternShare,
+    mapClassText,
     renderCategories,
     renderMeta,
     renderSimilar,
