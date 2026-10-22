@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,53 @@ from .osu_dirs import (
 )
 
 CACHE_VERSION = 3
+
+# 超过 20 星的难度黑名单，由 _dataset/build_star_index.py 生成。
+# 只按 (bid, Version) 精确排除，不能按图包整包排除：同一个图包里其他难度要照常可用。
+_HIGH_STAR: dict[int, set[str]] | None = None
+
+
+def _high_star_map() -> dict[int, set[str]]:
+    global _HIGH_STAR
+    if _HIGH_STAR is not None:
+        return _HIGH_STAR
+    out: dict[int, set[str]] = {}
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, "data", "star_over20.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        for item in payload.get("entries") or []:
+            bid = int(item.get("bid") or 0)
+            version = str(item.get("version") or "").strip().lower()
+            if bid > 0 and version:
+                out.setdefault(bid, set()).add(version)
+    except (OSError, ValueError, TypeError, AttributeError):
+        out = {}
+    _HIGH_STAR = out
+    return out
+
+
+def _is_high_star(full: str, high: dict[int, set[str]]) -> bool:
+    """这个 .osu 是否在 20 星黑名单里。读文件头 4KB 就够，不解析整张谱。"""
+    if not high:
+        return False
+    try:
+        with open(long_path(full), "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    bid_match = re.search(r"^BeatmapID:\s*(\d+)", head, re.M)
+    ver_match = re.search(r"^Version:\s*(.*)$", head, re.M)
+    if not bid_match or not ver_match:
+        return False
+    try:
+        bid = int(bid_match.group(1))
+    except ValueError:
+        return False
+    if bid not in high:
+        return False
+    return ver_match.group(1).strip().lower() in high[bid]
 
 
 def _looks_like_osu(path: str) -> bool:
@@ -282,6 +330,10 @@ class Library:
                 collect(*_scan_regular(extra, cached))
         for store in default_lazer_file_roots():
             collect(*_scan_lazer_store(store, cached))
+        # 扫描阶段就把 20 星以上的观赏图排掉：精确到 (bid, 难度名)，同包其他难度不受影响。
+        high = _high_star_map()
+        if high:
+            entries = [e for e in entries if not _is_high_star(e.path, high)]
         return entries, (counts[0], counts[1], counts[2])
 
     # ---- 新鲜度 ---------------------------------------------------------
