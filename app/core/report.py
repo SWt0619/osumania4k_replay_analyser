@@ -32,7 +32,7 @@ def _grade(acc: float, ur: float, error_rate: float) -> tuple[str, str]:
         return ("B", "基本掌握，还有明显提升空间")
     if acc >= 85:
         return ("C", "能打下来，但稳定性不足")
-    return ("D", "建议先降速，把准确度做出来")
+    return ("D", "这张图超出了你的能力范围")
 
 
 def _stability_word(ur: float) -> str:
@@ -62,10 +62,10 @@ def _bias_sentence(median_delta: float) -> tuple[str, bool]:
     """返回（描述, 是否值得动 offset）。"""
     d = median_delta
     if abs(d) < 4:
-        return ("击打几乎完全贴着节拍（中位偏差 %.1fms）。" % d, False)
+        return ("没有出现整体打早或打晚的情况（中位偏差 %.1fms）。" % d, False)
     direction = "偏晚" if d > 0 else "偏早"
     if abs(d) < 10:
-        return ("整体略微%s（中位 %.1fms），属于可接受范围。" % (direction, d), False)
+        return ("整体略微%s（中位 %.1fms），但还属于可接受范围。" % (direction, d), False)
     if abs(d) < MIN_OFFSET_ADVICE_MS:
         return (
             "整体%s（中位 %.1fms），方向一致但幅度不大——单凭一张图还不足以判定是延迟问题，"
@@ -73,8 +73,7 @@ def _bias_sentence(median_delta: float) -> tuple[str, bool]:
             False,
         )
     return (
-        "整局系统性%s（中位 %.1fms），方向一致且幅度不小——这不是手抖，更像是判定时机没对齐，"
-        "可以考虑调 offset（改完务必用另一张短图复核）。" % (direction, d),
+        "整局系统性%s（中位 %.1fms），可以考虑调 offset（调整完记得再打别的图试试）。" % (direction, d),
         True,
     )
 
@@ -145,7 +144,7 @@ def _pattern_sentence(payload: dict) -> tuple[str, str]:
     if worst.get("lift", 0) < 1.25:
         # 没有任何一种键型明显更吃亏 —— 这时候点一个名字等于编故事
         return ("", "")
-    text = "最吃亏的是「%s」：占全谱 %.0f%% 的物件，失误率 %.0f%%，是全谱平均（%.0f%%）的 %.1f 倍。" % (
+    text = "最吃亏的键型是「%s」：仅占全谱 %.0f%% 的物件，但失误率达 %.0f%%，是全谱平均（%.0f%%）的 %.1f 倍。" % (
         worst.get("label", "?"),
         _f(worst.get("share")),
         _f(worst.get("errorRate")),
@@ -245,7 +244,7 @@ _ACC_TIERS = [
     (97.0, "准确率（v1）%.2f%%，稳定度在这张图上已经够看。"),
     (95.0, "准确率（v1）%.2f%%，骨架没问题，掉分集中在少数难点上。"),
     (93.0, "准确率（v1）%.2f%%，能完整打下来，还有明确的提升空间。"),
-    (90.0, "准确率（v1）%.2f%%，基本掌握这张图。"),
+    (90.0, "准确率（v1）%.2f%%，需要提升的部分较多。"),
 ]
 
 
@@ -278,7 +277,7 @@ def _advice_rhythm(payload: dict, share: float) -> dict | None:
     if abs(median_delta) >= MIN_OFFSET_ADVICE_MS:
         return {
             "tag": "rhythm",
-            "title": "把 offset 校掉这 %.0fms" % abs(median_delta),
+            "title": "把 offset 校掉 %.0fms" % abs(median_delta),
             "body": "整局中位%s %.1fms 且换密度也不改方向，这是判定时机没对齐而不是手抖。"
             "在 osu! 里把 universal offset 往%s调 %.0fms 左右，再用另一张 2 分钟短图复核——"
             "**别只凭这一张图就定**，改完打别的图要确认没有更偏。"
@@ -362,7 +361,7 @@ def _category_narrative(payload: dict) -> tuple[str, str, list[dict]]:
         counts.get("slip", 0),
     )
     detail = {
-        "ability": "主要卡在速度/pattern 上：失误集中在密度高、要求快的地方，同一类片段他反复吃亏。",
+        "ability": "主要卡在速度上：失误集中在密度高、要求快的地方，同一类片段反复掉分。",
         "rhythm": "主要是节奏对不齐：误差方向一致地偏，换到密度不同的地方也还是偏，属于「拍子没咬住」而不是手不稳。",
         "distraction": "主要是注意力掉线：失误成簇出现、前后都正常，还伴随几次手停下来的空白。",
         "slip": "主要是随机失手：这些失误彼此孤立、幅度不大、方向和难度上都看不出系统性——"
@@ -416,9 +415,9 @@ class _Draft:
         s = self.payload.get("summary", {})
         bm = self.payload.get("beatmap", {})
         self.paragraphs.append(
-            "这张 %s 键的「%s」难度，你打出了 %.2f%% 的准确率（%s 口径）、UR %.0f。"
+            "这张谱的「%s」难度，你打出了 %.2f%% 的准确率（按%s方式计算）、UR %.0f。"
             "击打偏差中位 %.1fms，离散程度属于「%s」。"
-            % (bm.get("keys", "?"), bm.get("difficulty", "?"), self.acc, self.judge_mode, self.ur,
+            % (bm.get("difficulty", "?"), self.acc, self.judge_mode, self.ur,
                _f(s.get("absMedian")), _stability_word(self.ur))
         )
         bias_text, _ = _bias_sentence(self.median_delta)
@@ -434,7 +433,7 @@ class _Draft:
             # 90% 以下不再是亮点：这张图对他来说是超纲的，硬刷只会固化错误手感
             self.weaknesses.append(
                 "准确率（%s）%.2f%% 在 90%% 以下，这张图目前超出你的能力承受范围：建议先降速（0.85 倍）"
-                "或换低一档难度，把准确率做到 93%% 以上再回来。" % (self.judge_mode, self.acc)
+                "或换低一档难度，把准确率做到 93%% 以上再尝试打原速。" % (self.judge_mode, self.acc)
             )
         if self.ur and self.ur < 110:
             self.strengths.append("稳定性好（UR %.0f），说明手指控制已经成型。" % self.ur)
@@ -448,7 +447,10 @@ class _Draft:
         if fast_bin is not None:
             self.strengths.append("最快的那段失误率也只有 %.0f%%，速度不是当前的瓶颈。" % (fast_bin["errorRate"] * 100))
         if self.ur > 180:
-            self.weaknesses.append("偏差波动大（UR %.0f），同一处会一会儿偏早一会儿偏晚。" % self.ur)
+            self.weaknesses.append(
+                "偏差波动大（UR %.0f），同一处会一会儿偏早一会儿偏晚，如果几乎没有miss的情况UR偏高，"
+                "可能需要考虑调整下落速度或延迟。" % self.ur
+            )
 
     # 2) 失误结构
     def add_categories(self) -> None:
@@ -466,7 +468,7 @@ class _Draft:
             self.paragraphs.append(sec_text)
         if worst_sec and worst_sec["acc"] < self.acc - 1.5:
             self.weaknesses.append(
-                "第 %d 段（%s–%s）明显掉准（%.1f%%），这一段值得单独复练。"
+                "第 %d 段（%s–%s）明显跟不上，掉了（%.1f%%），这一段值得单独复练。"
                 % (worst_sec["index"] + 1, _fmt_mmss(worst_sec["start"]), _fmt_mmss(worst_sec["end"]), worst_sec["acc"])
             )
             self.advice.append(
@@ -493,12 +495,10 @@ class _Draft:
             return
         start = _fmt_mmss(st.get("fromTime", 0))
         self.paragraphs.append(
-            "还有一段值得单独说：%s 起连续 %d 段都是「%s」，前 6 段的失误率是 %.0f%%，"
-            "之后升到 %.0f%%（多 %.0f 个百分点，同期密度没有明显上升）。"
-            "同样的写法打着打着掉准，是耐力撑不住，不是这一段突然变难。"
+            "还有一段值得单独说：%s 起连续 %d 段都是「%s」键型，前 6 段的失误率是 %.0f%%，"
+            "之后升到 %.0f%%。同样的写法打着打着掉准，可能是耐力撑不住。"
             % (start, st.get("blocks", 0), st.get("label", ""),
-               _f(st.get("baseRate")) * 100, _f(st.get("testRate")) * 100,
-               _f(st.get("rise")) * 100)
+               _f(st.get("baseRate")) * 100, _f(st.get("testRate")) * 100)
         )
         self.weaknesses.append(
             "后段（%s 起）在同样的「%s」上掉准，体力是短板。" % (start, st.get("label", ""))
@@ -517,7 +517,8 @@ class _Draft:
         col = _worst_column(self.payload)
         if col is not None:
             self.weaknesses.append(
-                "第 %d 列失误率 %.1f%%，是全谱最不稳的落点。" % (col["column"] + 1, _f(col.get("errorRate")) * 100)
+                "第 %d 列失误率 %.1f%%，可能由于该轨难度较大，也可能这是你的薄弱侧。"
+                % (col["column"] + 1, _f(col.get("errorRate")) * 100)
             )
             self.advice.append(
                 {
@@ -554,7 +555,7 @@ class _Draft:
             "Chordjack": "Chordjack（多押叠）要同时按准和快速换手：先降速把每个和弦按实，再逐档提速。",
             "Jumpstream": "Jumpstream（双押切）的重点是两指落键的同时性：慢速练到两个音完全齐，再上速度。",
             "Handstream": "Handstream（三押切）先练三指独立发力（每根手指单独按实），再合起来提速；注意别用整只手砸。",
-            "Quadstream": "Quadstream（四押切）罕见，先降速确保四指同时落键，别用整只手砸键。",
+            "Quadstream": "Quadstream（四押切）先降速确保四指同时落键，别用整只手砸键。",
             "Stream": "Stream（单押切）掉准多半是手腕紧张：放松手腕、用指根发力，从短串（4 连）开始练。",
             "Speedstream": "Speedstream（高速连打）先降速把每一击打实，再按 0.05× 一档往上推；别一上来就追速度。",
             "Trill": "Trill（交互）重点练两指切换时力度一致，避免一边轻一边重。",
@@ -586,7 +587,7 @@ class _Draft:
             return
         first = breaks[0]
         self.paragraphs.append(
-            "全曲断了 %d 次组合，第一次断在 %d:%02d（第 %d 列）。"
+            "全曲断了 %d 次，第一次断在 %d:%02d（第 %d 列）。"
             % (len(breaks), int(first["t"] // 60000), int(first["t"] % 60000 // 1000), first["column"] + 1)
         )
 
@@ -640,7 +641,7 @@ def build_evaluation(payload: dict) -> dict:
             {
                 "tag": "ability",
                 "title": "往上加一档难度",
-                "body": "这一档已经很稳了，可以去试难度高 0.5 星左右的图；把「稳定」和「上限」分开练。",
+                "body": "这一档已经很稳了，可以去试难度高一点的图；把「稳定」和「上限」分开练。",
             }
         )
 
