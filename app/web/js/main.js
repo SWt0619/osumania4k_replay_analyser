@@ -51,6 +51,9 @@
     // 切换只是换一份视图，不重新请求分析。
     judgeMode: "v1",
     baseData: null,
+    // 判定算法（仅调试用）：A 当前算法、B 仅尾判状态机、C 头尾都走事件流。
+    judgeAlgo: "C",
+    lastReplay: null,   // 最后一次回放来源：{kind:"local", name} 或 {kind:"file", file}
   };
 
   // 回放页的两个滑杆记在本地，下次打开还是上次的设置
@@ -63,7 +66,8 @@
       if (typeof p.scrollMs === "number" && p.scrollMs >= 300 && p.scrollMs <= 2600) state.scrollMs = p.scrollMs;
       if (typeof p.audioOffset === "number" && p.audioOffset >= -500 && p.audioOffset <= 500) state.audioOffset = p.audioOffset;
       if (typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1) state.volume = p.volume;
-      if (p.judgeMode === "v1" || p.judgeMode === "v2") state.judgeMode = p.judgeMode;
+      if (p.judgeMode === "v1" || p.judgeMode === "v2" || p.judgeMode === "classic") state.judgeMode = p.judgeMode;
+      if (p.judgeAlgo === "C" || p.judgeAlgo === "D") state.judgeAlgo = p.judgeAlgo;
     } catch (e) { /* 隐私模式下拿不到就算了 */ }
   }
   function savePrefs() {
@@ -73,6 +77,7 @@
         audioOffset: state.audioOffset,
         volume: state.volume,
         judgeMode: state.judgeMode,
+        judgeAlgo: state.judgeAlgo,
       }));
     } catch (e) { /* ignore */ }
   }
@@ -122,15 +127,19 @@
     document.querySelectorAll(".rail-btn").forEach((b) => {
       b.classList.toggle("is-active", b.dataset.tab === name);
     });
-    ["overview", "timeline", "errors", "replay", "chart", "chartonly", "details", "about"].forEach((t) => {
+    ["overview", "timeline", "errors", "replay", "chart", "chartonly", "details", "settings", "about"].forEach((t) => {
       const p = $("panel-" + t);
       if (p) p.hidden = t !== name;
     });
-    // 「关于」不依赖分析结果：没导入回放时也要能看；「只看谱面」同理
-    $("emptyState").hidden = !!state.data || name === "about" || name === "chartonly";
+    // 「关于」「设置」不依赖分析结果：没导入回放时也要能看；「只看谱面」同理
+    $("emptyState").hidden = !!state.data || name === "about" || name === "chartonly" || name === "settings";
     if (name === "about") checkUpdate(false);
+    if (name === "settings") loadPathSettings();
     // 切到某页时补一次重绘（隐藏时 canvas 尺寸是 0）
     if (state.data || state.chartOnly) {
+      // 播放器等到真的要看回放页再建：几万物件时 load() 要复制一份 notes，
+      // 放在首屏会和总览渲染抢主线程。
+      if (name === "replay") ensurePlayer();
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           drawChartsForTab(name);
@@ -248,7 +257,9 @@
   // 当前判定口径下的判定码（0..5）。后端把两套都放在同一条 note 上：
   // j 是 V1，j2 是 V2，播放器与实时前缀和都从这里取。
   function jCodeOf(note) {
-    const v = state.judgeMode === "v2" ? note.j2 : note.j;
+    const v = state.judgeMode === "classic"
+      ? note.jc
+      : (state.judgeMode === "v2" ? note.j2 : note.j);
     return v >= 0 && v <= 5 ? v | 0 : 5;
   }
 
@@ -1071,6 +1082,17 @@
     window.UI.renderSimilar(items);
   }
 
+  // 段位与推荐放到首屏之后：Roxy/Azusa 是同步算法，大图上会占住主线程，
+  // 用户分析完立刻滚动/点击就会被它挡住（INP 飙高）。空闲时再算，超时兜底。
+  function scheduleSimilar(data) {
+    const run = () => { void loadSimilar(data); };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(run, { timeout: 2000 });
+    } else {
+      setTimeout(run, 350);
+    }
+  }
+
   // ---------------------------------------------------------------- 主渲染
   // ---------------------------------------------------------------- 检查更新
   // 打开「关于」页时静默查一次；手动点按钮时失败会 toast。
@@ -1133,8 +1155,46 @@
     });
   }
 
+  function setJudgeAlgo(algo) {
+    if (algo !== "C" && algo !== "D") return;
+    if (state.busy) {
+      window.UI.toast("正在分析，等这次结束再切");
+      return;
+    }
+    state.judgeAlgo = algo;
+    savePrefs();
+    const box = $("judgeAlgoToggle");
+    if (box) {
+      box.querySelectorAll("[data-algo]").forEach((b) => {
+        b.classList.toggle("is-active", b.getAttribute("data-algo") === algo);
+      });
+    }
+    const last = state.lastReplay;
+    if (!last) {
+      window.UI.toast("导入文件后生效");
+      return;
+    }
+    if (last.kind === "local") {
+      state.busy = true;
+      window.UI.loading(true, "正在重新分析…");
+      window.API.analyzeLocal(last.name, algo)
+        .then((data) => {
+          renderAnalysis(data);
+          window.UI.toast("已生效");
+        })
+        .catch((e) => {
+          window.UI.loading(false);
+          window.UI.toast((e && e.message) || "重新分析失败", true);
+        })
+        .finally(() => { state.busy = false; });
+    } else if (last.kind === "file") {
+      handleReplayFile(last.file);
+      window.UI.toast("已生效");
+    }
+  }
+
   function setJudgeMode(mode, silent) {
-    if (mode !== "v1" && mode !== "v2") return;
+    if (mode !== "v1" && mode !== "v2" && mode !== "classic") return;
     state.judgeMode = mode;
     savePrefs();
     updateJudgeToggle();
@@ -1161,16 +1221,18 @@
     $("timelineMeta").textContent = "共 " + view.beatmap.notes + " 个物件 · " + sm.flaws + " 次有瑕疵";
 
     renderErrorList();
-    ensurePlayer();
+    if (state.player) ensurePlayer();
     // 对比模式：标杆那一路也要换成同一套口径，否则左右两边的判定色对不上
     if (state.compare && state.player2) {
       state.prog1 = buildProgress(state.data.notes || []);
       state.prog2 = buildProgress(state.compare.notes || []);
       state.player2.load({
         keys: state.compare.beatmap.keys,
-        notes: state.judgeMode === "v2"
-          ? (state.compare.notes || []).map((n) => Object.assign({}, n, { j: n.j2 }))
-          : state.compare.notes,
+        notes: state.judgeMode === "classic"
+          ? (state.compare.notes || []).map((n) => Object.assign({}, n, { j: n.jc }))
+          : state.judgeMode === "v2"
+            ? (state.compare.notes || []).map((n) => Object.assign({}, n, { j: n.j2 }))
+            : state.compare.notes,
         firstObject: state.compare.beatmap.firstObject,
         lastObject: state.compare.beatmap.lastObject,
       });
@@ -1181,13 +1243,17 @@
     updateTransport();
     updateNowPanel(t);
     if (!silent) {
-      window.UI.toast(mode === "v2"
-        ? "已切到 ScoreV2：长条头尾分判，尾窗口 1.5 倍"
-        : "已切回 ScoreV1：长条头尾合并");
+      window.UI.toast(
+        mode === "classic"
+          ? "已切到 Classic：stable 判定窗口 + 长条头尾分判"
+          : mode === "v2"
+            ? "已切到 ScoreV2：长条头尾分判，尾窗口 1.5 倍"
+            : "已切回 ScoreV1：长条头尾合并"
+      );
     }
   }
 
-  function renderAnalysis(data, meta) {
+  async function renderAnalysis(data, meta) {
     // 最后一道闸：后端已经拒过 4K 以外的谱面，这里再挡一次是为了"页面连着旧版服务"的情况
     // （改完代码但服务没重启）。宁可什么都不显示，也不要让人看到一份没有依据的报告。
     const keys = data && data.beatmap ? Number(data.beatmap.keys) : 0;
@@ -1196,11 +1262,56 @@
       window.UI.toast("本工具只支持 4K（4 键）谱面，这份是 " + keys + "K，已停止显示", true);
       return;
     }
+    // 20 星上限：观赏图/特殊图不进分析流程，先用 Sunny 星数快速判一下。
+    // 只算 Sunny（几十毫秒），不跑 Roxy/Azusa；失败时放行，避免误杀。
+    const rate = Number((data.replay && data.replay.rate) || 1) || 1;
+    if (window.Estimator && window.Estimator.sunnyStar) {
+      const stars = await window.Estimator.sunnyStar(data.session, rate);
+      if (stars && Number.isFinite(stars.star) && stars.star > 20) {
+        window.UI.loading(false);
+        // 清掉上一局的结果，否则用户会以为这张新回放已经分析完了
+        state.data = null;
+        state.baseData = null;
+        state.chartOnly = null;
+        $("emptyState").hidden = false;
+        window.UI.toast(
+          "这张图 " + stars.star.toFixed(1) + " 星，超过 20 星上限，已按兜底策略跳过分析",
+          true
+        );
+        return;
+      }
+    }
     closeCompare();     // 换了主回放，对比自然失效
+    // 按回放来源自动选口径：lazer 默认 V2；stable 只有开了 ScoreV2 才是 V2。
+    // 旧版服务没有 judge 字段时保持上次选择，不强行改。
+    const autoJudge = data.judge && data.judge.default;
+    if (autoJudge === "v1" || autoJudge === "v2" || autoJudge === "classic") {
+      state.judgeMode = autoJudge;
+      savePrefs();
+    }
+    // 只有 lazer + Classic 的回放才有第三套口径，其余回放把按钮藏起来
+    const classicBtn = document.querySelector('#judgeToggle [data-judge="classic"]');
+    if (classicBtn) {
+      classicBtn.hidden = !(data.judge && (data.judge.modes || []).includes("classic"));
+    }
     // 原始结果留着（含两套判定），当前视图按首选项挑一套；切换时只换视图
     state.baseData = data;
     state.data = viewOf(data, state.judgeMode);
     updateJudgeToggle();
+    const judgeBox = $("judgeToggle");
+    if (judgeBox && data.judge) {
+      const srcLabel = data.judge.source === "lazer"
+        ? "lazer 回放"
+        : data.judge.source === "lazer-classic"
+          ? "lazer + Classic"
+          : (data.judge.source === "stable-v2" ? "stable + ScoreV2" : "stable 回放");
+      judgeBox.title = "长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）。"
+        + "已识别为 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase() + "，可随时手动切换。";
+      if (state._autoJudge !== autoJudge) {
+        state._autoJudge = autoJudge;
+        window.UI.toast("已识别 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase());
+      }
+    }
     state.selectedError = null;
     const view = state.data;
     // 残卷 / 可能配错谱面的提醒都走这里。
@@ -1225,7 +1336,7 @@
     window.UI.renderMsd(view);
     window.UI.renderAbout(view.version);
     window.UI.renderSimilar(null);   // 段位还没算出来，这张卡片先不显示
-    void loadSimilar(view);          // 异步：算段位 → 要推荐 → 再画
+    scheduleSimilar(view);          // 首屏之后空闲时再算段位 → 推荐
     window.UI.renderCategories(view);
     window.UI.renderMeta(view);
     window.UI.renderSections(view);
@@ -1244,7 +1355,6 @@
     setupAudio(view);
     // 先把「总览」切出来：隐藏状态的 canvas 宽度是 0，画出来会是空白
     switchTab("overview");
-    ensurePlayer();
     redrawAllCharts();
     updateTransport();
     updateNowPanel(currentTimeMs());
@@ -1452,6 +1562,7 @@
     }
 
     beacon("file-chosen", { name: file.name, size: file.size });
+    state.lastReplay = { kind: "file", file: file };
     state.busy = true;
     state.escaped = false;
     showLoading("正在读取文件…", () => {
@@ -1481,7 +1592,7 @@
       let data;
       try {
         data = await window.API.analyzeUpload(
-          { replay: b64, beatmap: null, beatmapPath: null, songsRoot: null },
+          { replay: b64, beatmap: null, beatmapPath: null, songsRoot: null, algo: state.judgeAlgo },
           (loaded, total) => {
             const pct = total ? Math.round((loaded / total) * 100) : 0;
             if (pct >= 100) setStage("上传完成，正在分析");
@@ -1504,7 +1615,8 @@
             const pct = total ? Math.round((loaded / total) * 100) : 0;
             setStage("分片上传 " + pct + "%（" + Math.round(loaded / 1024) + " / " + Math.round(total / 1024) + " KB）");
           },
-          (text) => setStage(text)
+          (text) => setStage(text),
+          state.judgeAlgo
         );
       }
       renderAnalysis(data);
@@ -1551,7 +1663,7 @@
         window.UI.toast("本工具只支持 4K（4 键）谱面，你选的是 " + meta.keys + "K：" + meta.label, true);
         return;
       }
-      const data = await window.API.analyze(state.replayBase64, b64);
+      const data = await window.API.analyze(state.replayBase64, b64, null, null, null, state.judgeAlgo);
       closeModal("bmModal");
       renderAnalysis(data);
     } catch (e) {
@@ -1685,7 +1797,7 @@
   async function useLibraryBeatmap(path) {
     window.UI.loading(true, "正在用曲库里的谱面分析…");
     try {
-      const data = await window.API.analyze(state.replayBase64, null, null, path);
+      const data = await window.API.analyze(state.replayBase64, null, null, path, null, state.judgeAlgo);
       closeModal("bmModal");
       renderAnalysis(data);
     } catch (e) {
@@ -1714,14 +1826,12 @@
 
   // ------------------------------------------------------ 手动指定游戏目录
   // 自动探测兜不住的情况（装在哪都不知道、目录被改得面目全非）留一个出口：
-  // 点左上角的曲库标签，在这里填两次路径，保存后立刻重建索引。
-  async function openPathModal() {
-    const modal = $("pathModal");
-    if (!modal) return;
+  // 设置页里填两次路径，保存后立刻重建索引。
+  async function loadPathSettings() {
     const status = $("pathStatus");
+    if (!status) return;
     status.className = "dir-status";
     status.textContent = "读取当前设置…";
-    modal.hidden = false;
     try {
       const info = await window.API.paths();
       $("pathStable").value = info.stableDir || "";
@@ -1735,7 +1845,6 @@
     } catch (e) {
       status.textContent = "读取当前设置失败：" + (e.message || e);
     }
-    $("pathStable").focus();
   }
 
   async function savePaths() {
@@ -1862,9 +1971,9 @@
     $("btnCloseModal").addEventListener("click", () => closeModal("bmModal"));
     $("btnPickOsu").addEventListener("click", () => $("fileOsu").click());
     // 曲库标签点一下就能手动指定游戏目录（自动找不到时的兜底）
-    $("libChip").addEventListener("click", openPathModal);
-    $("btnClosePathModal").addEventListener("click", () => closeModal("pathModal"));
     $("btnSavePaths").addEventListener("click", savePaths);
+    $("btnAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = false; });
+    $("btnCloseAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = true; });
     document.querySelectorAll(".modal").forEach((m) => {
       m.addEventListener("click", (e) => {
         if (e.target === m) m.hidden = true;
@@ -1961,6 +2070,19 @@
         const btn = ev.target && ev.target.closest ? ev.target.closest("[data-judge]") : null;
         if (!btn) return;
         setJudgeMode(btn.getAttribute("data-judge"));
+      });
+    }
+
+    // 判定算法（调试）：A/B/C 切换后按最后一次回放来源重新分析
+    const algoBox = $("judgeAlgoToggle");
+    if (algoBox) {
+      algoBox.addEventListener("click", (ev) => {
+        const btn = ev.target && ev.target.closest ? ev.target.closest("[data-algo]") : null;
+        if (!btn) return;
+        setJudgeAlgo(btn.getAttribute("data-algo"));
+      });
+      algoBox.querySelectorAll("[data-algo]").forEach((b) => {
+        b.classList.toggle("is-active", b.getAttribute("data-algo") === state.judgeAlgo);
       });
     }
 
@@ -2096,10 +2218,11 @@
       li.addEventListener("click", () => {
         if (state.busy) return;
         state.busy = true;
+        state.lastReplay = { kind: "local", name: it.name };
         window.UI.loading(true, "正在读取本地回放…");
         setStage("正在分析本地回放");
         startWaiting();
-        window.API.analyzeLocal(it.name)
+        window.API.analyzeLocal(it.name, state.judgeAlgo)
           .then((data) => renderAnalysis(data))
           .catch((e) => {
             window.UI.loading(false);
