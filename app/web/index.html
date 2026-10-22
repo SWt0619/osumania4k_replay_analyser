@@ -44,8 +44,9 @@
     <div class="seg-toggle topbar-judge" id="judgeToggle" title="长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）">
       <button class="seg-btn is-active" data-judge="v1">V1</button>
       <button class="seg-btn" data-judge="v2">V2</button>
+      <button class="seg-btn" data-judge="classic" hidden>Classic</button>
     </div>
-    <div class="chip" id="libChip" title="osu! 曲库状态">
+    <div class="chip is-readonly" id="libChip">
       <svg viewBox="0 0 24 24" class="ico"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
       <span id="libChipText">曲库…</span>
     </div>
@@ -82,11 +83,15 @@
         <circle cx="12" cy="12" r="1.4" fill="currentColor"/>
       </svg>
     </button>
-    <span class="rail-sep"></span>
     <button class="rail-btn" data-tab="details" title="细节数据">
       <svg viewBox="0 0 24 24" class="ico"><path d="M5 6h14M5 12h14M5 18h9" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>
     </button>
     <span class="rail-sep"></span>
+    <button class="rail-btn" data-tab="settings" title="设置">
+      <svg viewBox="0 0 24 24" class="ico">
+        <path d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94 7.07 7.07 0 0 0-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.58.24-1.12.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.74 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.14.24.42.34.68.22l2.39-.96c.5.38 1.04.7 1.62.94l.36 2.54c.04.24.25.42.5.42h3.84c.25 0 .46-.18.5-.42l.36-2.54c.58-.24 1.12-.56 1.62-.94l2.39.96c.26.12.54.02.68-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z" fill="currentColor" opacity=".9"/>
+      </svg>
+    </button>
     <button class="rail-btn rail-btn-about" data-tab="about" title="关于 / 项目地址">
       <svg viewBox="0 0 24 24" class="ico"><circle cx="12" cy="12" r="8.6" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M12 10.6v6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="7.9" r="1.15" fill="currentColor"/></svg>
     </button>
@@ -466,6 +471,47 @@
       </article>
     </div>
 
+    <!-- 设置：osu! 目录与长条物件计算方式。不依赖分析结果，随时可进。 -->
+    <div class="tab-panel" id="panel-settings" hidden>
+      <article class="card glass">
+        <div class="card-head">
+          <h2>设置</h2>
+          <p class="muted">osu! 目录与长条物件计算方式</p>
+        </div>
+        <div class="card-body">
+          <h3>osu! 目录</h3>
+          <p class="muted">默认会自动找曲库；找不到时在这里手动指定，填完保存会重新扫一遍。</p>
+
+          <label class="dir-field">
+            <span>稳定版（osu!stable）</span>
+            <input type="text" id="pathStable" class="text-input" placeholder="例如 D:\OsuStable" autocomplete="off">
+            <em>选到<b>有 osu!.exe 的那一级</b>，不是里面的 Songs。</em>
+          </label>
+
+          <label class="dir-field">
+            <span>lazer（osu!lazer）</span>
+            <input type="text" id="pathLazer" class="text-input" placeholder="例如 C:\Users\你\AppData\Roaming\osu" autocomplete="off">
+            <em>选到<b>同时有 Songs 和 files 的那一级</b>。没装 lazer 就留空。</em>
+          </label>
+
+          <p class="dir-status" id="pathStatus"></p>
+          <div class="settings-actions">
+            <button class="btn btn-primary" id="btnSavePaths">保存并重新扫描</button>
+          </div>
+
+          <hr class="settings-sep">
+
+          <h3>长条物件计算方式
+            <button class="info-btn" id="btnAlgoHelp" type="button" title="说明">i</button>
+          </h3>
+          <div class="seg" id="judgeAlgoToggle">
+            <button class="seg-btn is-active" data-algo="C">使用 Lazer 方式计算长条物件（默认）</button>
+            <button class="seg-btn" data-algo="D">使用 Stable 方式计算长条物件</button>
+          </div>
+        </div>
+      </article>
+    </div>
+
     <!-- 关于：版本、项目地址、参考来源。
          这一页不依赖分析结果，没导入回放时也能看（见 switchTab 对 emptyState 的处理）。 -->
     <div class="tab-panel" id="panel-about" hidden>
@@ -577,29 +623,20 @@
   </div>
 </div>
 
-<!-- 手动指定 osu! 目录：自动探测找不到曲库时的最后兜底 -->
-<div class="modal" id="pathModal" hidden>
+<!-- 长条计算方式说明 -->
+<div class="modal" id="algoHelpModal" hidden>
   <div class="modal-card glass">
-    <h3>指定 osu! 目录</h3>
-    <p class="muted">默认会自动找曲库；找不到时在这里手动指定，填完保存会重新扫一遍。</p>
-
-    <label class="dir-field">
-      <span>稳定版（osu!stable）</span>
-      <input type="text" id="pathStable" class="text-input" placeholder="例如 D:\OsuStable" autocomplete="off">
-      <em>选到<b>有 osu!.exe 的那一级</b>，不是里面的 Songs。</em>
-    </label>
-
-    <label class="dir-field">
-      <span>lazer（osu!lazer）</span>
-      <input type="text" id="pathLazer" class="text-input" placeholder="例如 C:\Users\你\AppData\Roaming\osu" autocomplete="off">
-      <em>选到<b>同时有 Songs 和 files 的那一级</b>。没装 lazer 就留空。</em>
-    </label>
-
-    <p class="dir-status" id="pathStatus"></p>
-
+    <h3>长条物件计算方式</h3>
+    <p class="muted">客户端和计分版本会一起影响长条怎么判，常见的四种组合是：</p>
+    <ul class="algo-help-list">
+      <li><b>stable + V1</b>：旧版 stable 的 ScoreV1。长条整条算一个判定，头和尾的误差合并；晚松在 OK 窗口内仍可能给 100。</li>
+      <li><b>stable + V2</b>：stable 开 ScoreV2。长条的头和尾分开判，尾判窗口放大 1.5 倍；和 lazer 的 V2 很接近。</li>
+      <li><b>lazer + V1</b>：lazer 里查看旧 V1 成绩的兼容口径。长条仍按合并误差算，主要用于对照老成绩。</li>
+      <li><b>lazer + V2</b>：lazer 的默认口径。长条头尾分开判，尾判在松手时结算，体中断开会按 MEH 封顶。</li>
+    </ul>
+    <p>设置里的“Lazer 方式”对应 lazer + V2，也适合 stable + V2；“Stable 方式”对应 stable + V1，也适合 lazer 的旧 V1 成绩。</p>
     <div class="modal-actions">
-      <button class="btn btn-primary" id="btnSavePaths">保存并重新扫描</button>
-      <button class="btn btn-ghost" id="btnClosePathModal">取消</button>
+      <button class="btn btn-primary" id="btnCloseAlgoHelp">知道了</button>
     </div>
   </div>
 </div>
