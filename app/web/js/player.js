@@ -988,7 +988,10 @@
       var right = now + opts.scrollMs;
       ctx.save();
       ctx.globalAlpha = 0.5;
-      for (var i = 0; i < notes.length; i += 1) {
+      // 按下位置 = 音符头 + 误差，误差通常几百毫秒以内；从可见窗口往前退一点开始，
+      // 不再每帧从第 0 条扫起（几万物件时这一步能吃掉大半帧）。
+      var from = lowerBound(left - 400);
+      for (var i = from; i < notes.length; i += 1) {
         var n = notes[i];
         if (n.t > right) break;
         if (n.t < left) continue;
@@ -1017,7 +1020,9 @@
       var right = now + opts.scrollMs;
       ctx.save();
       ctx.globalAlpha = 0.55;
-      for (var i = 0; i < notes.length; i += 1) {
+      // 松手位置跟着长条尾走：一个很长的 LN 头可能早就过去了，所以回退 maxHoldMs
+      var from = lowerBound(Math.max(0, left - maxHoldMs - 400));
+      for (var i = from; i < notes.length; i += 1) {
         var n = notes[i];
         if (n.t > right) break;
         if (n.t < left) continue;
