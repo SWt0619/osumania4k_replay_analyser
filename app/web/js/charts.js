@@ -930,6 +930,49 @@
     };
   }
 
+  // 时间轴的版面：左边留出刻度栏（三条带的名字写在栏里、右对齐，不会压在曲线上），
+  // 右边留一点余量。三条带的高度分配交给 layoutTimelineBands。
+  function timelineFrame(w, h, hasUr) {
+    var padL = 44, padR = 32, padT = 10, padB = 16;
+    var px = padL;
+    var pw = Math.max(1, w - padL - padR);
+    var plotTop = padT;
+    var plotH = Math.max(1, h - padT - padB);
+    return { px: px, pw: pw, plotTop: plotTop, plotH: plotH,
+             layout: layoutTimelineBands(plotTop, plotH, hasUr) };
+  }
+
+  // 底部时间刻度：0 / 1/4 / 1/2 / 3/4 / 末尾。
+  // 刻度写**绝对时间**：砍掉前奏后，左端已经不是 0 秒了，
+  // 还按 "span*k/4" 相对算的话，40 秒前奏的图会从"0:00"开始，直接看错。
+  function drawTimeAxis(ctx, px, pw, h, t0, span, th) {
+    setFont(ctx, 11);
+    ctx.fillStyle = th.dim;
+    ctx.textBaseline = 'bottom';
+    for (var k = 0; k < 5; k++) {
+      var tx = px + pw * (k / 4);
+      ctx.textAlign = k === 0 ? 'left' : (k === 4 ? 'right' : 'center');
+      ctx.fillText(fmtTime(t0 + span * (k / 4)), tx, h - 3);
+    }
+  }
+
+  // 失误散点：画在准确率曲线上，按类别着色，半径 3px。
+  // 长条断连画空心，和"整点漏接"区分开。
+  function drawErrorScatter(ctx, dots) {
+    for (var k = 0; k < dots.length; k++) {
+      ctx.beginPath();
+      ctx.arc(dots[k].x, dots[k].y, 3, 0, TAU);
+      if (dots[k].hollow) {
+        ctx.strokeStyle = dots[k].color;
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = dots[k].color;
+        ctx.fill();
+      }
+    }
+  }
+
   function drawTimeline(canvas, timeline, opts) {
     if (!canvas) return null;
     var o = opts || {};
@@ -956,15 +999,13 @@
     var span = view.span;
     var i;
 
-    // 左边留出刻度栏：三条带的名字写在栏里（右对齐），就不会压在曲线上
-    var padL = 44, padR = 32, padT = 10, padB = 16;
-    var px = padL;
-    var pw = Math.max(1, w - padL - padR);
-    var plotTop = padT;
-    var plotH = Math.max(1, h - padT - padB);
+    var frame = timelineFrame(w, h, hasUr);
+    var px = frame.px;
+    var pw = frame.pw;
+    var plotTop = frame.plotTop;
 
     // 分带：NPS 面积在上，准确率折线居中，UR 折线在下（共用 x 轴：时间）。
-    var layout = layoutTimelineBands(plotTop, plotH, hasUr);
+    var layout = frame.layout;
     var bands = layout.bands;
     var npsTop = layout.npsTop;
     var npsBottom = layout.npsBottom;
@@ -1007,7 +1048,6 @@
     }
 
     ctx.save();
-    var k;
     var g = {
       px: px, pw: pw,
       npsTop: npsTop, npsBottom: npsBottom,
@@ -1020,33 +1060,10 @@
     drawUrBand(ctx, g, buckets, n, hasUr, avgUr, urPeak, th);
     drawBandLabels(ctx, g, bands, hasUr, urPeak, avgUr, th);
 
-    // ---- 失误散点（画在准确率曲线上，按类别着色，半径 3px） ----
     var dots = collectErrorDots(buckets, n, xOf, yAcc, accBottom, th);
-    for (k = 0; k < dots.length; k++) {
-      ctx.beginPath();
-      ctx.arc(dots[k].x, dots[k].y, 3, 0, TAU);
-      if (dots[k].hollow) {
-        ctx.strokeStyle = dots[k].color;   // 长条断连画空心，和"整点漏接"区分开
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
-      } else {
-        ctx.fillStyle = dots[k].color;
-        ctx.fill();
-      }
-    }
+    drawErrorScatter(ctx, dots);
 
-    // ---- 底部时间刻度：0 / 1/4 / 1/2 / 3/4 / 末尾 ----
-    setFont(ctx, 11);
-    ctx.fillStyle = th.dim;
-    ctx.textBaseline = 'bottom';
-    for (k = 0; k < 5; k++) {
-      var tx = px + pw * (k / 4);
-      // 刻度写**绝对时间**：砍掉前奏后，左端已经不是 0 秒了，
-      // 还按 "span*k/4" 相对算的话，40 秒前奏的图会从"0:00"开始，直接看错。
-      var tLabel = fmtTime(t0 + span * (k / 4));
-      ctx.textAlign = k === 0 ? 'left' : (k === 4 ? 'right' : 'center');
-      ctx.fillText(tLabel, tx, h - 3);
-    }
+    drawTimeAxis(ctx, px, pw, h, t0, span, th);
 
     // ---- 当前播放位置的竖线（2px，半透明） ----
     // 静态内容到此为止：先拍快照（快照里没有竖线），再在最上层画竖线。
