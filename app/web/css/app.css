@@ -849,8 +849,8 @@ canvas { display: block; }
 .modal-card h3 { font-size: 16px; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 6px; flex-wrap: wrap; }
 
-/* 手动指定游戏目录 */
-.chip#libChip { cursor: pointer; }
+/* 曲库状态只展示，不再作为“指定目录”的入口 */
+.chip#libChip { cursor: default; }
 .dir-field { display: block; }
 .dir-field > span { display: block; font-size: 12.5px; color: var(--dim); margin-bottom: 6px; }
 .dir-field .text-input { width: 100%; font-size: 13px; }
@@ -999,4 +999,49 @@ canvas { display: block; }
 @media (max-width: 620px) {
   .about-kv > div { flex-direction: column; gap: 2px; }
   .about-kv dt { flex: none; }
+}
+
+/* 设置页：目录表单和长条计算方式集中在这里 */
+#panel-settings h3 { margin: 4px 0 8px; font-size: 15px; }
+#panel-settings .dir-field { max-width: 560px; }
+#panel-settings .settings-actions { margin-top: 10px; }
+#panel-settings .settings-sep {
+  border: 0;
+  border-top: 1px solid rgba(127, 127, 127, .18);
+  margin: 20px 0;
+}
+
+/* 曲库状态只是展示，不再作为“指定目录”的入口 */
+.chip.is-readonly { cursor: default; }
+
+/* 长条计算方式的说明按钮 */
+.info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 6px;
+  padding: 0;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dim);
+  font-size: 11px;
+  font-style: italic;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.info-btn:hover { color: inherit; }
+
+/* 长条计算方式说明浮窗里的四种组合 */
+.algo-help-list {
+  margin: 8px 0 14px;
+  padding-left: 18px;
+}
+.algo-help-list li {
+  margin: 7px 0;
+  line-height: 1.65;
 }
