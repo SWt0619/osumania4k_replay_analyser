@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 
 # 与推荐索引、键型大类保持同一套 key；顺序固定，索引里存的是数组不是对象
 CATS = ("cut", "stack", "spam", "tech", "ln")
-SEG_FIELDS = ("t", "nps") + CATS
 
 # 查询段与候选段的相似度权重：构成比密度更能说明"是不是同一种写法"
 W_SHARE = 0.65
