@@ -392,8 +392,8 @@ def _category_narrative(payload: dict) -> tuple[str, str, list[dict]]:
 class _Draft:
     """评价文本的逐段累积器。
 
-    评价由八块互不相干的判断拼成（准度、失误结构、分段、左右手、pattern、密度、
-    断连、offset），每块往同样的四个列表里写。以前它们全挤在一个 200 行函数里，
+    评价由九块互不相干的判断拼成（准度、失误结构、分段、耐力、左右手、pattern、
+    密度、断连、offset），每块往同样的四个列表里写。以前它们全挤在一个 200 行函数里，
     改其中一条建议要滑三屏才能确认有没有和别处打架——分成一人一块之后，
     顺序仍由调用顺序决定，输出不变。
     """
@@ -610,6 +610,38 @@ class _Draft:
         )
 
 
+# 一句话结论按"占比最高的那类失误"给，四类各一句；顶部的徽章也在这里拼。
+_HEADLINES = {
+    "ability": "速度是当前的天花板",
+    "rhythm": "拍子没咬住，手其实是稳的",
+    "distraction": "注意力比手先掉线",
+    "slip": "手是稳的，掉的是零星几下",
+}
+
+
+def _headline(grade: str, counts: dict) -> str:
+    """一句话结论。S / A+ 时同一句话要换个说法：这时候说"天花板"是自相矛盾的。"""
+    main_cat = max(counts.items(), key=lambda kv: kv[1])[0] if counts else "ability"
+    headline = _HEADLINES[main_cat]
+    if grade in ("S", "A+"):
+        headline = "这一局很干净，" + headline.replace("是当前的天花板", "还有余量")
+    return headline
+
+
+def _badges(acc: float, ur: float, median_delta: float, max_combo, tag: str) -> list[dict]:
+    """顶栏的四个数字。
+
+    准确率跟着当前判定口径走；旁边还挂着 ScoreV2 的独立评分，
+    不标口径的话两个数字很容易被当成同一个。
+    """
+    return [
+        {"key": "acc", "label": "准确率 (%s)" % tag, "value": "%.2f%%" % acc},
+        {"key": "ur", "label": "UR", "value": "%.0f" % ur},
+        {"key": "bias", "label": "中位偏差", "value": "%+.1fms" % median_delta},
+        {"key": "combo", "label": "最大连击", "value": str(max_combo)},
+    ]
+
+
 def build_evaluation(payload: dict) -> dict:
     s = payload.get("summary", {})
     acc = _f(s.get("accuracy"))
@@ -646,32 +678,15 @@ def build_evaluation(payload: dict) -> dict:
         )
 
     grade, grade_desc = _grade(acc, ur, _f(s.get("errorRate")))
-    headline_map = {
-        "ability": "速度是当前的天花板",
-        "rhythm": "拍子没咬住，手其实是稳的",
-        "distraction": "注意力比手先掉线",
-        "slip": "手是稳的，掉的是零星几下",
-    }
     cats = payload.get("categories", {}).get("counts", {})
-    main_cat = max(cats.items(), key=lambda kv: kv[1])[0] if cats else "ability"
-    headline = headline_map[main_cat]
-    if grade in ("S", "A+"):
-        headline = "这一局很干净，" + headline.replace("是当前的天花板", "还有余量")
 
     return {
         "grade": grade,
         "gradeDesc": grade_desc,
-        "headline": headline,
+        "headline": _headline(grade, cats),
         "paragraphs": [p for p in draft.paragraphs if p],
         "strengths": draft.strengths[:5],
         "weaknesses": draft.weaknesses[:4],
         "advice": advice[:5],
-        "badges": [
-            # 顶部的准确率跟着当前判定口径走；旁边还挂着 ScoreV2 的独立评分，
-            # 不标口径的话两个数字很容易被当成同一个。
-            {"key": "acc", "label": "准确率 (%s)" % draft.judge_mode, "value": "%.2f%%" % acc},
-            {"key": "ur", "label": "UR", "value": "%.0f" % ur},
-            {"key": "bias", "label": "中位偏差", "value": "%+.1fms" % median_delta},
-            {"key": "combo", "label": "最大连击", "value": str(s.get("maxCombo", 0))},
-        ],
+        "badges": _badges(acc, ur, median_delta, s.get("maxCombo", 0), draft.judge_mode),
     }
