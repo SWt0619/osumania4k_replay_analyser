@@ -20,7 +20,6 @@ from datetime import datetime
 
 from .. import paths
 
-DB_VERSION = 1
 DB_NAME = "history.db"
 
 SCHEMA = """
