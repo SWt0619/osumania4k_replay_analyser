@@ -849,6 +849,26 @@ def _map_class(pattern_detail: list[dict], holds: int = 0, notes: int = 0) -> di
             "lnShare": round(share.get("ln", 0.0) * 100, 1)}
 
 
+def _ln_release_stats(match: MatchResult) -> dict:
+    """hybrid / LN 图的松手偏差：四个轨道各自的平均 + 总平均。
+
+    正值表示松手晚于长条尾部，负值表示提前；单位毫秒。按住到结束的 0.0 也计入，
+    因为它代表尾判没有偏差，不该被悄悄排除。
+    """
+    holds = [n for n in match.notes if n.is_hold and n.release_delta is not None]
+
+    def mean(values: list[float]) -> float | None:
+        return round(sum(values) / len(values), 2) if values else None
+
+    columns = []
+    all_values: list[float] = []
+    for col in range(4):
+        values = [n.release_delta for n in holds if n.column == col]
+        all_values.extend(values)
+        columns.append({"column": col, "count": len(values), "mean": mean(values)})
+    return {"total": len(all_values), "mean": mean(all_values), "columns": columns}
+
+
 def _pattern_stats(match: MatchResult, ctx_by_index: dict[int, patterns.NoteContext],
                    mode: str = "v1") -> list[dict]:
     """每种键型：有多少物件、失误率多少、相对全谱平均"吃亏几倍"。
@@ -1237,6 +1257,12 @@ def analyze(
         "timings": watch.timings,
     }
     # 回放文件没写完（压缩块被截断）时，前端要明确告诉用户"这是残卷"，别让人以为数据就是这么多
+    map_class = common.get("mapClass") or {}
+    payload["lnStats"] = (
+        _ln_release_stats(match)
+        if str(map_class.get("key") or "").lower() in ("hybrid", "ln")
+        else None
+    )
     if getattr(replay, "truncated", False):
         payload["warning"] = (
             "这个回放文件不完整（多半是在游戏保存的那一刻被读取的），只分析了能解出的 %d 个事件。"
