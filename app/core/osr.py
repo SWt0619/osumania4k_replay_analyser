@@ -134,6 +134,8 @@ MOD_RANDOM = 1 << 21
 # Mirror：mania 下会把整个键位镜像（第 0 列和第 keys-1 列互换）。
 # 回放里记的按键是镜像后的坐标系，谱面文件本身没变，配对前必须翻回来。
 MOD_MR = 1 << 30
+# ScoreV2：stable 端开这个 mod 才是 V2 计分；lazer 默认就是 V2，不会带这个位。
+MOD_SCORE_V2 = 1 << 29
 
 MOD_KEY_BITS = {
     1 << 15: "1K",
@@ -164,7 +166,45 @@ MOD_NAMES = {
     MOD_PF: "PF",
     MOD_RANDOM: "RD",
     MOD_MR: "MR",
+    MOD_SCORE_V2: "ScoreV2",
 }
+
+# lazer 导出的 .osr 用 30000000 起步的数据库版本号；stable 的版本号是 YYYYMMDD。
+LAZER_VERSION = 30000000
+
+
+def mod_acronyms(score_info: dict | None) -> set[str]:
+    """lazer 回放扩展信息里的模组缩写。Classic 是 CL。"""
+    if not score_info:
+        return set()
+    out: set[str] = set()
+    for item in score_info.get("mods") or []:
+        name = item.get("acronym") if isinstance(item, dict) else item
+        if name:
+            out.add(str(name).upper())
+    return out
+
+
+def detect_judge_mode(version: int, mods: int, score_info: dict | None = None) -> str:
+    """按回放来源判断默认使用哪套判定。
+
+    lazer 默认就是 ScoreV2；带 Classic 时判定窗口切回 stable，按 V1 处理。
+    stable 只有开了 ScoreV2 mod 才是 V2。
+    """
+    if int(version or 0) >= LAZER_VERSION:
+        return "classic" if "CL" in mod_acronyms(score_info) else "v2"
+    if int(mods or 0) & MOD_SCORE_V2:
+        return "v2"
+    return "v1"
+
+
+def judge_source(version: int, mods: int, score_info: dict | None = None) -> str:
+    """给页面显示的来源标签：lazer / lazer-classic / stable-v2 / stable-v1。"""
+    if int(version or 0) >= LAZER_VERSION:
+        return "lazer-classic" if "CL" in mod_acronyms(score_info) else "lazer"
+    if int(mods or 0) & MOD_SCORE_V2:
+        return "stable-v2"
+    return "stable-v1"
 
 MOD_DESC = {
     "NF": "不失败",
