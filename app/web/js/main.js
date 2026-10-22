@@ -51,7 +51,8 @@
     // 切换只是换一份视图，不重新请求分析。
     judgeMode: "v1",
     baseData: null,
-    // 判定算法（仅调试用）：A 当前算法、B 仅尾判状态机、C 头尾都走事件流。
+    // 判定算法（仅调试用）：C 头尾都走事件流（默认）、D 在 A 口径下放宽晚松。
+    // 页面上只有这两个选项，服务端也只认这两个值。
     judgeAlgo: "C",
     lastReplay: null,   // 最后一次回放来源：{kind:"local", name} 或 {kind:"file", file}
     // 失误清单过滤：只影响显示，不参与判定
@@ -146,7 +147,10 @@
     // 「关于」「设置」不依赖分析结果：没导入回放时也要能看；「只看谱面」同理
     $("emptyState").hidden = !!state.data || name === "about" || name === "chartonly" || name === "settings";
     if (name === "about") checkUpdate(false);
-    if (name === "settings") loadPathSettings();
+    if (name === "settings") {
+      loadPathSettings();
+      loadHotkeySettings();
+    }
     // 切到某页时补一次重绘（隐藏时 canvas 尺寸是 0）
     if (state.data || state.chartOnly) {
       // 播放器等到真的要看回放页再建：几万物件时 load() 要复制一份 notes，
@@ -1220,7 +1224,6 @@
     }
   }
 
-  // ---------------------------------------------------------------- 主渲染
   // ---------------------------------------------------------------- 检查更新
   // 打开「关于」页时静默查一次；手动点按钮时失败会 toast。
   // 只请求 GitHub 的 latest release，不上传任何本地数据。
@@ -1317,6 +1320,12 @@
     } else if (last.kind === "file") {
       handleReplayFile(last.file);
       window.UI.toast("已生效");
+    } else if (last.kind === "quick") {
+      // 快捷导入没有本地文件句柄，只能让服务端按新算法把最近一份重算一遍；
+      // 结果还是走轮询那条路回来。
+      window.API.quickImport(algo, true)
+        .then(() => window.UI.toast("已按新算法重新分析"))
+        .catch((e) => window.UI.toast((e && e.message) || "重新分析失败", true));
     }
   }
 
@@ -1380,14 +1389,15 @@
     }
   }
 
-  async function renderAnalysis(data, meta) {
+  // 4K 检查 + 20 星上限。返回 true 表示这一份不该显示（已经给过提示）。
+  async function rejectUnusableReplay(data) {
     // 最后一道闸：后端已经拒过 4K 以外的谱面，这里再挡一次是为了"页面连着旧版服务"的情况
     // （改完代码但服务没重启）。宁可什么都不显示，也不要让人看到一份没有依据的报告。
     const keys = data && data.beatmap ? Number(data.beatmap.keys) : 0;
     if (keys && keys !== 4) {
       window.UI.loading(false);
       window.UI.toast("本工具只支持 4K（4 键）谱面，这份是 " + keys + "K，已停止显示", true);
-      return;
+      return true;
     }
     // 20 星上限：观赏图/特殊图不进分析流程，先用 Sunny 星数快速判一下。
     // 只算 Sunny（几十毫秒），不跑 Roxy/Azusa；失败时放行，避免误杀。
@@ -1405,12 +1415,15 @@
           "这张图 " + stars.star.toFixed(1) + " 星，超过 20 星上限，已按兜底策略跳过分析",
           true
         );
-        return;
+        return true;
       }
     }
-    closeCompare();     // 换了主回放，对比自然失效
-    // 按回放来源自动选口径：lazer 默认 V2；stable 只有开了 ScoreV2 才是 V2。
-    // 旧版服务没有 judge 字段时保持上次选择，不强行改。
+    return false;
+  }
+
+  // 按回放来源自动选口径，并更新顶部按钮与提示。
+  // lazer 默认 V2；stable 只有开了 ScoreV2 才是 V2；旧版服务没有 judge 字段时保持上次选择。
+  function applyJudgeModeFromReplay(data) {
     const autoJudge = data.judge && data.judge.default;
     if (autoJudge === "v1" || autoJudge === "v2" || autoJudge === "classic") {
       state.judgeMode = autoJudge;
@@ -1421,61 +1434,82 @@
     if (classicBtn) {
       classicBtn.hidden = !(data.judge && (data.judge.modes || []).includes("classic"));
     }
-    // 原始结果留着（含两套判定），当前视图按首选项挑一套；切换时只换视图
-    state.baseData = data;
-    state.data = viewOf(data, state.judgeMode);
-    updateJudgeToggle();
     const judgeBox = $("judgeToggle");
-    if (judgeBox && data.judge) {
-      const srcLabel = data.judge.source === "lazer"
-        ? "lazer 回放"
-        : data.judge.source === "lazer-classic"
-          ? "lazer + Classic"
-          : (data.judge.source === "stable-v2" ? "stable + ScoreV2" : "stable 回放");
-      judgeBox.title = "长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）。"
-        + "已识别为 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase() + "，可随时手动切换。";
-      if (state._autoJudge !== autoJudge) {
-        state._autoJudge = autoJudge;
-        window.UI.toast("已识别 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase());
-      }
+    if (!judgeBox || !data.judge) return;
+    const srcLabel = data.judge.source === "lazer"
+      ? "lazer 回放"
+      : data.judge.source === "lazer-classic"
+        ? "lazer + Classic"
+        : (data.judge.source === "stable-v2" ? "stable + ScoreV2" : "stable 回放");
+    judgeBox.title = "长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）。"
+      + "已识别为 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase() + "，可随时手动切换。";
+    if (state._autoJudge !== autoJudge) {
+      state._autoJudge = autoJudge;
+      window.UI.toast("已识别 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase());
     }
-    state.selectedError = null;
-    const view = state.data;
-    // 残卷 / 可能配错谱面的提醒都走这里。
-    // warnings 以前没有任何前端消费者：MD5 对不上、键数不符这些话只写进了 JSON，
-    // 用户看不到，也就等于没提示。
-    const notices = [];
-    if (view && view.warning) notices.push(view.warning);
-    if (view && Array.isArray(view.warnings)) notices.push.apply(notices, view.warnings);
-    if (notices.length) window.UI.toast(notices.join(" "), true);
-    // 上一局的播放状态必须清干净，否则进度条和「此刻」面板还停在上个回放的位置
-    // （虚拟时钟不会被换谱自动归零，失误索引缓存按条数判断、条数一样时也会脏）。
+  }
+
+  // 换回放时把上一局的播放状态清干净。
+  // 不清的话进度条和「此刻」面板还停在上个回放的位置（虚拟时钟不会被换谱自动归零，
+  // 失误索引缓存按条数判断、条数一样时也会脏）。
+  function resetPlaybackState() {
     pause();
     state.virtualTime = 0;
     state.audioBroken = false;
     state._errTimes = null;
     state._tlFallbackAt = 0;
-    window.UI.loading(false);
-    $("emptyState").hidden = true;
+  }
 
+  // 残卷 / 可能配错谱面的提醒都走这里。
+  // warnings 以前没有任何前端消费者：MD5 对不上、键数不符这些话只写进了 JSON，
+  // 用户看不到，也就等于没提示。
+  function showReplayNotices(view) {
+    const notices = [];
+    if (view && view.warning) notices.push(view.warning);
+    if (view && Array.isArray(view.warnings)) notices.push.apply(notices, view.warnings);
+    if (notices.length) window.UI.toast(notices.join(" "), true);
+  }
+
+  // 把一份视图铺到页面上（首次分析后与切换判定口径时共用）
+  function renderView(view) {
     window.UI.renderTrack(view);
     window.UI.renderHero(view);
     window.UI.renderMsd(view);
     window.UI.renderAbout(view.version);
-    window.UI.renderSimilar(null);   // 段位还没算出来，这张卡片先不显示
-    scheduleSimilar(view);          // 首屏之后空闲时再算段位 → 推荐
     window.UI.renderCategories(view);
     window.UI.renderMeta(view);
     window.UI.renderSections(view);
     window.UI.renderPatternShare(view);
     window.UI.renderJudgeBars(view);
     window.UI.renderRawTable(view);
-    renderLnStats(data);
 
     // 误差直方图标题里的摘要
     const sm = view.summary;
     $("histMeta").textContent = "中位 " + fmtSigned(sm.medianDelta, 1) + "ms · UR " + Number(sm.ur).toFixed(0);
     $("timelineMeta").textContent = "共 " + view.beatmap.notes + " 个物件 · " + sm.flaws + " 次有瑕疵";
+  }
+
+  async function renderAnalysis(data) {
+    if (await rejectUnusableReplay(data)) return;
+    closeCompare();     // 换了主回放，对比自然失效
+    applyJudgeModeFromReplay(data);
+    // 原始结果留着（含两套判定），当前视图按首选项挑一套；切换时只换视图
+    state.baseData = data;
+    // 快捷导入没有本地文件句柄，记一下来源，切换判定算法时走另一条重算路径
+    if (data.quick) state.lastReplay = { kind: "quick" };
+    state.data = viewOf(data, state.judgeMode);
+    updateJudgeToggle();
+    state.selectedError = null;
+    const view = state.data;
+    showReplayNotices(view);
+    resetPlaybackState();
+    window.UI.loading(false);
+    $("emptyState").hidden = true;
+
+    renderView(view);
+    window.UI.renderSimilar(null);   // 段位还没算出来，这张卡片先不显示
+    scheduleSimilar(view);          // 首屏之后空闲时再算段位 → 推荐
+    renderLnStats(data);
 
     state.errorShown = ERROR_PAGE;
     renderErrorList();
@@ -1513,7 +1547,8 @@
     }
   }
 
-  function setupAudio(data) {    const note = $("audioNote");
+  function setupAudio(data) {
+    const note = $("audioNote");
     if (state.audio) {
       state.audio.pause();
       state.audio = null;
@@ -1668,24 +1703,62 @@
     waitTimer = null;
   }
 
-  async function handleReplayFile(file) {
-    if (!file) return;
-    if (state.busy) {
-      window.UI.toast("上一次分析还没结束，稍等一下");
-      return;
-    }
-    // 先把明显的错误挡掉，别让它卡在"正在解析"
-    if (!/\.osr$/i.test(file.name)) {
-      window.UI.toast("这是 " + file.name + "，不是回放文件（需要 .osr）", true);
-      return;
-    }
+  // 明显的错误先挡掉，别让它卡在"正在解析"。返回错误文案，空串表示可以继续。
+  function replayFileProblem(file) {
+    if (state.busy) return "上一次分析还没结束，稍等一下";
+    if (!/\.osr$/i.test(file.name)) return "这是 " + file.name + "，不是回放文件（需要 .osr）";
     if (file.size === 0) {
       // 空文件在后端只会得到一句「没有收到回放文件」，用户容易以为是自己没拖好
-      window.UI.toast("这个文件是空的（0 字节）：" + file.name + "。可能是导出时没写成功，重新导出一份再试", true);
-      return;
+      return "这个文件是空的（0 字节）：" + file.name + "。可能是导出时没写成功，重新导出一份再试";
     }
     if (file.size > 8 * 1024 * 1024) {
-      window.UI.toast("这个文件 " + (file.size / 1048576).toFixed(1) + "MB，回放一般只有几百 KB，确认一下选对了没", true);
+      return "这个文件 " + (file.size / 1048576).toFixed(1) + "MB，回放一般只有几百 KB，确认一下选对了没";
+    }
+    return "";
+  }
+
+  // 上传并分析。整包 POST 失败且不是"后端已答复"时，自动改走分片通道。
+  async function uploadReplay(base64) {
+    // 上传走 XHR：能显示"已经发出去多少字节"。卡在 0% 就是内容没离开浏览器，
+    // 卡在 100% 就是后端在处理——这两种情况的处理方式完全不同，所以必须能区分。
+    setStage("正在上传回放");
+    beacon("upload-start", { bytes: base64.length });
+    try {
+      return await window.API.analyzeUpload(
+        { replay: base64, beatmap: null, beatmapPath: null, songsRoot: null, algo: state.judgeAlgo },
+        (loaded, total) => {
+          const pct = total ? Math.round((loaded / total) * 100) : 0;
+          if (pct >= 100) setStage("上传完成，正在分析");
+          else setStage("正在上传 " + pct + "%（" + Math.round(loaded / 1024) + " / " + Math.round(total / 1024) + " KB）");
+        },
+        (xhr) => { state.activeXhr = xhr; }
+      );
+    } catch (uploadErr) {
+      // 只有"传输层"失败才该改走分片通道：连不上、超时、被中途掐断
+      // （本机安全软件或代理把大 POST 体整包吞掉的典型表现）。
+      // 后端已经答复过（空文件、坏回放、4K 以外、内部错误）时重发没有意义，
+      // 只会把「没有收到回放文件」盖成「分片 1 被拒绝（HTTP 400）」，把真正的原因弄丢。
+      const answered = !!(uploadErr && (uploadErr.payload || uploadErr.answered));
+      if (!state.cancelLoading || answered) throw uploadErr; // 取消过 / 后端已答复 → 不兜底
+      beacon("fallback-chunked", { reason: (uploadErr && uploadErr.message) || "?" });
+      state.activeXhr = null;
+      return await window.API.analyzeUploadChunked(
+        base64,
+        (loaded, total) => {
+          const pct = total ? Math.round((loaded / total) * 100) : 0;
+          setStage("分片上传 " + pct + "%（" + Math.round(loaded / 1024) + " / " + Math.round(total / 1024) + " KB）");
+        },
+        (text) => setStage(text),
+        state.judgeAlgo
+      );
+    }
+  }
+
+  async function handleReplayFile(file) {
+    if (!file) return;
+    const problem = replayFileProblem(file);
+    if (problem) {
+      window.UI.toast(problem, true);
       return;
     }
 
@@ -1712,42 +1785,7 @@
       setStage("正在读取文件");
       const b64 = await window.API.fileToBase64(file);
       state.replayBase64 = b64;
-
-      // 上传走 XHR：能显示"已经发出去多少字节"。卡在 0% 就是内容没离开浏览器，
-      // 卡在 100% 就是后端在处理——这两种情况的处理方式完全不同，所以必须能区分。
-      setStage("正在上传回放");
-      beacon("upload-start", { bytes: b64.length });
-      let data;
-      try {
-        data = await window.API.analyzeUpload(
-          { replay: b64, beatmap: null, beatmapPath: null, songsRoot: null, algo: state.judgeAlgo },
-          (loaded, total) => {
-            const pct = total ? Math.round((loaded / total) * 100) : 0;
-            if (pct >= 100) setStage("上传完成，正在分析");
-            else setStage("正在上传 " + pct + "%（" + Math.round(loaded / 1024) + " / " + Math.round(total / 1024) + " KB）");
-          },
-          (xhr) => { state.activeXhr = xhr; }
-        );
-      } catch (uploadErr) {
-        // 只有"传输层"失败才该改走分片通道：连不上、超时、被中途掐断
-        // （本机安全软件或代理把大 POST 体整包吞掉的典型表现）。
-        // 后端已经答复过（空文件、坏回放、4K 以外、内部错误）时重发没有意义，
-        // 只会把「没有收到回放文件」盖成「分片 1 被拒绝（HTTP 400）」，把真正的原因弄丢。
-        const answered = !!(uploadErr && (uploadErr.payload || uploadErr.answered));
-        if (!state.cancelLoading || answered) throw uploadErr; // 取消过 / 后端已答复 → 不兜底
-        beacon("fallback-chunked", { reason: (uploadErr && uploadErr.message) || "?" });
-        state.activeXhr = null;
-        data = await window.API.analyzeUploadChunked(
-          b64,
-          (loaded, total) => {
-            const pct = total ? Math.round((loaded / total) * 100) : 0;
-            setStage("分片上传 " + pct + "%（" + Math.round(loaded / 1024) + " / " + Math.round(total / 1024) + " KB）");
-          },
-          (text) => setStage(text),
-          state.judgeAlgo
-        );
-      }
-      renderAnalysis(data);
+      renderAnalysis(await uploadReplay(b64));
     } catch (e) {
       window.UI.loading(false);
       if (e && e.name === "AbortError") {
@@ -1767,14 +1805,18 @@
     }
   }
 
+  // 两个"选 .osu"的入口共用的前置检查。返回错误文案，空串表示可以继续。
+  function osuFileProblem(file) {
+    if (!/\.osu$/i.test(file.name)) return "谱面文件需要是 .osu（你选的是 " + file.name + "）";
+    if (state.busy) return "上一次分析还没结束，稍等一下";
+    return "";
+  }
+
   async function handleBeatmapFile(file) {
     if (!file) return;
-    if (!/\.osu$/i.test(file.name)) {
-      window.UI.toast("谱面文件需要是 .osu（你选的是 " + file.name + "）", true);
-      return;
-    }
-    if (state.busy) {
-      window.UI.toast("上一次分析还没结束，稍等一下");
+    const problem = osuFileProblem(file);
+    if (problem) {
+      window.UI.toast(problem, true);
       return;
     }
     state.busy = true;
@@ -1807,12 +1849,9 @@
   // 只解析 .osu：不算成绩、不建会话、不需要音频。
   async function handleChartFile(file) {
     if (!file) return;
-    if (!/\.osu$/i.test(file.name)) {
-      window.UI.toast("谱面文件需要是 .osu（你选的是 " + file.name + "）", true);
-      return;
-    }
-    if (state.busy) {
-      window.UI.toast("上一次分析还没结束，稍等一下");
+    const problem = osuFileProblem(file);
+    if (problem) {
+      window.UI.toast(problem, true);
       return;
     }
     state.busy = true;
@@ -1833,6 +1872,33 @@
     stack: "#f472b6", cut: "#7c5cff", spam: "#22d3ee",
     tech: "#fbbf24", ln: "#34d399", calm: "#94a3b8",
   };
+
+  // 仅看谱面页的段位：用和回放页同一套估算链（Sunny → Azusa → Roxy）。
+  // 左边 MSD 是 MinaCalc 口径，两者量纲不同，所以这里算出来直接覆盖那两行文字；
+  // 算不出来就保留 MinaCalc 的兜底，不影响页面其他部分。
+  async function applyChartDan(data) {
+    const cell = $("coDan");
+    const note = $("coDanNote");
+    if (!cell || !note || !window.Estimator || !window.Estimator.estimateFromText) return;
+    if (!data || !data.osuText) return;
+    let res;
+    try {
+      res = await window.Estimator.estimateFromText(data.osuText, 1);
+    } catch (e) {
+      return;
+    }
+    if (!res || !res.ok) return;
+    cell.textContent = res.label;
+    const parts = [];
+    if (res.method === "roxy") parts.push("Roxy " + Number(res.numeric).toFixed(2));
+    else if (res.method === "azusa") parts.push("Azusa " + Number(res.numeric).toFixed(2));
+    else parts.push("Sunny " + Number(res.rcStar).toFixed(2) + " 星");
+    if (res.lnStar > 0) parts.push("LN " + Number(res.lnStar).toFixed(2));
+    note.textContent = parts.join(" · ") + " · 原速";
+    note.title = "段位来源："
+      + (res.method === "roxy" ? "Roxy" : (res.method === "azusa" ? "Azusa" : "Sunny"))
+      + "。左边的 MSD 来自 MinaCalc，只看谱面本身。";
+  }
 
   function renderChartOnly(data) {
     // 谱面模式与回放模式互斥：清掉回放状态，避免播放器/失误面板还挂着上一局
@@ -1856,6 +1922,7 @@
     $("coMsd").textContent = msd.available ? Number(msd.overall).toFixed(2) : "—";
     $("coDan").textContent = (msd.dan && msd.dan.label) || "—";
     $("coDanNote").textContent = msd.available ? "段位估计（MinaCalc 口径）" : "难度数据不可用";
+    void applyChartDan(data);
     $("coInfo").textContent =
       bm.keys + "K · " + bm.notes + " 物件 · " + bm.holds + " 长条 · BPM " +
       bm.bpm + " · " + fmtTime(bm.duration);
@@ -2100,6 +2167,7 @@
     $("btnPickOsu").addEventListener("click", () => $("fileOsu").click());
     // 曲库标签点一下就能手动指定游戏目录（自动找不到时的兜底）
     $("btnSavePaths").addEventListener("click", savePaths);
+    on("btnSaveHotkey", "click", saveHotkeySettings);
     $("btnAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = false; });
     $("btnCloseAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = true; });
     document.querySelectorAll(".modal").forEach((m) => {
@@ -2138,8 +2206,8 @@
     });
   }
 
-  // 播放器控件：播放/进度/速度/静音/音量/下落速度/音画偏移/只看失误
-  function bindPlaybackControls() {
+  // 播放器控件：播放/进度/速度/静音/音量/下落速度/音画偏移
+  function bindTransportControls() {
     $("btnPlay").addEventListener("click", togglePlay);
     // 时间轴页也要能暂停：那条竖线就是播放位置，只能看不能停最难受
     $("btnPlayTl").addEventListener("click", togglePlay);
@@ -2191,6 +2259,10 @@
       updateTransport();
       savePrefs();
     });
+  }
+
+  // 判定口径、长条算法（调试）、低可信度过滤
+  function bindJudgeControls() {
     // 判定口径：点一下就换视图，不重新分析
     const judgeBox = $("judgeToggle");
     if (judgeBox) {
@@ -2201,7 +2273,7 @@
       });
     }
 
-    // 判定算法（调试）：A/B/C 切换后按最后一次回放来源重新分析
+    // 判定算法（调试）：C/D 切换后按最后一次回放来源重新分析
     const algoBox = $("judgeAlgoToggle");
     if (algoBox) {
       algoBox.addEventListener("click", (ev) => {
@@ -2222,7 +2294,10 @@
     });
     $("confThreshold").addEventListener("change", updateConfThreshold);
     syncLowConfidenceUI();
+  }
 
+  // 回放页的显示开关：主题、只看失误
+  function bindViewToggles() {
     document.querySelectorAll("#themeToggle [data-theme]").forEach((btn) => {
       btn.addEventListener("click", () => applyTheme(btn.dataset.theme));
     });
@@ -2237,8 +2312,10 @@
       });
       window.UI.toast(state.errorsOnly ? "只显示有瑕疵的音符" : "显示全部音符");
     });
+  }
 
-    // 对比：选文件 → 分析 → 校验 → 并排
+  // 对比：选文件 → 分析 → 校验 → 并排
+  function bindCompareControls() {
     $("btnCompare").addEventListener("click", () => {
       if (!state.data) {
         window.UI.toast("先导入一份回放", true);
@@ -2252,6 +2329,13 @@
       if (f) startCompare(f);
     });
     $("btnCloseCompare").addEventListener("click", () => closeCompare());
+  }
+
+  function bindPlaybackControls() {
+    bindTransportControls();
+    bindJudgeControls();
+    bindViewToggles();
+    bindCompareControls();
   }
 
   // 失误清单的筛选（类别单选 + 只看严重）与"再看 50 条"
@@ -2385,6 +2469,110 @@
     }
   }
 
+  // ---------------------------------------------------------------- 快捷导入
+  // 交互约定：先在结算屏按 F2 导出，再按组合键（默认 Shift+F2）。
+  // 服务端用长轮询：热键一按下就把它叫醒，所以"正在分析"的提示几乎立刻出现，
+  // 不用等几秒后的下一次轮询——否则用户会以为没触发，再按一次。
+  let quickToken = 0;
+  let quickLoading = false;
+
+  function quickLoadingOn() {
+    if (quickLoading) return;
+    quickLoading = true;
+    window.UI.loading(true, "已接到回放，正在分析…");
+  }
+
+  function quickLoadingOff() {
+    if (!quickLoading) return;
+    quickLoading = false;
+    window.UI.loading(false);
+  }
+
+  async function pollQuickImport() {
+    const startedAt = Date.now();
+    try {
+      const res = await window.API.quickPending(quickToken, 25);
+      if (!res || !res.ok) return;
+      // 服务端说"开始分析了"：立刻给反馈，哪怕结果还没出来
+      if (res.busy) quickLoadingOn();
+      if (typeof res.token === "number" && res.token > quickToken) {
+        quickToken = res.token;
+        if (res.data) {
+          await renderAnalysis(res.data);
+          window.UI.toast("已接入刚导出的回放");
+        } else if (res.error) {
+          window.UI.toast(res.error, true);
+        }
+        quickLoadingOff();
+      }
+    } catch (e) {
+      /* 服务没起或已经退出：歇一下再试，别把控制台刷满 */
+      await new Promise((r) => setTimeout(r, 1500));
+      return;
+    }
+    // 服务端没实现长轮询时请求会立刻返回，这里兜一下，避免空转打满 CPU
+    if (Date.now() - startedAt < 400) {
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+
+  async function quickLoop() {
+    for (;;) {
+      await pollQuickImport();
+    }
+  }
+
+  // 启动时先把当前 token 收下：页面刷新不该把上一次的快捷导入结果再放一遍
+  async function initQuickImport() {
+    try {
+      const res = await window.API.quickPending(0, 0);
+      if (res && typeof res.token === "number") quickToken = res.token;
+    } catch (e) {
+      /* 拿不到就保持 0，之后照常轮询 */
+    }
+    void quickLoop();
+  }
+
+  // ---------------------------------------------------------------- 快捷键设置
+  async function loadHotkeySettings() {
+    const input = $("hotkeyCombo");
+    const status = $("hotkeyStatus");
+    if (!input || !status) return;
+    status.className = "dir-status";
+    status.textContent = "读取中…";
+    try {
+      const info = await window.API.hotkey();
+      input.value = info.combo || "";
+      status.className = "dir-status " + (info.active ? "good" : "bad");
+      status.textContent = info.active
+        ? "已启用：" + info.combo
+        : (info.combo ? "已设置但没注册上：" + (info.error || "未知原因") : "当前未启用快捷导入");
+    } catch (e) {
+      status.textContent = "读取失败：" + (e.message || e);
+    }
+  }
+
+  async function saveHotkeySettings() {
+    const input = $("hotkeyCombo");
+    const status = $("hotkeyStatus");
+    if (!input || !status) return;
+    const combo = input.value.trim();
+    status.className = "dir-status";
+    status.textContent = "正在注册 " + (combo || "（关闭）") + "…";
+    try {
+      const info = await window.API.saveHotkey(combo);
+      status.className = "dir-status " + (info.active ? "good" : "bad");
+      status.textContent = info.active
+        ? "已启用：" + info.combo
+        : "当前未启用快捷导入";
+      input.value = info.combo || "";
+      window.UI.toast(info.active ? "快捷键已生效：" + info.combo : "快捷导入已关闭");
+    } catch (e) {
+      status.className = "dir-status bad";
+      status.textContent = e.message || "保存失败";
+    }
+  }
+
   // ---------------------------------------------------------------- 启动
   async function init() {
     const ver = assetVersion() || "无版本参数";
@@ -2421,9 +2609,15 @@
       await checkFrontendVersion(health);
       warnIfStaleCode(health);
       window.UI.renderAbout(health && health.version);
+      // 快捷导入的热键没注册上时把原因说出来，否则用户按了没反应会以为程序坏了
+      const hk = health && health.hotkey;
+      if (hk && hk.ok === false && hk.error) {
+        window.UI.toast("快捷导入的热键没注册上：" + hk.error, true);
+      }
     } catch (e) { /* 后端没起就不折腾 */ }
 
     refreshLocalReplays();
+    initQuickImport();
 
     if (!window.Charts || !window.ManiaPlayer) {
       console.warn("图表/播放器模块未加载：", { charts: !!window.Charts, player: !!window.ManiaPlayer });
