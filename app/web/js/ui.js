@@ -141,17 +141,11 @@
       chip.classList.add("off");
       chip.classList.remove("ok");
       t.textContent = "未找到曲库";
-      // 自动探测不到时给出可操作的下一步，而不是只说"找不到"
-      chip.title =
-        "没找到 osu! 的曲库目录。\n" +
-        "点一下这里，可以手动指定游戏目录。\n" +
-        "也可以直接拖 .osu 进来，或分析后手动选择对应的谱面。";
       return;
     }
     chip.classList.add("ok");
     chip.classList.remove("off");
     t.textContent = info.count + " 张谱面";
-    chip.title = "osu! 曲库：" + info.root + "\n（点一下可以手动指定游戏目录）";
   }
 
   // ---------------------------------------------------------------- 总评
@@ -194,9 +188,10 @@
     const note = $("msdDanNote");
     if (!cell || !note || !window.Estimator || !data || !data.session) return null;
     const rate = Number((data.replay && data.replay.rate) || 1) || 1;
+    const notes = Number(data.beatmap && data.beatmap.notes) || 0;
     let res;
     try {
-      res = await window.Estimator.estimate(data.session, rate);
+      res = await window.Estimator.estimate(data.session, rate, { fast: notes > 30000 });
     } catch (e) {
       return null;
     }
@@ -210,7 +205,7 @@
     } else if (res.method === "azusa") {
       parts.push("Azusa " + Number(res.numeric).toFixed(2));
     } else {
-      parts.push("Sunny " + Number(res.rcStar).toFixed(2) + " 星");
+      parts.push("Sunny " + Number(res.rcStar).toFixed(2) + " 星" + (res.fast ? "（大图快速估算）" : ""));
     }
     if (res.lnStar > 0) parts.push("LN " + Number(res.lnStar).toFixed(2));
     note.textContent = parts.join(" · ") + " · " + speed;
@@ -359,7 +354,7 @@
     $("gradeLetter").textContent = ev.grade || "–";
     $("heroHeadline").textContent = ev.headline || "";
     $("heroDesc").textContent = ev.gradeDesc
-      ? ev.gradeDesc + " · 准确率(" + (data.judgeMode === "v2" ? "v2" : "v1") + ") "
+      ? ev.gradeDesc + " · 准确率(" + (data.judgeMode === "classic" ? "classic" : data.judgeMode === "v2" ? "v2" : "v1") + ") "
         + fmtPct(sm.accuracy) + " · UR " + Number(sm.ur || 0).toFixed(0)
       : "";
 
@@ -385,9 +380,9 @@
     // V1 挂 ScoreV1，V2 挂 ScoreV2；两者只出现一个。
     // 同一个准确率被标成两种口径，正是之前 V1/V2 被混用的原因。
     const v2 = sm.scoreV2;
-    if (data.judgeMode === "v2" && v2 !== undefined && v2 !== null) {
+    if ((data.judgeMode === "v2" || data.judgeMode === "classic") && v2 !== undefined && v2 !== null) {
       const wrap = el("div", "badge badge-v2");
-      wrap.appendChild(el("span", null, "Score V2"));
+      wrap.appendChild(el("span", null, data.judgeMode === "classic" ? "Score V2 · Classic" : "Score V2"));
       wrap.appendChild(el("strong", null, fmtInt(v2)));
       const g2 = el("em", "badge-grade", String(sm.gradeV2 || ""));
       wrap.appendChild(g2);
@@ -544,9 +539,9 @@
     ];
     // 只展示当前口径的统计：V1 不出现任何 V2 字段，V2 也不再并排显示 V1，
     // 避免同一个准确率被标成两种口径。
-    if (data.judgeMode === "v2") {
+    if (data.judgeMode === "v2" || data.judgeMode === "classic") {
       rows.push(
-        ["准确率（ScoreV2 口径）", fmtPct(sm.accuracy)],
+        ["准确率（" + (data.judgeMode === "classic" ? "Classic" : "ScoreV2") + " 口径）", fmtPct(sm.accuracy)],
         ["Score V2（stable）", fmtInt(sm.scoreV2) + (sm.gradeV2 ? "　评级 " + sm.gradeV2 : "")],
         ["Score V2（lazer 配比）", fmtInt(sm.scoreV2Lazer)]
       );
