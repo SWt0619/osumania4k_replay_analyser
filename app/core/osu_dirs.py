@@ -254,18 +254,31 @@ def config_lazer_dir() -> str:
     return val if isinstance(val, str) and val.strip() else ""
 
 
+def _lazer_marks(root: str) -> bool:
+    """这个目录有没有 lazer 的标记（client.realm / files）。
+
+    两个版本都会放一个 `Songs` 文件夹，所以**不能用 Songs 判断版本**——
+    这正是以前把 lazer 目录认成稳定版（反过来也一样）的原因。
+    """
+    return (os.path.isfile(os.path.join(root, "client.realm"))
+            or os.path.isdir(os.path.join(root, "files")))
+
+
 def inspect_stable_dir(d: str) -> tuple[bool, str]:
     """检查用户填的稳定版目录对不对。返回 (是否可用, 给用户看的话)。"""
     if not d:
         return False, "还没填路径"
-    if not os.path.isdir(long_path(d)):
+    root = long_path(d)
+    if not os.path.isdir(root):
         return False, "这个路径不存在（检查一下盘符和文件夹名）"
-    if os.path.isfile(os.path.join(long_path(d), "osu!.exe")):
+    if os.path.isfile(os.path.join(root, "osu!.exe")):
         return True, "看起来是 osu! 安装目录"
-    if glob.glob(os.path.join(long_path(d), "osu!*.cfg")):
+    if glob.glob(os.path.join(root, "osu!*.cfg")):
         return True, "没看到 osu!.exe，但有 osu! 的配置文件，按安装目录处理"
-    if os.path.isdir(os.path.join(long_path(d), "Songs")):
-        return True, "这个目录里有 Songs，按安装目录处理"
+    if os.path.isfile(os.path.join(root, "osu!.db")):
+        return True, "没看到 osu!.exe，但有 osu!.db，按安装目录处理"
+    if _lazer_marks(root):
+        return False, "这是 osu!lazer 的数据目录；稳定版要选到有 osu!.exe 的那一级"
     return False, "这个目录里没有 osu!.exe，请选到 osu! 的安装目录那一级"
 
 
@@ -273,16 +286,17 @@ def inspect_lazer_dir(d: str) -> tuple[bool, str]:
     """检查用户填的 lazer 数据目录对不对。"""
     if not d:
         return False, "还没填路径"
-    if not os.path.isdir(long_path(d)):
+    root = long_path(d)
+    if not os.path.isdir(root):
         return False, "这个路径不存在（检查一下盘符和文件夹名）"
-    has_songs = os.path.isdir(os.path.join(long_path(d), "Songs"))
-    has_files = os.path.isdir(os.path.join(long_path(d), "files"))
-    if has_songs or has_files:
-        return True, "看起来是 lazer 的数据目录"
-    # 允许直接填到 Songs 那一级
-    if os.path.basename(os.path.normpath(d)).lower() == "songs":
+    if os.path.basename(os.path.normpath(root)).lower() == "songs":
+        # 允许直接填到 Songs 那一级（老版本 lazer 的用法）
         return True, "按 Songs 目录处理"
-    return False, "这个目录里没有 Songs 或 files，请选到 osu!lazer 的数据目录（含 Songs、files 的那一级）"
+    if _lazer_marks(root):
+        return True, "看起来是 lazer 的数据目录"
+    if os.path.isdir(os.path.join(root, "Songs")):
+        return False, "这个目录只有 Songs，像是稳定版的安装目录；lazer 要选到含 client.realm、files 的那一级"
+    return False, "这个目录里没有 client.realm 或 files，请选到 osu!lazer 的数据目录"
 
 
 _ROOTS_CACHE: list[str] | None = None
