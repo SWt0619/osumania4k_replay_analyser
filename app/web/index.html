@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>osumania_replay_analyser · mania 回放分析</title>
+<script>
+  // 在 CSS 生效前恢复主题，否则浅色用户会先看到一帧暗色再被 JS 改回来。
+  try {
+    var saved = JSON.parse(localStorage.getItem("mania-replay-prefs") || "{}");
+    if (saved && saved.theme === "sakura") document.documentElement.setAttribute("data-theme", "sakura");
+  } catch (e) { /* 隐私模式读不到 localStorage 就保持默认暗色 */ }
+</script>
 <link rel="stylesheet" href="/static/css/app.css?v=__ASSET_V__">
 </head>
 <body>
@@ -18,17 +25,7 @@
 <!-- ============ 顶栏 ============ -->
 <header class="topbar glass">
   <div class="brand">
-    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
-      <defs>
-        <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#22d3ee"/>
-        </linearGradient>
-      </defs>
-      <rect x="2.5" y="2.5" width="19" height="19" rx="6" fill="none" stroke="url(#brandGrad)" stroke-width="1.6"/>
-      <rect x="6" y="9" width="2.6" height="7" rx="1.3" fill="url(#brandGrad)"/>
-      <rect x="10.7" y="5.5" width="2.6" height="7" rx="1.3" fill="url(#brandGrad)"/>
-      <rect x="15.4" y="11" width="2.6" height="7" rx="1.3" fill="url(#brandGrad)"/>
-    </svg>
+    <img class="brand-mark" src="/static/img/logo.svg" alt="">
     <div class="brand-text">
       <strong>osumania_replay_analyser</strong>
       <span class="brand-sub">mania 回放分析</span>
@@ -106,7 +103,7 @@
         <svg viewBox="0 0 120 90">
           <defs>
             <linearGradient id="emptyGrad" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#22d3ee"/>
+              <stop offset="0%" stop-color="var(--accent)"/><stop offset="100%" stop-color="var(--accent-2)"/>
             </linearGradient>
           </defs>
           <rect x="14" y="14" width="92" height="62" rx="10" fill="none" stroke="url(#emptyGrad)" stroke-width="1.5" stroke-dasharray="6 6"/>
@@ -300,6 +297,7 @@
             <button class="chip chip-btn" data-cat="distraction"><i class="sw" data-cor="distraction"></i>分神</button>
             <button class="chip chip-btn" data-cat="slip"><i class="sw" data-cor="slip"></i>失手</button>
             <button class="chip chip-btn" data-sev="severe">只看严重</button>
+            <button class="chip chip-btn" id="btnHideLowConf" title="隐藏判定可信度低于设置值的失误">隐藏低可信度</button>
           </div>
         </div>
         <div class="card-body">
@@ -465,6 +463,13 @@
           <div class="card-body"><div id="judgeBars" class="bars"></div></div>
         </article>
       </div>
+      <article class="card glass" id="lnCard" hidden>
+        <div class="card-head">
+          <h2>LN 松手偏差</h2>
+          <p class="muted">正值晚松，负值早松；单位毫秒</p>
+        </div>
+        <div class="card-body"><div class="ln-stats" id="lnStats"></div></div>
+      </article>
       <article class="card glass" id="rawCard">
         <div class="card-head"><h2>原始统计</h2></div>
         <div class="card-body"><table class="tbl" id="rawTable"></table></div>
@@ -479,6 +484,14 @@
           <p class="muted">osu! 目录与长条物件计算方式</p>
         </div>
         <div class="card-body">
+          <h3>主题</h3>
+          <div class="seg" id="themeToggle">
+            <button class="seg-btn is-active" data-theme="dark">暗色</button>
+            <button class="seg-btn" data-theme="sakura">白色毛玻璃 · 浅粉</button>
+          </div>
+
+          <hr class="settings-sep">
+
           <h3>osu! 目录</h3>
           <p class="muted">默认会自动找曲库；找不到时在这里手动指定，填完保存会重新扫一遍。</p>
 
@@ -508,6 +521,17 @@
             <button class="seg-btn is-active" data-algo="C">使用 Lazer 方式计算长条物件（默认）</button>
             <button class="seg-btn" data-algo="D">使用 Stable 方式计算长条物件</button>
           </div>
+
+          <hr class="settings-sep">
+
+          <h3>失误清单</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="hideLowConfidence">
+            <span>隐藏分析可信度小于</span>
+            <input type="number" id="confThreshold" class="text-input num-input" min="0" max="100" step="5" value="50">
+            <span>% 的失误</span>
+          </label>
+          <p class="muted">只影响失误清单显示，不改变判定和准确率。</p>
         </div>
       </article>
     </div>
