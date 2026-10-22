@@ -503,13 +503,30 @@
 
           <label class="dir-field">
             <span>lazer（osu!lazer）</span>
-            <input type="text" id="pathLazer" class="text-input" placeholder="例如 C:\Users\你\AppData\Roaming\osu" autocomplete="off">
+            <input type="text" id="pathLazer" class="text-input" placeholder="例如 C:\Users\你的用户名\AppData\Roaming\osu" autocomplete="off">
             <em>选到<b>同时有 Songs 和 files 的那一级</b>。没装 lazer 就留空。</em>
           </label>
 
           <p class="dir-status" id="pathStatus"></p>
           <div class="settings-actions">
             <button class="btn btn-primary" id="btnSavePaths">保存并重新扫描</button>
+          </div>
+
+          <hr class="settings-sep">
+
+          <h3>快捷导入</h3>
+          <p class="muted">打完一局后先在结算屏按 <code>F2</code> 导出，再按这里设置的组合键，页面会直接分析刚导出的那份回放。</p>
+
+          <label class="dir-field">
+            <span>快捷键</span>
+            <input type="text" id="hotkeyCombo" class="text-input" placeholder="Shift+F2" maxlength="24"
+                   autocomplete="off" spellcheck="false">
+            <em>写法：<code>Ctrl</code> / <code>Alt</code> / <code>Shift</code> 加一个主键，例如 <code>Shift+F2</code>、<code>Ctrl+Alt+F2</code>；留空表示关闭。</em>
+          </label>
+
+          <p class="dir-status" id="hotkeyStatus"></p>
+          <div class="settings-actions">
+            <button class="btn btn-primary" id="btnSaveHotkey">保存快捷键</button>
           </div>
 
           <hr class="settings-sep">
@@ -566,6 +583,13 @@
               <dd>
                 <a href="https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest" target="_blank" rel="noreferrer noopener">Releases · 最新版本</a>
                 <em>下载 <code>osumania_replay_analyser-x.y.z-win64.zip</code>，解压覆盖即可；<code>_cache</code>、<code>_replays</code>、<code>报告</code> 不受影响，可以留着</em>
+              </dd>
+            </div>
+            <div>
+              <dt>作者谱面</dt>
+              <dd>
+                <a href="https://pan.baidu.com/s/1_e-5UrzowYcdz-ulW8wQbQ?pwd=wrfj" target="_blank" rel="noreferrer noopener">来试试作者的谱子</a>
+                <em>百度网盘，提取码 <code>wrfj</code></em>
               </dd>
             </div>
             <div>
@@ -673,6 +697,7 @@
       <li>在 osu! 里打开成绩详情 → 导出回放，得到一个 <code>.osr</code>，拖到这里。</li>
       <li>谱面会按回放里的 MD5 自动从曲库匹配；匹配不到会让你手动选 <code>.osu</code>。</li>
       <li>「总览」看总体评价与失误成因；「时间轴」看波动；「失误清单」逐条看原因；「回放」边听边看。</li>
+      <li>打完一局想立刻分析：在结算屏按 <code>F2</code> 导出，再按 <code>Shift+F2</code>，页面会自动接住刚才那份回放。</li>
     </ol>
     <h4>失误是怎么分类的</h4>
     <ul class="help-list">
