@@ -55,6 +55,13 @@ V2_COMBO_VALUE = {"perfect": 300, "great": 300, "good": 200, "ok": 100, "meh": 5
 # 连击倍率的封顶：连击数超过 400 之后倍率不再增长（log4 400）
 COMBO_MULT_CAP = 400
 
+# 长条尾判的时序：
+#   "first" —— 官方 lazer DrawableHoldNote.OnReleased：第一次有效松手就结算尾判，
+#              之后按回来不会重判（ScoreV2 / lazer 默认行为）。
+#   "last"  —— 旧实现：取最后一次松手，体中松手后再按回可以拿到更好的尾判。
+# 出问题需要回退时，把这里改成 "last" 即可，两套代码都保留。
+HOLD_TAIL_POLICY = "first"
+
 
 def combo_multiplier(combo: int) -> float:
     """ScoreV2 的连击倍率。
@@ -115,6 +122,10 @@ class JudgedNote:
     head_judgement: str = ""             # V2 头判
     tail_judgement: str | None = None    # V2 尾判
     judgement_v2: str = ""               # V2 最终判定（头尾更差者）
+    # Classic（lazer + CL）：stable 的判定窗口 + V2 的头尾分判 / 305 计分
+    head_judgement_classic: str = ""
+    tail_judgement_classic: str | None = None
+    judgement_classic: str = ""
     body_break: bool = False             # 长条体中松过手（官方会封顶 MEH 并断连）
     dropped: bool = False                # V1 下整条掉判定（提前松到窗口外）
 
@@ -127,9 +138,15 @@ class JudgedNote:
             self.head_judgement = self.judgement
         if not self.judgement_v2:
             self.judgement_v2 = self.judgement
+        if not self.head_judgement_classic:
+            self.head_judgement_classic = self.judgement
+        if not self.judgement_classic:
+            self.judgement_classic = self.judgement
 
     def judged(self, mode: str = "v1") -> str:
-        """当前口径下的判定名。mode 只认 "v1" / "v2"，其余一律按 v1。"""
+        """当前口径下的判定名。mode 只认 "v1" / "v2" / "classic"。"""
+        if mode == "classic":
+            return self.judgement_classic or self.judgement
         if mode == "v2":
             return self.judgement_v2 or self.judgement
         return self.judgement
@@ -186,10 +203,10 @@ class MatchResult:
 
     # ---- 汇总 -----------------------------------------------------------
     def counts(self, mode: str = "v1") -> dict[str, int]:
-        """判定数量。V1 按物件数，V2 按判定单位数（长条算头尾两次）。"""
+        """判定数量。V1 按物件数，V2 / Classic 按判定单位数（长条算头尾两次）。"""
         out = {k: 0 for k in ("perfect", "great", "good", "ok", "meh", "miss")}
-        if mode == "v2":
-            for _t, j, _b in self.v2_units():
+        if mode in ("v2", "classic"):
+            for _t, j, _b in self.units(mode):
                 out[j] = out.get(j, 0) + 1
             return out
         for n in self.notes:
@@ -201,10 +218,10 @@ class MatchResult:
 
         V1 用官方 ScoreV1 公式：
             (300*(MAX+300) + 200*GOOD + 100*OK + 50*MEH) / (300 * 总物件数)
-        V2 用官方 ScoreV2 口径：MAX 比 300 多 5 分，长条算头尾两个判定。
+        V2 / Classic 用官方 ScoreV2 口径：MAX 比 300 多 5 分，长条算头尾两个判定。
         """
-        if mode == "v2":
-            units = self.v2_units()
+        if mode in ("v2", "classic"):
+            units = self.units(mode)
             if not units:
                 return 0.0
             total = sum(V2_ACC_VALUE.get(j, 0) for _t, j, _b in units)
@@ -227,28 +244,40 @@ class MatchResult:
     # 所以总判定数 = 普通音符数 + 2 × 长按数，而不是物件数。
     # ------------------------------------------------------------------
 
-    def v2_units(self) -> list[tuple[float, str, bool]]:
-        """ScoreV2 的判定单位序列，按时间升序。
+    def units(self, mode: str = "v2") -> list[tuple[float, str, bool]]:
+        """ScoreV2 / Classic 的判定单位序列，按时间升序。
 
         每个元素 = (判定时刻, 判定名, 是否断连)。长按展开成头 + 尾两个单位；
         体中层松过手会把尾判封顶在 MEH，并且断连，但**不算 MISS**（lazer 的 hold break 口径）。
-        头判与尾判是分开算的，这正是 V2 与 V1 的结构差异。
+        Classic 只是把窗口换成 stable 的，结构仍是头尾分判。
         """
         units: list[tuple[float, str, bool]] = []
+        classic = mode == "classic"
         for n in self.notes:
-            head = n.head_judgement or n.judgement
+            head = (
+                (n.head_judgement_classic or n.judgement)
+                if classic
+                else (n.head_judgement or n.judgement)
+            )
             units.append((n.note_time, head, head == "miss"))
             if not n.is_hold:
                 continue
-            tail = n.tail_judgement or head
+            tail = (
+                (n.tail_judgement_classic or head)
+                if classic
+                else (n.tail_judgement or head)
+            )
             t = n.end_time if n.end_time is not None else n.note_time
             units.append((t, tail, n.body_break or tail == "miss"))
         units.sort(key=lambda u: u[0])
         return units
 
-    def score_v2_parts(self) -> dict:
+    def v2_units(self) -> list[tuple[float, str, bool]]:
+        return self.units("v2")
+
+    def score_v2_parts(self, mode: str = "v2") -> dict:
         """ScoreV2 的两段（准度 / 连击比例），stable 与 lazer 两种配比共用。"""
-        units = self.v2_units()
+        units = self.units(mode)
         if not units:
             return {"accuracy": 0.0, "comboRatio": 0.0, "judgements": 0, "units": 0}
 
@@ -275,14 +304,14 @@ class MatchResult:
             "maxCombo": combo,
         }
 
-    def score_v2(self, lazer: bool = False) -> tuple[int, str]:
+    def score_v2(self, lazer: bool = False, mode: str = "v2") -> tuple[int, str]:
         """ScoreV2 总分与评级。
 
         lazer=False（默认）：osu!stable 的 ScoreV2 —— 20 万连击 + 80 万准度。
         lazer=True：osu!lazer 的标准分 —— 1 万连击 + 99 万准度。
         两者共用同一套准确率与连击比例，只是配比不同。
         """
-        p = self.score_v2_parts()
+        p = self.score_v2_parts(mode)
         if not p["judgements"]:
             return 0, "D"
         acc = p["accuracy"]
@@ -294,13 +323,13 @@ class MatchResult:
         return score, score_v2_grade(acc)
 
     def max_combo(self, mode: str = "v1") -> int:
-        """最长连击。V1 按物件、V2 按头尾两个单位。
+        """最长连击。V1 按物件、V2 / Classic 按头尾两个单位。
 
-        V2 下体中层松手会断连（即使尾判是 MEH），所以不能只看判定名。
+        V2 / Classic 下体中层松手会断连（即使尾判是 MEH），所以不能只看判定名。
         """
-        if mode == "v2":
+        if mode in ("v2", "classic"):
             best = cur = 0
-            for _t, judgement, brk in self.v2_units():
+            for _t, judgement, brk in self.units(mode):
                 if brk or judgement == "miss":
                     cur = 0
                     continue
@@ -310,12 +339,14 @@ class MatchResult:
         return max_combo_from([n.judgement for n in self.notes])
 
     def deltas(self, mode: str = "v1") -> list[float]:
-        """击打误差序列。V2 把长条尾判的误差也算进来（lazer 的 UR 口径）。"""
+        """击打误差序列。V2 / Classic 把长条尾判的误差也算进来（lazer 的 UR 口径）。"""
         out = [n.delta for n in self.notes if n.delta is not None]
-        if mode == "v2":
+        if mode in ("v2", "classic"):
+            classic = mode == "classic"
             out += [
                 n.release_delta for n in self.notes
-                if n.is_hold and n.release_delta is not None and n.tail_judgement != "miss"
+                if n.is_hold and n.release_delta is not None
+                and (n.tail_judgement_classic if classic else n.tail_judgement) != "miss"
             ]
         return out
 
@@ -400,6 +431,7 @@ def _pair_column(
     press_times: list[float],
     hit_window: float,
     od_value: float,
+    windows_v2: dict[str, float],
     out: list[JudgedNote],
     ghosts: list[GhostPress],
 ) -> None:
@@ -431,7 +463,14 @@ def _pair_column(
             # 命中窗口就是 meh，窗口内不可能判 miss。仍记下这一下按键。
             out.append(_make_miss(note, press_time=pt, delta=delta))
         else:
-            out.append(_make_hit(note, pt, delta, judgement))
+            item = _make_hit(note, pt, delta, judgement)
+            # 普通音符也要按 V2 自己的 PERFECT 窗口重判一次：OD 不等于 5 时，
+            # V2 的 MAX 窗口和 stable 并不一样，直接复用 V1 判定会少算/多算 MAX。
+            if not item.is_hold:
+                j2 = judge_with_windows(delta, windows_v2)
+                item.judgement_v2 = j2
+                item.head_judgement = j2
+            out.append(item)
     used = set(matched.values())
     for j, pt in enumerate(press_times):
         if j not in used:
@@ -493,7 +532,8 @@ def infer_random_order(beatmap: Beatmap, presses, releases,
 
 
 def _hold_judgement(head_delta: float | None, tail_delta: float | None,
-                    windows: dict[str, float], body_break: bool = False) -> str:
+                    windows: dict[str, float], body_break: bool = False,
+                    algo: str = "A") -> str:
     """长条的**一个**判定（ScoreV1 官方口径）。
 
     依据 osu! wiki「osu!mania judgement system」，核心是**合并误差**：
@@ -522,7 +562,11 @@ def _hold_judgement(head_delta: float | None, tail_delta: float | None,
 
     meh = windows["meh"]
     ok = windows["ok"]
-    if tail_delta < -meh or tail_delta > ok:
+    # A/B/C 保持旧口径：晚松超过 OK 窗口直接 MISS。
+    # D 是 V1 优化：晚松允许到 OK*2（只要整体误差还在 OK*2 内），
+    # 对应官方表格里 OK 的“整体误差 ≤ OK 最大值 × 2”；超过 OK 窗口的尾判最高只到 100。
+    late_limit = ok * 2 if algo == "D" else ok
+    if tail_delta < -meh or tail_delta > late_limit:
         return "miss"
 
     p = windows["perfect"]
@@ -536,6 +580,9 @@ def _hold_judgement(head_delta: float | None, tail_delta: float | None,
         result = "ok"
     else:
         result = "meh"
+    # D：晚松超过 OK 窗口，整体最高只到 100，避免 103~146ms 的尾误差被算成 200。
+    if algo == "D" and tail_delta > ok:
+        result = _worse(result, "ok")
     return "meh" if body_break and result != "miss" else result
 
 
@@ -553,6 +600,7 @@ def _apply_hold_tails(
     release_by_col: list[list[float]],
     windows: dict[str, float],
     windows_v2: dict[str, float],
+    algo: str = "A",
 ) -> None:
     """给长条补上两套判定。
 
@@ -593,29 +641,171 @@ def _apply_hold_tails(
             item.release_delta = 0.0
             item.tail_judgement = item.head_judgement
             item.judgement_v2 = item.head_judgement
-            item.judgement = _hold_judgement(item.delta, 0.0, windows)
+            item.head_judgement_classic = (
+                "miss" if item.delta is None else judge_with_windows(item.delta, windows)
+            )
+            item.tail_judgement_classic = item.head_judgement_classic
+            item.judgement_classic = item.head_judgement_classic
+            item.judgement = _hold_judgement(item.delta, 0.0, windows, algo=algo)
             item.dropped = item.judgement == "miss"
             continue
 
-        tail_rel = after[-1]
-        # 体中松手：在尾部 MEH 早窗口之前松过（最后一次仍在窗口内才算"按回来了"）
+        tail_rel = after[0] if HOLD_TAIL_POLICY == "first" else after[-1]
+        # 体中松手：在尾部 MEH 早窗口之前松过。这个字段仍用于归因与连击
         body_break = any(r < item.end_time - windows["meh"] for r in after[:-1])
         if tail_rel < item.end_time - windows["meh"]:
             body_break = True
-
-        item.release_delta = tail_rel - item.end_time
+        # V1 合并判定用最后一次松手，release_delta 也留给页面显示
+        item.release_delta = after[-1] - item.end_time
         item.body_break = body_break
 
         # V1：合并口径；体中松手封顶 MEH
-        item.judgement = _hold_judgement(item.delta, item.release_delta, windows, body_break)
+        item.judgement = _hold_judgement(item.delta, item.release_delta, windows, body_break, algo=algo)
         item.dropped = item.judgement == "miss"
 
-        # V2：尾判窗口 1.5 倍；体中松手同样封顶 MEH
-        tail = judge_with_windows(item.release_delta, windows_v2, 1.5)
-        if body_break and tail != "miss":
+        # V2：尾判窗口 1.5 倍；"first" 口径下按第一次松手判
+        tail = judge_with_windows(tail_rel - item.end_time, windows_v2, 1.5)
+        # 官方 DrawableHoldNoteTail.GetCappedResult：头没打中或体中断开过，
+        # 尾判再准也最高只能到 MEH。面条图里这条很关键，否则断开的尾巴会被算成 300。
+        if (item.head_judgement == "miss" or body_break) and tail != "miss":
             tail = "meh"
         item.tail_judgement = tail
         item.judgement_v2 = _worse(item.head_judgement, tail)
+
+        # Classic：窗口用 stable 的（windows），头尾仍然分开判，尾窗口也放大 1.5 倍
+        head_classic = (
+            "miss" if item.delta is None else judge_with_windows(item.delta, windows)
+        )
+        tail_classic = judge_with_windows(tail_rel - item.end_time, windows, 1.5)
+        if (head_classic == "miss" or body_break) and tail_classic != "miss":
+            tail_classic = "meh"
+        item.head_judgement_classic = head_classic
+        item.tail_judgement_classic = tail_classic
+        item.judgement_classic = _worse(head_classic, tail_classic)
+
+
+def _match_state_machine(
+    beatmap: Beatmap,
+    presses: list[PressEvent],
+    releases: list[ReleaseEvent],
+    od_value: float,
+    windows: dict[str, float],
+    windows_v2: dict[str, float],
+) -> MatchResult:
+    """C 算法：按列逐事件模拟 DrawableHoldNote 的按住状态。
+
+    和 A/B 的差别在头判：A/B 先做全局贪心配对，再补尾判；这里按键事件来一个处理一个，
+    当前按住的键只属于一个长条，松开就结算它的尾判。连续/重叠长条时松手归属更接近官方，
+    但同帧多事件的先后顺序仍然还原不了（回放里没有这个信息）。
+    """
+    keys = max(1, beatmap.keys)
+    by_col: list[list[HitObject]] = [[] for _ in range(keys)]
+    for obj in beatmap.objects:
+        if 0 <= obj.column < keys:
+            by_col[obj.column].append(obj)
+    press_by_col: list[list[float]] = [[] for _ in range(keys)]
+    rel_by_col: list[list[float]] = [[] for _ in range(keys)]
+    for p in presses:
+        if 0 <= p.column < keys:
+            press_by_col[p.column].append(p.time)
+    for r in releases:
+        if 0 <= r.column < keys:
+            rel_by_col[r.column].append(r.time)
+
+    out: list[JudgedNote] = []
+    ghosts: list[GhostPress] = []
+    # 超出谱面键数的按键也算空敲，不能因为按列分组就悄悄丢掉
+    for p in presses:
+        if not (0 <= p.column < keys):
+            ghosts.append(GhostPress(time=p.time, column=p.column))
+    for col in range(keys):
+        objs = sorted(by_col[col], key=lambda o: o.time)
+        events = [(t, 0) for t in press_by_col[col]] + [(t, 1) for t in rel_by_col[col]]
+        events.sort(key=lambda e: (e[0], e[1]))
+        idx = 0
+        active: HitObject | None = None
+        active_press = 0.0
+        active_head = "miss"
+
+        def flush_misses(until: float) -> None:
+            nonlocal idx
+            while idx < len(objs) and objs[idx].time < until - windows["meh"]:
+                out.append(_make_miss(objs[idx]))
+                idx += 1
+
+        def finish_active(tail_time: float, release_delta: float | None) -> None:
+            nonlocal active
+            if active is None:
+                return
+            obj = active
+            delta = active_press - obj.time
+            if release_delta is None:
+                release_delta = 0.0
+            tail = judge_with_windows(release_delta, windows_v2, 1.5)
+            body_break = release_delta < -windows["meh"]
+            if (active_head == "miss" or body_break) and tail != "miss":
+                tail = "meh"
+            head_classic = judge_with_windows(delta, windows)
+            tail_classic = judge_with_windows(release_delta, windows, 1.5)
+            if (head_classic == "miss" or body_break) and tail_classic != "miss":
+                tail_classic = "meh"
+            item = JudgedNote(
+                index=obj.index, obj_index=obj.index, column=col, note_time=obj.time,
+                is_hold=True, end_time=obj.end_time,
+                judgement=_hold_judgement(delta, release_delta, windows, body_break),
+                delta=delta, press_time=active_press,
+                release_delta=release_delta,
+                head_judgement=active_head, tail_judgement=tail,
+                judgement_v2=_worse(active_head, tail),
+                head_judgement_classic=head_classic,
+                tail_judgement_classic=tail_classic,
+                judgement_classic=_worse(head_classic, tail_classic),
+                body_break=body_break,
+            )
+            item.dropped = item.judgement == "miss"
+            out.append(item)
+            active = None
+
+        for t, kind in events:
+            flush_misses(t)
+            if kind == 0:
+                if active is not None:
+                    finish_active(active.end_time, None)
+                while idx < len(objs) and objs[idx].time < t - windows["meh"]:
+                    out.append(_make_miss(objs[idx]))
+                    idx += 1
+                if idx >= len(objs):
+                    ghosts.append(GhostPress(time=t, column=col))
+                    continue
+                obj = objs[idx]
+                delta = t - obj.time
+                if abs(delta) > windows["meh"]:
+                    ghosts.append(GhostPress(time=t, column=col))
+                    continue
+                head = judge_with_windows(delta, windows_v2)
+                idx += 1
+                if obj.is_hold and obj.end_time is not None:
+                    active = obj
+                    active_press = t
+                    active_head = head
+                else:
+                    item = _make_hit(obj, t, delta, judge_offset(delta, od_value))
+                    item.head_judgement = head
+                    item.judgement_v2 = head
+                    out.append(item)
+            else:
+                if active is not None:
+                    finish_active(t, t - active.end_time)
+
+        flush_misses(float("inf"))
+        if active is not None:
+            finish_active(active.end_time, None)
+
+    out.sort(key=lambda x: (x.note_time, x.column))
+    for i, item in enumerate(out):
+        item.index = i
+    ghosts.sort(key=lambda g: g.time)
+    return MatchResult(notes=out, ghosts=ghosts, beatmap=beatmap, od=od_value, windows=windows)
 
 
 def match_replay(
@@ -624,14 +814,18 @@ def match_replay(
     releases: list[ReleaseEvent],
     od: float | None = None,
     extra_window: float = 0.0,
+    algo: str = "A",
 ) -> MatchResult:
     """执行配对。
 
     extra_window：可选的额外宽容（ms），用于"如果放宽一点会怎样"的对照实验。
+    algo：A = 当前贪心 + 尾判；B = 仅尾判状态机；C = 头判尾判都走事件流。
     """
     od_value = beatmap.od if od is None else od
     windows = judgement_windows(od_value)
     windows_v2 = judgement_windows(od_value, score_v2=True)
+    if algo == "C":
+        return _match_state_machine(beatmap, presses, releases, od_value, windows, windows_v2)
     # 配对窗口 = 命中窗口（meh）。超过它官方就已经判漏，按键必须留给后面的物件。
     hit_window = windows["meh"] + max(0.0, extra_window)
 
@@ -640,9 +834,10 @@ def match_replay(
 
     result: list[JudgedNote] = []
     for col in range(keys):
-        _pair_column(col, notes_by_col[col], presses_by_col[col], hit_window, od_value, result, ghosts)
+        _pair_column(col, notes_by_col[col], presses_by_col[col], hit_window, od_value,
+                     windows_v2, result, ghosts)
 
-    _apply_hold_tails(result, presses_by_col, release_by_col, windows, windows_v2)
+    _apply_hold_tails(result, presses_by_col, release_by_col, windows, windows_v2, algo=algo)
 
     result.sort(key=lambda x: (x.note_time, x.column))
     for idx, item in enumerate(result):
