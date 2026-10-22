@@ -4,12 +4,14 @@
 和玩家心里的"这张图几段"是同一把尺子，两张图差几档也比 MSD 差几分更直观。
 MSD 仍然随推荐结果给出，但只作参考，不参与排序。
 
-相似度 = 0.65 × 键型相似度 + 0.35 × 段位接近度：
+相似度 = 0.55 × 键型相似度 + 0.30 × 段位接近度 + 0.15 × BPM 接近度
+（权重见下方 W_PATTERN / W_DAN / W_BPM；不知道本局 BPM 时，前两项按比例归一化）
 
   * 键型相似度：五类占比的 L1 距离换算（`1 - L1/2`），0.9 就是"很像"；
   * 段位接近度：段位顺序表里相差几档，按 `exp(-Δ/3)` 衰减。
     档位从 `data/dan_rank.json` 来（由 Sunny 的 RC 区间表生成：Intro 1~3、
     Reform 1~10、Alpha…Zeta…，每段再细分 low / mid-low / mid / mid-high / high）。
+  * BPM 接近度：按比例算距离，避免把同一首曲子的倍速版当成"同难度"。
 
 三道门槛，宁可不推也不推错：长条占比差 >25 个百分点不推；键型相似度 <0.5 不推；
 段位差超过 4 档不推（凑不满五张时依次放宽到 8 档、12 档，12 档那档要求键型 ≥0.65）。
@@ -240,7 +242,12 @@ def recommend(dan: str | None, share: dict, ln_ratio: float = 0.0,
               artist_alt: str = "", title_alt: str = "",
               exclude_bid: int | None = None, exclude_sid: int | None = None,
               limit: int = 5, bpm: float = 0.0) -> list[dict]:
-    """按段位与键型找最接近的谱面。段位认不出、或索引缺失时返回空列表。"""
+    """按段位与键型找最接近的谱面。段位认不出、或索引缺失时返回空列表。
+
+    ln_ratio 只为保持既有调用签名而留着：长条占比的门槛实际读 `share["ln"]`
+    （五类构成里的同一项，单位一致）。两处都读会让"占比 0.9 但 ln_ratio 传 0"
+    这种不一致变成静默的不同结果，所以只认 share。
+    """
     rows = _load()
     q_rank = rank_of(dan)
     if not rows or q_rank is None:
