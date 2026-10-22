@@ -50,6 +50,8 @@
       rhythm: pick("--cat-rhythm", "#6ee7ff"),
       distraction: pick("--cat-distraction", "#c792ff"),
       miss: pick("--j-miss", "#ff6b8a"),
+      laneBg: pick("--lane-bg", "rgba(0,0,0,0.95)"),
+      laneLine: pick("--lane-line", "rgba(255,255,255,0.12)"),
       bg: "transparent",
     };
   }
@@ -163,7 +165,7 @@
     box.hidden = false;
     clearNode(box);
     box.appendChild(
-      document.createTextNode("把 " + pj.fixable + " 个最容易改善的失误修好 → v1 ")
+      document.createTextNode("把 " + pj.fixable + " 个容易改善的失误修好 → v1 ")
     );
     const b1 = el("b", null, pj.projected.accuracy.toFixed(2) + "%");
     const b2 = el("b", null, fmtInt(pj.projected.score));
