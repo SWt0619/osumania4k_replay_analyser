@@ -28,7 +28,17 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from app import paths  # noqa: E402
-from app.core import audio_fetch, config_store, crashreport, history, json_safe, osu_dirs, recommend  # noqa: E402
+from app.core import (  # noqa: E402
+    audio_fetch,
+    config_store,
+    crashreport,
+    history,
+    hotkey,
+    json_safe,
+    osu_dirs,
+    quick_import,
+    recommend,
+)
 from app.core.analyze import (  # noqa: E402
     SUPPORTED_KEYS,
     AnalyzeError,
@@ -330,6 +340,15 @@ class SessionStore:
 
 SESSIONS = SessionStore()
 
+# 快捷导入的"最近一次"：页面靠长轮询等 token 变化，几 MB 的 notes 只在变化时传一次。
+# busy 单独一个字段：热键一按下就置位并叫醒等待中的请求，页面据此立刻显示"正在分析"，
+# 不用等分析跑完才给反馈。
+QUICK: dict = {"token": 0, "session": "", "payload": None, "path": "", "mtime": 0.0,
+               "error": "", "busy": False}
+QUICK_LOCK = threading.Lock()
+QUICK_COND = threading.Condition(QUICK_LOCK)
+QUICK_BUSY = threading.Lock()
+
 
 def _json_default(o):
     return str(o)
@@ -386,6 +405,59 @@ def _write_temp(directory: str, suffix: str, data: bytes) -> str:
             pass
         raise
     return path
+
+
+def _range_bounds(header: str | None, size: int) -> tuple[int, int, bool] | None:
+    """解析 Range 请求头，返回（起始字节, 结束字节, 是否为部分响应）；不可满足时返回 None。
+
+    抽成纯函数是因为这里的边界最多：后缀写法、显式结尾、越界夹取、416 判定。
+    写在发送流程里时，每一支都要和响应头对着读才能确认，很容易漏掉一条。
+    """
+    if not header:
+        return 0, size - 1, False
+    m = re.match(r"bytes=(\d*)-(\d*)", header.strip())
+    if not m:
+        return 0, size - 1, False
+    first, last = m.group(1), m.group(2)
+    if not first and last:
+        # 后缀 Range：bytes=-N 表示"最后 N 个字节"。
+        # 早先按 0..N 处理，下载器或播放器拖到末尾时会拿到开头的内容。
+        return size - min(int(last), size), size - 1, True
+    start = int(first) if first else 0
+    if last:
+        end = int(last)
+    else:
+        # 只给了起点（或什么都没给）：一直发到文件末尾
+        end = size - 1
+    # 显式给了结尾也不能越过文件末尾：Content-Length 会按这个值算，
+    # 不夹的话响应头写着 92 字节、实际只发得出 2 字节，
+    # 播放器/下载器读到一半就报 IncompleteRead（或一直等）。
+    if end > size - 1:
+        end = size - 1
+    if start < 0 or start > end or start >= size:
+        return None
+    return start, end, True
+
+
+def _save_base64_upload(req: dict, key: str, suffix: str) -> tuple[str, str]:
+    """把请求体里的 base64 文件字段落盘，返回（路径, 错误说明）。
+
+    两个「选谱面」的入口（预检元数据 / 只分析谱面）做的是同一件事，
+    提示语也必须一致——分开写时一边说"没有收到谱面文件"、另一边说"谱面解码失败"，
+    用户只会以为自己选错了文件。
+    """
+    text = req.get(key) or ""
+    if not text:
+        return "", "没有收到谱面文件"
+    try:
+        # validate=True：否则 "!!!" 这类垃圾会被静默解成空字节，
+        # 然后返回一份「未知艺术家 - 未知曲目」的假元数据，调用方还以为读到了谱面。
+        raw = base64.b64decode(text, validate=True)
+    except Exception:  # noqa: BLE001
+        return "", "谱面文件的 base64 解码失败"
+    if not raw:
+        return "", "谱面文件是空的"
+    return _write_temp(os.path.join(CACHE_DIR, "uploads"), suffix, raw), ""
 
 
 class _SessionView:
@@ -472,37 +544,14 @@ class _AssetMixin(_SessionView):
     def _send_range(self, path: str):
         size = os.path.getsize(path)
         ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        range_header = self.headers.get("Range")
-        start, end = 0, size - 1
-        partial = False
-        if range_header:
-            m = re.match(r"bytes=(\d*)-(\d*)", range_header.strip())
-            if m:
-                first, last = m.group(1), m.group(2)
-                if not first and last:
-                    # 后缀 Range：bytes=-N 表示"最后 N 个字节"。
-                    # 早先按 0..N 处理，下载器或播放器拖到末尾时会拿到开头的内容。
-                    suffix = min(int(last), size)
-                    start, end = size - suffix, size - 1
-                else:
-                    if first:
-                        start = int(first)
-                    if last:
-                        end = int(last)
-                    elif first:
-                        end = size - 1
-                # 显式给了结尾也不能越过文件末尾：Content-Length 会按这个值算，
-                # 不夹的话响应头写着 92 字节、实际只发得出 2 字节，
-                # 播放器/下载器读到一半就报 IncompleteRead（或一直等）。
-                if end > size - 1:
-                    end = size - 1
-                if start < 0 or start > end or start >= size:
-                    self.close_connection = True
-                    self.send_response(416)
-                    self.send_header("Content-Range", "bytes */%d" % size)
-                    self.end_headers()
-                    return
-                partial = True
+        bounds = _range_bounds(self.headers.get("Range"), size)
+        if bounds is None:
+            self.close_connection = True
+            self.send_response(416)
+            self.send_header("Content-Range", "bytes */%d" % size)
+            self.end_headers()
+            return
+        start, end, partial = bounds
         length = end - start + 1
         self.close_connection = True
         self.send_response(206 if partial else 200)
@@ -526,6 +575,20 @@ class _AssetMixin(_SessionView):
                     remaining -= len(data)
         except (BrokenPipeError, ConnectionAbortedError):
             pass
+
+
+def _mask_user_path(path: str) -> str:
+    """把路径里的本机账号名换成占位词。
+
+    设置页的「例如 …」很容易被截图发到群里、issue 里；带着自己的 Windows 用户名
+    等于顺手把账号名送出去了。示例只要**形状**对就够用，不需要是真的。
+    """
+    home = os.path.expanduser("~")
+    if not path or not home:
+        return path
+    if path.lower().startswith(home.lower()):
+        return r"C:\Users\你的用户名" + path[len(home):]
+    return path
 
 
 class _ApiMixin(_SessionView):
@@ -556,10 +619,12 @@ class _ApiMixin(_SessionView):
             "songsRoot": roots[0] if roots else "",
             "songsRoots": roots,
             "count": len(lib.entries),
-            # 给输入框做占位提示：告诉玩家该选到哪一级
+            # 给输入框做占位提示：告诉玩家该选到哪一级。
+            # 这里只给"形状"，不放本机的真实路径 —— 截图外发时不会带出账号名。
             "examples": {
-                "stable": r"D:\OsuStable",
-                "lazer": os.path.join(appdata, "osu") if appdata else r"C:\Users\<你>\AppData\Roaming\osu",
+                "stable": r"D:\osu!",
+                "lazer": _mask_user_path(os.path.join(appdata, "osu")) if appdata
+                         else r"C:\Users\你的用户名\AppData\Roaming\osu",
             },
         })
 
@@ -617,6 +682,8 @@ class _ApiMixin(_SessionView):
     def _beatmap_search(self):
         # 搜索是"边打边搜"的：请求体坏掉时退回空查询，比弹一个错更不打扰
         req = _parse_json(self._read_body()) or {}
+        # 刚下好的图也要能搜到（索引有 1 小时 TTL，不能等它自己过期）
+        _refresh_library()
         roots = default_songs_roots()
         lib = get_library(_field(req, "songsRoot") or (roots[0] if roots else None))
         hits = lib.search(_field(req, "query"), limit=40)
@@ -650,18 +717,9 @@ class _ApiMixin(_SessionView):
         req = _parse_json(self._read_body())
         if req is None:
             return self._error("请求体不是合法 JSON")
-        b64 = req.get("beatmap") or ""
-        if not b64:
-            return self._error("没有收到谱面文件")
-        try:
-            # validate=True：否则 "!!!" 这类垃圾会被静默解成空字节，
-            # 然后返回一份「未知艺术家 - 未知曲目」的假元数据，调用方还以为读到了谱面。
-            raw = base64.b64decode(b64, validate=True)
-        except Exception:  # noqa: BLE001
-            return self._error("谱面文件的 base64 解码失败")
-        if not raw:
-            return self._error("谱面文件是空的")
-        path = _write_temp(os.path.join(CACHE_DIR, "uploads"), ".osu", raw)
+        path, problem = _save_base64_upload(req, "beatmap", ".osu")
+        if problem:
+            return self._error(problem)
         try:
             bm = parse_osu_file(path)
         except Exception as e:  # noqa: BLE001
@@ -689,16 +747,9 @@ class _ApiMixin(_SessionView):
         req = _parse_json(self._read_body())
         if req is None:
             return self._error("请求体不是合法 JSON")
-        b64 = _field(req, "osu")
-        if not b64:
-            return self._error("没有收到谱面文件")
-        try:
-            raw = base64.b64decode(b64, validate=True)
-        except Exception:  # noqa: BLE001
-            return self._error("谱面文件的 base64 解码失败")
-        if not raw:
-            return self._error("谱面文件是空的")
-        path = _write_temp(os.path.join(CACHE_DIR, "uploads"), ".osu", raw)
+        path, problem = _save_base64_upload(req, "osu", ".osu")
+        if problem:
+            return self._error(problem)
         try:
             return self._json(analyze_chart(path))
         except AnalyzeError as e:
@@ -708,6 +759,26 @@ class _ApiMixin(_SessionView):
 
     # ---- 检查更新 --------------------------------------------------------
     # 只有用户打开「关于」页时才会请求，且只问 GitHub 的 latest release。
+    # ---- 快捷导入的快捷键 ------------------------------------------------
+    def _hotkey_info(self):
+        st = hotkey.status()
+        return self._json({
+            "ok": True,
+            "combo": st.get("combo") or "",
+            "active": bool(st.get("ok")),
+            "error": st.get("error") or "",
+            "supported": sys.platform == "win32",
+        })
+
+    def _hotkey_save(self):
+        req = _parse_json(self._read_body())
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+        ok, why = _apply_hotkey(_field(req, "combo"))
+        if not ok:
+            return self._error(why, 400)
+        return self._hotkey_info()
+
     def _check_update(self):
         # 调试用：本地版本通常已经是最新，想测「发现新版本」分支时设这个环境变量。
         # 例如 MANIA_FAKE_LATEST=9.9.9 会假装 GitHub 上有个 9.9.9；不设就走真实请求。
@@ -772,24 +843,7 @@ class _AnalyzeApiMixin(_SessionView):
     分开写会拼出「会话存在、URL 指向另一个 id」这种只在播放时才暴露的问题。
     """
 
-    # ---- 曲库新鲜度 -----------------------------------------------------
-    def _refresh_library(self):
-        """分析前先看一眼曲库有没有变化（新下载的谱面）。
-
-        索引默认有 1 小时 TTL，用户"下载推荐图 → 打完回放拖回来"通常在这个窗口内，
-        不刷新就会一直提示"曲库里没有这张谱面"。这里只做一次目录指纹比对，
-        没变化时几乎不花时间。
-        """
-        try:
-            roots = default_songs_roots()
-            lib = get_library(roots[0] if roots else None)
-            if lib.ensure_fresh():
-                log("[library] 检测到曲库有变化，已重新扫描（%d 个谱面）" % len(lib.entries))
-        except Exception:  # noqa: BLE001 - 刷新失败不该挡住分析
-            log("[library] 刷新失败：\n" + traceback.format_exc())
-
     def _analyze(self):
-        self._refresh_library()
         raw = self._read_body()
         log("[analyze] 收到请求体 %.1f KB" % (len(raw) / 1024.0))
         req = _parse_json(raw)
@@ -831,36 +885,56 @@ class _AnalyzeApiMixin(_SessionView):
     def _finish_analyze(self, replay_path: str, beatmap_path: str | None, songs_root: str | None,
                         algo: str = "C"):
         """分析已落盘的回放并返回 JSON（直接上传 / 分片上传 / 本地文件夹共用）。"""
-        algo = algo if algo in ("C", "D") else "C"
-        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root,
-                          judge_algo=algo)
-        audio, background, note_skin = _resolve_media(payload, beatmap_path, songs_root)
+        return self._json(_analyze_and_store(replay_path, beatmap_path, songs_root, algo))
 
-        # 谱面路径要在这里定下来：上传回放时 beatmap_path 是空的，真正的路径是
-        # analyze 内部按 MD5 从曲库解析出来的。不把它解析出来存进会话，
-        # 后面「在线补音频」就拿不到 .osu，也就读不出图集 id。
-        resolved_bm = beatmap_path or _resolve_bm(payload, songs_root)
-        sid = self.sessions.create(payload, audio, background, note_skin,
-                                   beatmap_path=resolved_bm or "",
-                                   beatmap_md5=(payload.get("replay") or {}).get("beatmapMd5") or "")
-        payload["session"] = sid
-        # 每局摘要落一份本地存档（`_cache/history.db`）。这一层只存不分析，
-        # 写失败也不影响本次分析，所以走 record_safely。
-        history.record_safely(payload)
-        cols = note_skin.get("columns") or []
-        payload["media"] = {
-            "audio": bool(audio),
-            "background": bool(background),
-            # 每列的 note 素材 URL（没找到的列为 null，前端回退到色块）
-            "noteImages": [("/api/media/%s/note%d" % (sid, i)) if p else None for i, p in enumerate(cols)],
-            "lnBody": ("/api/media/%s/lnbody" % sid) if note_skin.get("lnBody") else None,
-            "lnTail": ("/api/media/%s/lntail" % sid) if note_skin.get("lnTail") else None,
-        }
-        return self._json(payload)
+    # ---- 快捷导入（先按 F2 导出，再按 Shift+F2）--------------------------
+    def _quick_import(self):
+        """手动触发一次「分析最近导出的回放」。热键走的也是同一条逻辑。"""
+        req = _parse_json(self._read_body()) or {}
+        payload, problem = _quick_payload(_field(req, "algo") or "C", bool(req.get("force")))
+        if problem:
+            return self._error(problem, 404)
+        with QUICK_LOCK:
+            return self._json({"ok": True, "token": QUICK["token"],
+                               "session": payload.get("session", "")})
 
-    # ---- 在线补音频 -----------------------------------------------------------
-    # 只在 lazer 里下载过的谱面，音频和谱面各自按内容哈希存放、彼此没有关联信息，
-    # 本地永远配不上音频。这里按谱面信息去镜像站取一次 .osz，只把音频留下。
+    def _quick_pending(self, qs):
+        """页面长轮询：等到"有新结果"或"开始分析了"再回。
+
+        `wait` 是这次最多等几秒（页面给 25 秒）。等待期间不占 CPU——线程挂在条件变量上，
+        热键一按下就 `notify_all` 叫醒，所以"按下 → 页面显示加载"几乎没有延迟。
+        """
+        try:
+            since = int((qs.get("since") or ["0"])[0])
+        except ValueError:
+            since = 0
+        try:
+            wait = float((qs.get("wait") or ["0"])[0])
+        except ValueError:
+            wait = 0.0
+        wait = max(0.0, min(wait, 25.0))
+        deadline = time.time() + wait
+        with QUICK_COND:
+            while wait > 0 and QUICK["token"] <= since and not QUICK["busy"]:
+                left = deadline - time.time()
+                if left <= 0:
+                    break
+                QUICK_COND.wait(left)
+            token = QUICK["token"]
+            busy = bool(QUICK["busy"])
+            fresh = token > since
+            data = QUICK["payload"] if fresh else None
+            error = (QUICK.get("error") or "") if fresh else ""
+        # 先放锁再写响应：大 payload 落盘/发送要几毫秒，不能让别的请求跟着等
+        return self._json({
+            "ok": True,
+            "token": token,
+            "busy": busy,
+            "data": data,
+            "error": error,
+            "combo": hotkey.status().get("combo") or "",
+            "hotkey": hotkey.status().get("ok"),
+        })
 
     # ---- 相似谱面 -------------------------------------------------------
     # 难度轴是"段位"，而段位由前端用 Sunny 算（后端没有 JS 运行时），
@@ -1010,7 +1084,6 @@ class _ChunkUploadMixin:
         return [fn for _, fn in numbered], ""
 
     def _analyze_chunked(self):
-        self._refresh_library()
         req = _parse_json(self._read_body())
         if req is None:
             return self._error("请求体不是合法 JSON")
@@ -1147,70 +1220,77 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
         if not self._guard():
             return
         try:
-            if path == "/favicon.ico":
-                # 浏览器每次开页面都会要它，没有就会在控制台刷一条 404
-                return self._send(200, FAVICON, "image/svg+xml")
-            if path in ("/", "/index.html"):
-                return self._serve_file(os.path.join(WEB_DIR, "index.html"))
-            if path.startswith("/static/"):
-                rel = path[len("/static/"):]
-                return self._serve_file(os.path.join(WEB_DIR, rel))
-            if path == "/api/beacon":
-                ev = (qs.get("ev") or ["?"])[0][:40]
-                data = (qs.get("data") or [""])[0][:600]
-                log("[beacon] %s  %s" % (ev, data))
-                body = b"ok"
-                self.send_response(204)
-                self.send_header("Connection", "close")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                self.close_connection = True
-                return
-            if path == "/api/alive":
-                WATCHDOG.beat((qs.get("c") or [""])[0][:64])
-                self.send_response(204)
-                self.send_header("Content-Length", "0")
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.close_connection = True
-                return
-            if path == "/api/bye":
-                WATCHDOG.bye((qs.get("c") or [""])[0][:64])
-                log("[watchdog] 页面关闭，%d 秒后若无新页面就退出" % WATCHDOG.BYE_GRACE)
-                self.send_response(204)
-                self.send_header("Content-Length", "0")
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.close_connection = True
-                return
-            if path == "/api/health":
-                return self._json({"ok": True, "version": __version__, "time": time.time(),
-                                   "assetV": self._asset_version(),
-                                   # stale=进程比代码旧（改完 .py 没重启）：页面据此提示用户重启
-                                   "stale": stale_code()})
-            if path == "/api/beatmap-text":
-                return self._beatmap_text(qs)
-            if path == "/api/paths":
-                return self._paths_info()
-            if path == "/api/library":
-                return self._library_info()
-            if path == "/api/local-replays":
-                return self._local_replays()
-            if path == "/api/check-update":
-                return self._check_update()
-            if path == "/api/open-replays":
-                try:
-                    os.makedirs(LOCAL_REPLAY_DIR, exist_ok=True)
-                    os.startfile(LOCAL_REPLAY_DIR)  # noqa: S606 - 本地工具，打开自己的目录
-                except Exception as e:  # noqa: BLE001
-                    return self._error("打不开文件夹：%r" % (e,))
-                return self._json({"ok": True, "dir": LOCAL_REPLAY_DIR})
-            if path.startswith("/api/media/"):
-                return self._serve_media(path[len("/api/media/"):])
-            return self._error("未知路径: " + path, 404)
+            return self._route_get(path, qs)
         except Exception as e:  # noqa: BLE001
             report = _report_crash("请求处理失败（GET）", e, self._crash_context())
             return self._error(self._internal_error(e, report), 500)
+
+    def _route_get(self, path: str, qs):
+        """GET 路由：静态资源、页面、只读接口。
+
+        分支顺序有意义：`/api/media/` 是前缀匹配，必须排在精确匹配之后。
+        """
+        if path == "/favicon.ico":
+            # 浏览器每次开页面都会要它，没有就会在控制台刷一条 404
+            return self._send(200, FAVICON, "image/svg+xml")
+        if path in ("/", "/index.html"):
+            return self._serve_file(os.path.join(WEB_DIR, "index.html"))
+        if path.startswith("/static/"):
+            return self._serve_file(os.path.join(WEB_DIR, path[len("/static/"):]))
+        if path == "/api/beacon":
+            log("[beacon] %s  %s" % ((qs.get("ev") or ["?"])[0][:40],
+                                     (qs.get("data") or [""])[0][:600]))
+            return self._no_content()
+        if path == "/api/alive":
+            WATCHDOG.beat((qs.get("c") or [""])[0][:64])
+            return self._no_content()
+        if path == "/api/bye":
+            WATCHDOG.bye((qs.get("c") or [""])[0][:64])
+            log("[watchdog] 页面关闭，%d 秒后若无新页面就退出" % WATCHDOG.BYE_GRACE)
+            return self._no_content()
+        if path == "/api/health":
+            return self._json({"ok": True, "version": __version__, "time": time.time(),
+                               "assetV": self._asset_version(),
+                               # stale=进程比代码旧（改完 .py 没重启）：页面据此提示用户重启
+                               "stale": stale_code(),
+                               # 快捷导入的热键状态：没注册上时页面要能说清原因
+                               "hotkey": hotkey.status()})
+        if path == "/api/beatmap-text":
+            return self._beatmap_text(qs)
+        if path == "/api/paths":
+            return self._paths_info()
+        if path == "/api/library":
+            return self._library_info()
+        if path == "/api/local-replays":
+            return self._local_replays()
+        if path == "/api/quick/pending":
+            return self._quick_pending(qs)
+        if path == "/api/hotkey":
+            return self._hotkey_info()
+        if path == "/api/check-update":
+            return self._check_update()
+        if path == "/api/open-replays":
+            return self._open_replays_dir()
+        if path.startswith("/api/media/"):
+            return self._serve_media(path[len("/api/media/"):])
+        return self._error("未知路径: " + path, 404)
+
+    def _no_content(self):
+        """回 204 空响应：心跳 / bye / beacon 只表示"收到了"，没有正文可给。"""
+        self.close_connection = True
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _open_replays_dir(self):
+        """在资源管理器里打开 _replays 目录（页面上的「打开文件夹」按钮）。"""
+        try:
+            os.makedirs(LOCAL_REPLAY_DIR, exist_ok=True)
+            os.startfile(LOCAL_REPLAY_DIR)  # noqa: S606 - 本地工具，打开自己的目录
+        except Exception as e:  # noqa: BLE001
+            return self._error("打不开文件夹：%r" % (e,))
+        return self._json({"ok": True, "dir": LOCAL_REPLAY_DIR})
 
     def _crash_context(self) -> dict:
         """报告里"这次请求长什么样"，够定位就行，不记 body 内容（可能有回放数据）。"""
@@ -1269,6 +1349,10 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 return self._recommend()
             if path == "/api/analyze-local":
                 return self._analyze_local()
+            if path == "/api/quick-import":
+                return self._quick_import()
+            if path == "/api/hotkey":
+                return self._hotkey_save()
             if path == "/api/audio-fetch":
                 return self._audio_fetch()
             if path == "/api/audio-pref":
@@ -1348,6 +1432,163 @@ def _resolve_bm(payload: dict, songs_root: str | None) -> str:
     return e.path if e else ""
 
 
+# --------------------------------------------------------------------- 快捷导入
+#
+# 交互是「先在结算屏按 F2 导出，再按我们的组合键」。多按一下换来的是：
+# 只需要看 Replays / exports 里最新的那份文件，不必去猜 Data\r 里哪个加密文件是刚打完的，
+# 也不会把"只想导出"的人误判成"想做分析"。
+
+def _refresh_library() -> None:
+    """分析/搜索前看一眼曲库有没有变化（新下载的谱面）。
+
+    索引默认有 1 小时 TTL，用户"下载推荐图 → 打完回放拖回来"通常落在这个窗口内，
+    不刷新就会一直提示"曲库里没有这张谱面"。这里只做一次目录指纹比对，
+    没变化时几乎不花时间；真有新图才重扫（本机约 2~4 秒，一次就够）。
+
+    之所以放在 _analyze_and_store 里：上传、分片、本地目录、快捷导入四条入口
+    最后都汇到它，挨个加一遍迟早漏一条（快捷导入就漏过）。
+    """
+    try:
+        roots = default_songs_roots()
+        lib = get_library(roots[0] if roots else None)
+        if lib.ensure_fresh():
+            log("[library] 检测到曲库有变化，已重新扫描（%d 个谱面）" % len(lib.entries))
+    except Exception:  # noqa: BLE001 - 刷新失败不该挡住分析
+        log("[library] 刷新失败：\n" + traceback.format_exc())
+
+
+def _analyze_and_store(replay_path: str, beatmap_path: str | None,
+                       songs_root: str | None, algo: str = "C") -> dict:
+    """跑完分析、建会话、记历史，返回完整结果。HTTP 入口与热键共用这一份。"""
+    _refresh_library()
+    algo = algo if algo in ("C", "D") else "C"
+    payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root,
+                      judge_algo=algo)
+    audio, background, note_skin = _resolve_media(payload, beatmap_path, songs_root)
+
+    # 谱面路径要在这里定下来：上传回放时 beatmap_path 是空的，真正的路径是
+    # analyze 内部按 MD5 从曲库解析出来的。不把它解析出来存进会话，
+    # 后面「在线补音频」就拿不到 .osu，也就读不出图集 id。
+    resolved_bm = beatmap_path or _resolve_bm(payload, songs_root)
+    sid = SESSIONS.create(payload, audio, background, note_skin,
+                          beatmap_path=resolved_bm or "",
+                          beatmap_md5=(payload.get("replay") or {}).get("beatmapMd5") or "")
+    payload["session"] = sid
+    # 每局摘要落一份本地存档（`_cache/history.db`）。这一层只存不分析，
+    # 写失败也不影响本次分析，所以走 record_safely。
+    history.record_safely(payload)
+    cols = note_skin.get("columns") or []
+    payload["media"] = {
+        "audio": bool(audio),
+        "background": bool(background),
+        # 每列的 note 素材 URL（没找到的列为 null，前端回退到色块）
+        "noteImages": [("/api/media/%s/note%d" % (sid, i)) if p else None for i, p in enumerate(cols)],
+        "lnBody": ("/api/media/%s/lnbody" % sid) if note_skin.get("lnBody") else None,
+        "lnTail": ("/api/media/%s/lntail" % sid) if note_skin.get("lnTail") else None,
+    }
+    return payload
+
+
+def _quick_payload(algo: str = "C", force: bool = False) -> tuple[dict | None, str]:
+    """分析最近一次导出的回放。返回（结果, 错误说明），出错时结果为 None。
+
+    同一份文件连按两次不会重复分析：路径与修改时间都没变时直接给上一次的结果，
+    页面那边 token 不变，也就不会重新渲染一遍。
+    """
+    item = quick_import.latest()
+    if not item:
+        combo = hotkey.status().get("combo") or "Shift+F2"
+        return None, ("没找到刚导出的回放。先在结算屏按 F2 导出，再按 %s；"
+                      "也可以直接把 .osr 拖进页面。" % combo)
+
+    with QUICK_BUSY:
+        with QUICK_COND:
+            same = (QUICK["session"] and QUICK["path"] == item["path"]
+                    and abs(QUICK["mtime"] - item["mtime"]) < 1e-6)
+            cached = QUICK["payload"] if (same and not force) else None
+            if cached is not None:
+                # 同一份回放再按一次：不重新分析，但**要让页面有反应**。
+                # 只返回旧 token 的话，用户看到的就是"按了没动静"——
+                # 尤其是刷新页面后第一次按，最容易以为是坏的。
+                QUICK.update(token=QUICK["token"] + 1, error="", busy=False)
+                QUICK_COND.notify_all()
+                return cached, ""
+            # 先把"开始干活了"喊出去：页面在等这个信号，用来立刻显示加载提示。
+            QUICK.update(busy=True, error="")
+            QUICK_COND.notify_all()
+        try:
+            payload = _analyze_and_store(item["path"], None, None, algo)
+        except Exception:
+            with QUICK_COND:
+                QUICK["busy"] = False
+                QUICK_COND.notify_all()
+            raise
+        payload["quick"] = {
+            "name": item["name"], "dir": item["dir"],
+            "source": item["source"], "mtime": item["mtime"],
+        }
+        with QUICK_COND:
+            QUICK.update(token=QUICK["token"] + 1, session=payload.get("session", ""),
+                         payload=payload, path=item["path"], mtime=item["mtime"],
+                         error="", busy=False)
+            QUICK_COND.notify_all()
+        log("[quick] %s -> %s" % (item["name"], payload.get("session", "")))
+        return payload, ""
+
+
+def _on_quick_hotkey() -> None:
+    """热键按下：分析最近一次导出。结果（或失败原因）留给页面轮询取走。"""
+    try:
+        _payload, problem = _quick_payload()
+    except Exception as e:  # noqa: BLE001 - 热键是后台线程，任何异常都不能把服务带崩
+        problem = "这一份分析失败：%s" % e
+        log("[quick] 热键处理失败：\n" + traceback.format_exc())
+        _report_crash("快捷导入失败", e, {})
+    if problem:
+        log("[quick] " + problem)
+        with QUICK_COND:
+            QUICK.update(token=QUICK["token"] + 1, payload=None, error=problem, busy=False)
+            QUICK_COND.notify_all()
+
+
+def _save_hotkey(combo: str) -> None:
+    """把快捷键写进 config.json。写失败只记日志：这一次已经生效了，不该因此报错。"""
+    try:
+        config_store.merge({"quickHotkey": combo}, cache_dir=CACHE_DIR)
+    except OSError as e:
+        log("[hotkey] 保存失败：%r" % (e,))
+
+
+def _apply_hotkey(combo: str) -> tuple[bool, str]:
+    """换快捷键：先校验 → 注销旧的 → 注册新的；新键注册失败就把旧的装回去。
+
+    combo 为空表示关闭快捷导入。
+    """
+    combo = (combo or "").strip()
+    if combo:
+        # 先校验再动手：注册失败才发现输入有错的话，用户旧的那个键已经被注销了
+        try:
+            hotkey.parse_combo(combo)
+        except ValueError as e:
+            return False, str(e)
+    previous = hotkey.status().get("combo") or ""
+    was_active = bool(hotkey.status().get("ok"))
+    if not combo:
+        hotkey.stop(clear_combo=True)
+        _save_hotkey("")
+        log("[hotkey] 已关闭快捷导入")
+        return True, ""
+    hotkey.stop()
+    ok, why = hotkey.start(_on_quick_hotkey, combo)
+    if not ok:
+        if was_active and previous:
+            hotkey.start(_on_quick_hotkey, previous)
+        return False, why
+    _save_hotkey(hotkey.status().get("combo") or combo)
+    log("[hotkey] 快捷键改为 %s" % (hotkey.status().get("combo") or combo))
+    return True, ""
+
+
 def _port_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
@@ -1423,7 +1664,7 @@ def _running_instance(port: int) -> int | None:
     return None
 
 
-def main() -> int:
+def _parse_args():
     ap = argparse.ArgumentParser(description="mania 回放分析器本地服务")
     ap.add_argument("--port", type=int, default=8806)
     ap.add_argument("--no-open", action="store_true")
@@ -1432,7 +1673,99 @@ def main() -> int:
                     help="页面关掉后也不退出服务（调试用）")
     ap.add_argument("--allow-multi", action="store_true",
                     help="即使已经有实例在跑也照常启动（调试用，正常使用不需要）")
-    args = ap.parse_args()
+    ap.add_argument("--no-hotkey", action="store_true",
+                    help="不注册快捷导入的全局热键（调试用）")
+    ap.add_argument("--hotkey", default="",
+                    help="快捷导入的组合键，覆盖设置里的值（至少带一个修饰键）")
+    return ap.parse_args()
+
+
+def _pick_port(start: int) -> int:
+    """从 start 往后找第一个空端口（最多试 20 个）。"""
+    port = start
+    for _ in range(20):
+        if _port_free(port):
+            break
+        port += 1
+    return port
+
+
+def _bind_server(port: int):
+    """绑定端口并返回 server；绑不上时写崩溃报告、返回 None。"""
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        report = crashreport.write("启动失败：端口绑定不上", e, context={"端口": port})
+        print("[mania-replay-lab] 启动失败：%r%s" % (
+            e, "\n报告：%s" % report if report else ""), flush=True)
+        log("[startup] 端口 %d 绑定失败：%r" % (port, e))
+        return None
+    httpd.daemon_threads = True
+    return httpd
+
+
+def _write_runtime_files(port: int) -> None:
+    """写出真实端口与进程号。
+
+    端口被占时会往后挪，写出去的是这次真正用的那个，免得打开的是上一次的旧服务；
+    进程号给 exe 版实现"再运行一次 → 停止服务"。
+    """
+    try:
+        with open(PORT_FILE, "w", encoding="ascii") as f:
+            f.write(str(port))
+        with open(PID_FILE, "w", encoding="ascii") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+
+
+def _warm_library() -> None:
+    """后台预热曲库索引（不阻塞启动）。"""
+    roots = default_songs_roots()
+    if not roots:
+        return
+    try:
+        lib = get_library(roots[0])
+        st = lib.stats()
+        print("[mania-replay-lab] 曲库索引完成：%d 张谱面（新算 %d / 复用 %d，%.0f ms）"
+              % (len(lib.entries), st["hashed"], st["reused"], st["buildMs"]), flush=True)
+        log("[startup] 曲库索引 %d 张（新算 %d 复用 %d，%.0f ms）"
+            % (len(lib.entries), st["hashed"], st["reused"], st["buildMs"]))
+    except Exception as e:  # noqa: BLE001
+        # 预热失败不影响主流程（第一次搜索会重扫），但不能一点痕迹都不留
+        log("[startup] 曲库预热失败：%r" % (e,))
+
+
+def _watch_pages(httpd) -> None:
+    """页面关掉就退出：每 5 秒看一次有没有活着的页面。"""
+    while True:
+        time.sleep(5.0)
+        if WATCHDOG.armed and not WATCHDOG.any_alive():
+            log("[watchdog] 没有任何页面在线，服务退出")
+            print("[mania-replay-lab] 页面已关闭，服务退出。", flush=True)
+            httpd.shutdown()
+            return
+
+
+def _reuse_running_instance(args) -> bool:
+    """已经有一个实例在跑就打开它并返回 True。
+
+    多开检测的意义：两个实例会各占一份内存、各扫一遍曲库，port.txt 还会被后起的覆盖，
+    结果是"先起的那个对启动器隐身"——用户点停止也停不掉它。
+    """
+    running = None if args.allow_multi else _running_instance(args.port)
+    if not running:
+        return False
+    url = "http://127.0.0.1:%d/" % running
+    print("[mania-replay-lab] 已经有实例在 %d 端口运行，这次不再启动：%s" % (running, url), flush=True)
+    log("[startup] 检测到已有实例（端口 %d），本次启动跳过" % running)
+    if not args.no_open:
+        webbrowser.open(url)
+    return True
+
+
+def main() -> int:
+    args = _parse_args()
 
     if args.songs:
         os.environ["MANIA_SONGS_ROOT"] = args.songs
@@ -1445,76 +1778,43 @@ def main() -> int:
 
     _clean_chunks()
 
-    # 多开检测：已经有一个实例在跑就直接复用，不再起第二个。
-    # 两个实例会各占一份内存、各扫一遍曲库，port.txt 还会被后起的覆盖，
-    # 结果是"先起的那个对启动器隐身"——用户点停止也停不掉它。
-    running = None if args.allow_multi else _running_instance(args.port)
-    if running:
-        url = "http://127.0.0.1:%d/" % running
-        print("[mania-replay-lab] 已经有实例在 %d 端口运行，这次不再启动：%s" % (running, url), flush=True)
-        log("[startup] 检测到已有实例（端口 %d），本次启动跳过" % running)
-        if not args.no_open:
-            webbrowser.open(url)
+    if _reuse_running_instance(args):
         return 0
 
-    port = args.port
-    for _ in range(20):
-        if _port_free(port):
-            break
-        port += 1
-
-    try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    except OSError as e:
-        report = crashreport.write("启动失败：端口绑定不上", e, context={"端口": port})
-        print("[mania-replay-lab] 启动失败：%r%s" % (
-            e, "\n报告：%s" % report if report else ""), flush=True)
-        log("[startup] 端口 %d 绑定失败：%r" % (port, e))
+    port = _pick_port(args.port)
+    httpd = _bind_server(port)
+    if httpd is None:
         return 1
-    httpd.daemon_threads = True
     url = "http://127.0.0.1:%d/" % port
-    # 端口被占时会往后挪，把真实端口写出去，免得打开的是上一次的旧服务
-    try:
-        with open(PORT_FILE, "w", encoding="ascii") as f:
-            f.write(str(port))
-        with open(PID_FILE, "w", encoding="ascii") as f:
-            f.write(str(os.getpid()))
-    except OSError:
-        pass
+    _write_runtime_files(port)
     print("[mania-replay-lab] 服务已启动：%s" % url, flush=True)
     if port != args.port:
         print("[mania-replay-lab] 提示：%d 端口被占用，改用了 %d（旧实例可以先关掉）" % (args.port, port), flush=True)
     print("[mania-replay-lab] 曲库：%s" % (", ".join(default_songs_roots()) or "未找到"), flush=True)
 
-    # 后台预热曲库索引（不阻塞启动）
-    def warm():
-        roots = default_songs_roots()
-        if roots:
-            try:
-                lib = get_library(roots[0])
-                st = lib.stats()
-                print("[mania-replay-lab] 曲库索引完成：%d 张谱面（新算 %d / 复用 %d，%.0f ms）"
-                      % (len(lib.entries), st["hashed"], st["reused"], st["buildMs"]), flush=True)
-                log("[startup] 曲库索引 %d 张（新算 %d 复用 %d，%.0f ms）"
-                    % (len(lib.entries), st["hashed"], st["reused"], st["buildMs"]))
-            except Exception as e:  # noqa: BLE001
-                # 预热失败不影响主流程（第一次搜索会重扫），但不能一点痕迹都不留
-                log("[startup] 曲库预热失败：%r" % (e,))
+    threading.Thread(target=_warm_library, daemon=True).start()
 
-    threading.Thread(target=warm, daemon=True).start()
+    if not args.no_hotkey:
+        # 设置里存过就以设置为准（存空串表示用户关掉了），没存过才用默认值；
+        # 命令行 --hotkey 优先级最高，方便临时试另一个键。
+        saved = config_store.read(CACHE_DIR)
+        combo = args.hotkey or (str(saved.get("quickHotkey") or "")
+                                if "quickHotkey" in saved else "Shift+F2")
+        if not combo:
+            print("[mania-replay-lab] 快捷导入已关闭（设置页填一个快捷键可重新开启）", flush=True)
+            log("[startup] 快捷导入已关闭")
+        else:
+            started, why = hotkey.start(_on_quick_hotkey, combo)
+            if started:
+                print("[mania-replay-lab] 快捷导入已就绪：先在结算屏按 F2，再按 %s"
+                      % hotkey.status().get("combo", combo), flush=True)
+                log("[startup] 快捷导入热键 %s 已注册" % hotkey.status().get("combo", combo))
+            else:
+                print("[mania-replay-lab] 快捷导入的热键没注册上：%s" % why, flush=True)
+                log("[startup] 快捷导入热键注册失败：%s" % why)
 
-    # 页面关掉就退出：每 5 秒看一次有没有活着的页面
     if not args.keep_alive:
-        def watch():
-            while True:
-                time.sleep(5.0)
-                if WATCHDOG.armed and not WATCHDOG.any_alive():
-                    log("[watchdog] 没有任何页面在线，服务退出")
-                    print("[mania-replay-lab] 页面已关闭，服务退出。", flush=True)
-                    httpd.shutdown()
-                    return
-
-        threading.Thread(target=watch, daemon=True).start()
+        threading.Thread(target=_watch_pages, args=(httpd,), daemon=True).start()
 
     if not args.no_open:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
@@ -1522,6 +1822,8 @@ def main() -> int:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        hotkey.stop()
     return 0
 
 
