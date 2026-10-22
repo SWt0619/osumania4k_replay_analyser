@@ -168,10 +168,6 @@ class JudgedNote:
         return self.severity_for("v1")
 
     @property
-    def is_error(self) -> bool:
-        return self.is_error_for("v1")
-
-    @property
     def is_flaw(self) -> bool:
         return self.is_flaw_for("v1")
 
@@ -271,9 +267,6 @@ class MatchResult:
             units.append((t, tail, n.body_break or tail == "miss"))
         units.sort(key=lambda u: u[0])
         return units
-
-    def v2_units(self) -> list[tuple[float, str, bool]]:
-        return self.units("v2")
 
     def score_v2_parts(self, mode: str = "v2") -> dict:
         """ScoreV2 的两段（准度 / 连击比例），stable 与 lazer 两种配比共用。"""
@@ -594,6 +587,53 @@ def _worse(a: str, b: str) -> str:
     return b if _JUDGE_RANK.get(b, -1) < _JUDGE_RANK.get(a, -1) else a
 
 
+def _hold_without_release(item: JudgedNote, windows: dict[str, float],
+                          windows_v2: dict[str, float], algo: str) -> None:
+    """没有松手记录：按住到回放结束，尾判跟随头判。
+
+    这是"回放到结尾还按着"的正常情况（长条没结束就存档），不是漏接。
+    """
+    item.release_delta = 0.0
+    item.tail_judgement = item.head_judgement
+    item.judgement_v2 = item.head_judgement
+    item.head_judgement_classic = (
+        "miss" if item.delta is None else judge_with_windows(item.delta, windows)
+    )
+    item.tail_judgement_classic = item.head_judgement_classic
+    item.judgement_classic = item.head_judgement_classic
+    item.judgement = _hold_judgement(item.delta, 0.0, windows, algo=algo)
+    item.dropped = item.judgement == "miss"
+
+
+def _hold_with_release(item: JudgedNote, tail_rel: float, body_break: bool,
+                       windows: dict[str, float], windows_v2: dict[str, float],
+                       algo: str) -> None:
+    """有松手记录：V1 走合并口径，V2 / Classic 走头尾分判。"""
+    # V1：合并口径；体中松手封顶 MEH
+    item.judgement = _hold_judgement(item.delta, item.release_delta, windows, body_break, algo=algo)
+    item.dropped = item.judgement == "miss"
+
+    # V2：尾判窗口 1.5 倍；"first" 口径下按第一次松手判
+    tail = judge_with_windows(tail_rel - item.end_time, windows_v2, 1.5)
+    # 官方 DrawableHoldNoteTail.GetCappedResult：头没打中或体中断开过，
+    # 尾判再准也最高只能到 MEH。面条图里这条很关键，否则断开的尾巴会被算成 300。
+    if (item.head_judgement == "miss" or body_break) and tail != "miss":
+        tail = "meh"
+    item.tail_judgement = tail
+    item.judgement_v2 = _worse(item.head_judgement, tail)
+
+    # Classic：窗口用 stable 的（windows），头尾仍然分开判，尾窗口也放大 1.5 倍
+    head_classic = (
+        "miss" if item.delta is None else judge_with_windows(item.delta, windows)
+    )
+    tail_classic = judge_with_windows(tail_rel - item.end_time, windows, 1.5)
+    if (head_classic == "miss" or body_break) and tail_classic != "miss":
+        tail_classic = "meh"
+    item.head_judgement_classic = head_classic
+    item.tail_judgement_classic = tail_classic
+    item.judgement_classic = _worse(head_classic, tail_classic)
+
+
 def _apply_hold_tails(
     notes: list[JudgedNote],
     presses_by_col: list[list[float]],
@@ -637,17 +677,7 @@ def _apply_hold_tails(
         )
 
         if not after:
-            # 没有松手记录：按住到回放结束，尾判跟随头判
-            item.release_delta = 0.0
-            item.tail_judgement = item.head_judgement
-            item.judgement_v2 = item.head_judgement
-            item.head_judgement_classic = (
-                "miss" if item.delta is None else judge_with_windows(item.delta, windows)
-            )
-            item.tail_judgement_classic = item.head_judgement_classic
-            item.judgement_classic = item.head_judgement_classic
-            item.judgement = _hold_judgement(item.delta, 0.0, windows, algo=algo)
-            item.dropped = item.judgement == "miss"
+            _hold_without_release(item, windows, windows_v2, algo)
             continue
 
         tail_rel = after[0] if HOLD_TAIL_POLICY == "first" else after[-1]
@@ -658,30 +688,58 @@ def _apply_hold_tails(
         # V1 合并判定用最后一次松手，release_delta 也留给页面显示
         item.release_delta = after[-1] - item.end_time
         item.body_break = body_break
+        _hold_with_release(item, tail_rel, body_break, windows, windows_v2, algo)
 
-        # V1：合并口径；体中松手封顶 MEH
-        item.judgement = _hold_judgement(item.delta, item.release_delta, windows, body_break, algo=algo)
-        item.dropped = item.judgement == "miss"
 
-        # V2：尾判窗口 1.5 倍；"first" 口径下按第一次松手判
-        tail = judge_with_windows(tail_rel - item.end_time, windows_v2, 1.5)
-        # 官方 DrawableHoldNoteTail.GetCappedResult：头没打中或体中断开过，
-        # 尾判再准也最高只能到 MEH。面条图里这条很关键，否则断开的尾巴会被算成 300。
-        if (item.head_judgement == "miss" or body_break) and tail != "miss":
-            tail = "meh"
-        item.tail_judgement = tail
-        item.judgement_v2 = _worse(item.head_judgement, tail)
+def _drain_missed(objs: list[HitObject], idx: int, until: float,
+                  windows: dict[str, float], out: list[JudgedNote]) -> int:
+    """把 until 之前已经不可能再被命中的物件记成漏接，返回新的物件下标。
 
-        # Classic：窗口用 stable 的（windows），头尾仍然分开判，尾窗口也放大 1.5 倍
-        head_classic = (
-            "miss" if item.delta is None else judge_with_windows(item.delta, windows)
-        )
-        tail_classic = judge_with_windows(tail_rel - item.end_time, windows, 1.5)
-        if (head_classic == "miss" or body_break) and tail_classic != "miss":
-            tail_classic = "meh"
-        item.head_judgement_classic = head_classic
-        item.tail_judgement_classic = tail_classic
-        item.judgement_classic = _worse(head_classic, tail_classic)
+    判据用 meh 窗口：到了 `until - meh` 还没被按到，之后任何按键都超出命中窗口了。
+    """
+    while idx < len(objs) and objs[idx].time < until - windows["meh"]:
+        out.append(_make_miss(objs[idx]))
+        idx += 1
+    return idx
+
+
+def _settle_hold(obj: HitObject, press_time: float, head: str,
+                 release_delta: float | None, windows: dict[str, float],
+                 windows_v2: dict[str, float]) -> JudgedNote:
+    """长条松开时结算判定（C 算法用）。
+
+    release_delta 为 None 表示回放里没有松手记录（一直按到结尾）：按 0 处理，
+    但仍然是"尾判跟随头判"的意思，不是"偏了 0 毫秒"的巧合。
+
+    体中层松过手会把尾判封顶在 MEH（对应官方 DrawableHoldNoteTail.GetCappedResult），
+    并记 body_break；面条图里这条很关键，否则断开的尾巴会被算成 300。
+    """
+    if release_delta is None:
+        release_delta = 0.0
+    delta = press_time - obj.time
+    tail = judge_with_windows(release_delta, windows_v2, 1.5)
+    body_break = release_delta < -windows["meh"]
+    if (head == "miss" or body_break) and tail != "miss":
+        tail = "meh"
+    head_classic = judge_with_windows(delta, windows)
+    tail_classic = judge_with_windows(release_delta, windows, 1.5)
+    if (head_classic == "miss" or body_break) and tail_classic != "miss":
+        tail_classic = "meh"
+    item = JudgedNote(
+        index=obj.index, obj_index=obj.index, column=obj.column, note_time=obj.time,
+        is_hold=True, end_time=obj.end_time,
+        judgement=_hold_judgement(delta, release_delta, windows, body_break),
+        delta=delta, press_time=press_time,
+        release_delta=release_delta,
+        head_judgement=head, tail_judgement=tail,
+        judgement_v2=_worse(head, tail),
+        head_judgement_classic=head_classic,
+        tail_judgement_classic=tail_classic,
+        judgement_classic=_worse(head_classic, tail_classic),
+        body_break=body_break,
+    )
+    item.dropped = item.judgement == "miss"
+    return item
 
 
 def _match_state_machine(
@@ -694,7 +752,7 @@ def _match_state_machine(
 ) -> MatchResult:
     """C 算法：按列逐事件模拟 DrawableHoldNote 的按住状态。
 
-    和 A/B 的差别在头判：A/B 先做全局贪心配对，再补尾判；这里按键事件来一个处理一个，
+    和 A 口径的差别在头判：A 先做全局贪心配对，再补尾判；这里按键事件来一个处理一个，
     当前按住的键只属于一个长条，松开就结算它的尾判。连续/重叠长条时松手归属更接近官方，
     但同帧多事件的先后顺序仍然还原不了（回放里没有这个信息）。
     """
@@ -718,62 +776,26 @@ def _match_state_machine(
     for p in presses:
         if not (0 <= p.column < keys):
             ghosts.append(GhostPress(time=p.time, column=p.column))
+
     for col in range(keys):
         objs = sorted(by_col[col], key=lambda o: o.time)
+        # 同一时刻先处理按下再处理松手：长条的开头总在结尾之前
         events = [(t, 0) for t in press_by_col[col]] + [(t, 1) for t in rel_by_col[col]]
         events.sort(key=lambda e: (e[0], e[1]))
+
         idx = 0
-        active: HitObject | None = None
-        active_press = 0.0
-        active_head = "miss"
-
-        def flush_misses(until: float) -> None:
-            nonlocal idx
-            while idx < len(objs) and objs[idx].time < until - windows["meh"]:
-                out.append(_make_miss(objs[idx]))
-                idx += 1
-
-        def finish_active(tail_time: float, release_delta: float | None) -> None:
-            nonlocal active
-            if active is None:
-                return
-            obj = active
-            delta = active_press - obj.time
-            if release_delta is None:
-                release_delta = 0.0
-            tail = judge_with_windows(release_delta, windows_v2, 1.5)
-            body_break = release_delta < -windows["meh"]
-            if (active_head == "miss" or body_break) and tail != "miss":
-                tail = "meh"
-            head_classic = judge_with_windows(delta, windows)
-            tail_classic = judge_with_windows(release_delta, windows, 1.5)
-            if (head_classic == "miss" or body_break) and tail_classic != "miss":
-                tail_classic = "meh"
-            item = JudgedNote(
-                index=obj.index, obj_index=obj.index, column=col, note_time=obj.time,
-                is_hold=True, end_time=obj.end_time,
-                judgement=_hold_judgement(delta, release_delta, windows, body_break),
-                delta=delta, press_time=active_press,
-                release_delta=release_delta,
-                head_judgement=active_head, tail_judgement=tail,
-                judgement_v2=_worse(active_head, tail),
-                head_judgement_classic=head_classic,
-                tail_judgement_classic=tail_classic,
-                judgement_classic=_worse(head_classic, tail_classic),
-                body_break=body_break,
-            )
-            item.dropped = item.judgement == "miss"
-            out.append(item)
-            active = None
+        active: HitObject | None = None   # 当前按住的这条长条
+        active_press = 0.0                # 它的按下时刻
+        active_head = "miss"              # 它的头判（尾判要按头判封顶）
 
         for t, kind in events:
-            flush_misses(t)
+            idx = _drain_missed(objs, idx, t, windows, out)
             if kind == 0:
+                # 新的一次按下：上一条还按着的长条到此为止（没有松手记录，按到结尾算）
                 if active is not None:
-                    finish_active(active.end_time, None)
-                while idx < len(objs) and objs[idx].time < t - windows["meh"]:
-                    out.append(_make_miss(objs[idx]))
-                    idx += 1
+                    out.append(_settle_hold(active, active_press, active_head, None,
+                                            windows, windows_v2))
+                    active = None
                 if idx >= len(objs):
                     ghosts.append(GhostPress(time=t, column=col))
                     continue
@@ -785,21 +807,21 @@ def _match_state_machine(
                 head = judge_with_windows(delta, windows_v2)
                 idx += 1
                 if obj.is_hold and obj.end_time is not None:
-                    active = obj
-                    active_press = t
-                    active_head = head
+                    active, active_press, active_head = obj, t, head
                 else:
                     item = _make_hit(obj, t, delta, judge_offset(delta, od_value))
                     item.head_judgement = head
                     item.judgement_v2 = head
                     out.append(item)
-            else:
-                if active is not None:
-                    finish_active(t, t - active.end_time)
+            elif active is not None:
+                out.append(_settle_hold(active, active_press, active_head,
+                                        t - active.end_time, windows, windows_v2))
+                active = None
 
-        flush_misses(float("inf"))
+        idx = _drain_missed(objs, idx, float("inf"), windows, out)
         if active is not None:
-            finish_active(active.end_time, None)
+            out.append(_settle_hold(active, active_press, active_head, None,
+                                    windows, windows_v2))
 
     out.sort(key=lambda x: (x.note_time, x.column))
     for i, item in enumerate(out):
@@ -819,7 +841,9 @@ def match_replay(
     """执行配对。
 
     extra_window：可选的额外宽容（ms），用于"如果放宽一点会怎样"的对照实验。
-    algo：A = 当前贪心 + 尾判；B = 仅尾判状态机；C = 头判尾判都走事件流。
+    algo：C = 头判尾判都走事件流（服务端固定用这一条）；其余值走"A 口径"——
+    先全局贪心配对、再补尾判，供测试与对照实验用。D 只影响 A 口径下的尾判宽容，
+    C 口径不读这个参数。
     """
     od_value = beatmap.od if od is None else od
     windows = judgement_windows(od_value)
