@@ -637,13 +637,14 @@ def _score_ability(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
         s += 0.06 * clamp((f.recent_abs_median - 16) / 30.0, 0.0, 1.0)
 
     # 7c) 耐力不足：同一类键型连续 6 段之后，失误明显高于前面那 6 段（见 _stamina_profile）。
-    #     只在**对照窗口之后**的失误上给分，而且只有统计上站得住才会写进 profile，
-    #     所以权重不必给太高——它解释的是"为什么这时候会错"，不是"这一击有多难"。
+    #     分数照给（让这一段里的失误仍然算"能力问题"），提示则按冷却时间间隔出现：
+    #     整段每条都挂会刷屏，只挂第一条又在持续下滑时说一句就没了。
     st = profile.get("stamina") or {}
     late_from = st.get("lateFrom")
     if st.get("drop") and late_from is not None and f.note.note_time >= late_from:
         s += 0.18
-        reasons.append(st.get("reason") or "歌曲后段的失误明显增多，是耐力问题")
+        if is_stamina_hint(st, f.note.obj_index):
+            reasons.insert(0, STAMINA_HINT)
 
     s += _ability_collapse_terms(f, reasons)
     return clamp(s, 0.0, 1.0), reasons
@@ -703,6 +704,20 @@ def _score_rhythm(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
     return clamp(s, 0.0, 1.0), reasons
 
 
+def _distraction_signature(f: ErrorFeature) -> tuple[bool, bool, float]:
+    """分神的两条"形状"签名：手停下过、偏一下又立刻回正。
+
+    返回（停顿, 断片, 断片幅度）。跳过判定本身不算签名 —— 那是能力问题的形状，
+    两者要分开，否则"跟不上"会被写成"走神"，给出的建议方向完全相反。
+    """
+    paused = f.gap_before_ratio >= 2.5 and f.gap_before >= 900
+    jump = 0.0
+    if f.note.delta is not None and f.baseline_abs > 0:
+        jump = abs(abs(f.note.delta) - f.baseline_abs)
+    broke = jump >= 40.0 and f.recovery >= 0.7
+    return paused, broke, jump
+
+
 def _score_distraction(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
     """分神：要有"注意力断了一下"的**形状**，而不是"这一击打得不好"。
 
@@ -721,12 +736,7 @@ def _score_distraction(f: ErrorFeature, profile: dict) -> tuple[float, list[str]
     s = 0.0
 
     burst_n = f.errors_near_1_5s
-    paused = f.gap_before_ratio >= 2.5 and f.gap_before >= 900
-    jump = 0.0
-    if f.note.delta is not None and f.baseline_abs > 0:
-        jump = abs(abs(f.note.delta) - f.baseline_abs)
-    broke = jump >= 40.0 and f.recovery >= 0.7
-
+    paused, broke, jump = _distraction_signature(f)
     # 注意：「1.5 秒内连着错几个」**不是**分神的证据。
     # 手一直在动却连着错，说明这一段跟不上（能力）；真正的分神要看"手停过"——
     # 停顿之后再错，或者突然偏很远然后立刻回正。把成串的错判成分神，
@@ -821,9 +831,6 @@ def _score_slip(f: ErrorFeature, profile: dict) -> tuple[float, list[str]]:
     return clamp(s, 0.0, 1.0), reasons
 
 
-# --------------------------------------------------------------------------- 画像
-
-
 # ---------------------------------------------------------------------------
 # 耐力：同一大类连续 6 段之后，失误有没有明显爬升
 #
@@ -839,6 +846,12 @@ STAMINA_MIN_TEST_FLAWS = 3
 STAMINA_MIN_RISE = 0.02            # "明显提升"：至少多 2 个百分点
 STAMINA_MIN_Z = 2.0                # 且两比例检验单侧 z ≥ 2（约 97.5%）
 STAMINA_DENSITY_TOLERANCE = 1.25   # 同一大类里密度涨了 25% 以上 → 是变难，不是没体力
+
+# 失误清单里给耐力窗口点名用的短句。
+# 整段每一条都挂会刷屏；只挂第一条又会在真的持续下滑时"说一句就没了"。
+# 所以按冷却时间重复：同一句提示至少隔 STAMINA_HINT_COOLDOWN_MS 再出现一次。
+STAMINA_HINT = "此处开始疑似出现耐力不足导致的失误"
+STAMINA_HINT_COOLDOWN_MS = 15000.0
 
 # ±4 秒窗口最多看多少个物件。正常谱面 4 秒里只有几十个（就算 30 音符/秒也只有 120 个），
 # 这个上限只在退化谱面（物件全挤在同一时刻）或坏文件上生效：那种图上"每个失误切一次窗口"
@@ -945,6 +958,46 @@ def _two_proportion_z(n0: int, f0: int, n1: int, f1: int) -> float:
     return (p1 - p0) / se
 
 
+def _stamina_candidate(run: list[_Segment], notes_by_index: dict[int, JudgedNote],
+                       density_of: dict[int, float], mode: str = "v1") -> dict | None:
+    """一条同类长段能不能构成"耐力下降"的证据；不成立时返回 None。
+
+    前 STAMINA_RUN_BLOCKS 段是基线（这类写法平时什么水平），从第 7 段起是对照组。
+    四条判据缺一不可，任何一条不满足就当作"没有证据"，而不是"证据弱"。
+    """
+    if len(run) <= STAMINA_RUN_BLOCKS or run[0].category == "calm":
+        return None
+    split = run[STAMINA_RUN_BLOCKS].start_index
+    n0, f0, d0 = _window_stats(notes_by_index, run[0].start_index, split - 1, density_of, mode)
+    n1, f1, d1 = _window_stats(notes_by_index, split, run[-1].end_index, density_of, mode)
+    if n0 <= 0 or n1 < STAMINA_MIN_TEST_NOTES or f1 < STAMINA_MIN_TEST_FLAWS:
+        return None
+    p0 = f0 / n0
+    p1 = f1 / n1
+    rise = p1 - p0
+    if rise < STAMINA_MIN_RISE:
+        return None
+    # 同一大类里密度明显上升 → 是这一段变难了，不是体力问题
+    if d0 > 0 and d1 > d0 * STAMINA_DENSITY_TOLERANCE:
+        return None
+    z = _two_proportion_z(n0, f0, n1, f1)
+    if z < STAMINA_MIN_Z:
+        return None
+    return {
+        "drop": True,
+        "lateFrom": run[STAMINA_RUN_BLOCKS].start_time,
+        "category": run[0].category,
+        "label": patterns.CATEGORY_LABEL.get(run[0].category, run[0].category),
+        "fromTime": run[0].start_time,
+        "toTime": run[-1].end_time,
+        "baseNotes": n0, "baseFlaws": f0, "baseRate": round(p0, 3),
+        "baseDensity": round(d0, 1),
+        "testNotes": n1, "testFlaws": f1, "testRate": round(p1, 3),
+        "testDensity": round(d1, 1),
+        "rise": round(rise, 3), "z": round(z, 2), "blocks": len(run),
+    }
+
+
 def _stamina_profile(
     notes: list[JudgedNote],
     segments: list[_Segment],
@@ -953,13 +1006,7 @@ def _stamina_profile(
 ) -> dict:
     """耐力：在**同一种键型**的长段里，看后半程失误有没有明显高于前半程。
 
-    判据（都过了才算）：
-      1. 同一大类连续 > 6 段（约 450 个物件），前 6 段建基线、第 7 段起做对照；
-      2. 对照组至少 40 个音符且至少 3 个失误（否则比例不可信）；
-      3. 失误率至少高 2 个百分点，且两比例检验单侧 z ≥ 2；
-      4. 同一大类里密度没有明显上升（≤ 基线的 1.25 倍）——
-         BPM 往上爬导致同一类键型变难时，不算体力问题。
-
+    判据都在 _stamina_candidate 里（段数、样本量、涨幅与显著性、密度不变）。
     多条长段都满足时取 z 最大的那条；"过渡"段不参与（低密度段的失误更像走神）。
     """
     empty = {
@@ -977,37 +1024,9 @@ def _stamina_profile(
     by_index = {n.obj_index: n for n in notes}
     best: dict | None = None
     for run in _same_category_runs(segments):
-        if len(run) <= STAMINA_RUN_BLOCKS or run[0].category == "calm":
+        cand = _stamina_candidate(run, by_index, density_of, mode)
+        if cand is None:
             continue
-        split = run[STAMINA_RUN_BLOCKS].start_index
-        n0, f0, d0 = _window_stats(by_index, run[0].start_index, split - 1, density_of, mode)
-        n1, f1, d1 = _window_stats(by_index, split, run[-1].end_index, density_of, mode)
-        if n0 <= 0 or n1 < STAMINA_MIN_TEST_NOTES or f1 < STAMINA_MIN_TEST_FLAWS:
-            continue
-        p0 = f0 / n0
-        p1 = f1 / n1
-        rise = p1 - p0
-        if rise < STAMINA_MIN_RISE:
-            continue
-        if d0 > 0 and d1 > d0 * STAMINA_DENSITY_TOLERANCE:
-            continue
-        z = _two_proportion_z(n0, f0, n1, f1)
-        if z < STAMINA_MIN_Z:
-            continue
-        cand = {
-            **empty,
-            "drop": True,
-            "lateFrom": run[STAMINA_RUN_BLOCKS].start_time,
-            "category": run[0].category,
-            "label": patterns.CATEGORY_LABEL.get(run[0].category, run[0].category),
-            "fromTime": run[0].start_time,
-            "toTime": run[-1].end_time,
-            "baseNotes": n0, "baseFlaws": f0, "baseRate": round(p0, 3),
-            "baseDensity": round(d0, 1),
-            "testNotes": n1, "testFlaws": f1, "testRate": round(p1, 3),
-            "testDensity": round(d1, 1),
-            "rise": round(rise, 3), "z": round(z, 2), "blocks": len(run),
-        }
         if best is None or cand["z"] > best["z"]:
             best = cand
 
@@ -1130,10 +1149,39 @@ def _decide(f: ErrorFeature, profile: dict) -> Attribution:
     )
 
 
+def is_stamina_hint(stamina: dict | None, obj_index: int) -> bool:
+    """这一条失误该不该带耐力提示（判断见 _mark_stamina_hints）。"""
+    return obj_index in ((stamina or {}).get("hintIndexes") or ())
+
+
+def _mark_stamina_hints(profile: dict, feats: list) -> None:
+    """挑出耐力窗口里该带提示的失误，按冷却时间间隔重复。
+
+    只在第一条上挂一次的话，后段继续掉也看不出来；每条都挂又会一屏刷十几次。
+    折中成"同一句提示 15 秒内不重复"：第一条一定出现，之后每过 15 秒再提醒一次，
+    中间那些失误照常按能力判，理由回到密度/键型上。
+    """
+    st = profile.get("stamina") or {}
+    late = st.get("lateFrom")
+    if not (st.get("drop") and late is not None):
+        return
+    picked: list[int] = []
+    last: float | None = None
+    for f in feats:                      # feats 按物件时间升序
+        t = f.note.note_time
+        if t < late:
+            continue
+        if last is None or t - last >= STAMINA_HINT_COOLDOWN_MS:
+            picked.append(f.note.obj_index)
+            last = t
+    st["hintIndexes"] = picked
+
+
 def classify_all(match: MatchResult, contexts: list[patterns.NoteContext],
                  blocks: list | None = None, mode: str = "v1") -> tuple[list[Attribution], dict]:
     profile = build_profile(match, contexts, blocks, mode)
     feats = build_features(match, contexts, profile.get("density_profile", []), mode)
+    _mark_stamina_hints(profile, feats)
     out = [_decide(f, profile) for f in feats]
     return out, summarize(out, profile)
 
