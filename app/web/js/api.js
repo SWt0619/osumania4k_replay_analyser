@@ -106,6 +106,36 @@
       return jsonFetch("/api/local-replays");
     },
 
+    // 快捷导入：先在结算屏按 F2 导出，再按我们的组合键；结果留在服务端，页面按 token 取。
+    // wait>0 时长轮询——热键一按下服务端就叫醒请求，加载提示不用等到分析结束才显示。
+    quickPending(since, waitSeconds) {
+      return jsonFetch("/api/quick/pending?since=" + Number(since || 0) +
+                       "&wait=" + Number(waitSeconds || 0));
+    },
+
+    // 手动触发一次「分析最近导出的回放」（热键被占用时的兜底）。
+    // force=true 表示同一份文件也要重算一遍（切换判定算法时用）。
+    quickImport(algo, force) {
+      return jsonFetch("/api/quick-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ algo: algo || "C", force: !!force }),
+      });
+    },
+
+    // 快捷导入的快捷键：读当前值 / 换一个（空串表示关闭）
+    hotkey() {
+      return jsonFetch("/api/hotkey");
+    },
+
+    saveHotkey(combo) {
+      return jsonFetch("/api/hotkey", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ combo: combo || "" }),
+      });
+    },
+
     analyzeLocal(name, algo) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
