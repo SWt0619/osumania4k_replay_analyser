@@ -54,6 +54,10 @@
     // 判定算法（仅调试用）：A 当前算法、B 仅尾判状态机、C 头尾都走事件流。
     judgeAlgo: "C",
     lastReplay: null,   // 最后一次回放来源：{kind:"local", name} 或 {kind:"file", file}
+    // 失误清单过滤：只影响显示，不参与判定
+    hideLowConfidence: false,
+    confThreshold: 0.5,
+    theme: "dark",
   };
 
   // 回放页的两个滑杆记在本地，下次打开还是上次的设置
@@ -68,6 +72,11 @@
       if (typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1) state.volume = p.volume;
       if (p.judgeMode === "v1" || p.judgeMode === "v2" || p.judgeMode === "classic") state.judgeMode = p.judgeMode;
       if (p.judgeAlgo === "C" || p.judgeAlgo === "D") state.judgeAlgo = p.judgeAlgo;
+      if (typeof p.hideLowConfidence === "boolean") state.hideLowConfidence = p.hideLowConfidence;
+      if (typeof p.confThreshold === "number" && p.confThreshold >= 0 && p.confThreshold <= 1) {
+        state.confThreshold = p.confThreshold;
+      }
+      if (p.theme === "dark" || p.theme === "sakura") state.theme = p.theme;
     } catch (e) { /* 隐私模式下拿不到就算了 */ }
   }
   function savePrefs() {
@@ -78,6 +87,9 @@
         volume: state.volume,
         judgeMode: state.judgeMode,
         judgeAlgo: state.judgeAlgo,
+        hideLowConfidence: state.hideLowConfidence,
+        confThreshold: state.confThreshold,
+        theme: state.theme,
       }));
     } catch (e) { /* ignore */ }
   }
@@ -1013,12 +1025,70 @@
   }
 
   // ---------------------------------------------------------------- 失误清单
+  function renderLnStats(data) {
+    const card = $("lnCard");
+    const box = $("lnStats");
+    if (!card || !box) return;
+    const stats = data && data.lnStats;
+    if (!stats || !stats.total) {
+      card.hidden = true;
+      box.textContent = "";
+      return;
+    }
+    card.hidden = false;
+    box.textContent = "";
+    const fmt = (v) => (v == null ? "—" : (v > 0 ? "+" : "") + Number(v).toFixed(1) + "ms");
+
+    const head = document.createElement("div");
+    head.className = "ln-total";
+    const headLabel = document.createElement("span");
+    headLabel.textContent = "总平均";
+    const headValue = document.createElement("b");
+    headValue.textContent = fmt(stats.mean);
+    const headCount = document.createElement("em");
+    headCount.textContent = stats.total + " 个长条";
+    head.appendChild(headLabel);
+    head.appendChild(headValue);
+    head.appendChild(headCount);
+    box.appendChild(head);
+
+    const grid = document.createElement("div");
+    grid.className = "ln-cols";
+    (stats.columns || []).forEach((col) => {
+      const cell = document.createElement("div");
+      cell.className = "ln-cell";
+      if (col.mean > 0) cell.classList.add("is-late");
+      if (col.mean < 0) cell.classList.add("is-early");
+      const label = document.createElement("span");
+      label.className = "ln-lab";
+      label.textContent = (col.column + 1) + " 轨";
+      const value = document.createElement("b");
+      value.textContent = fmt(col.mean);
+      const count = document.createElement("em");
+      count.textContent = (col.count || 0) + " 个";
+      cell.appendChild(label);
+      cell.appendChild(value);
+      cell.appendChild(count);
+      grid.appendChild(cell);
+    });
+    box.appendChild(grid);
+  }
+
+  function matchesErrorFilters(e) {
+    const f = state.errorFilter || {};
+    const cat = f.cat || "all";
+    if (cat !== "all" && e.category !== cat) return false;
+    if (f.severe && e.severity < 3) return false;
+    return true;
+  }
+
   function filteredErrors() {
     if (!state.data) return [];
-    const f = state.errorFilter;
     return (state.data.errors || []).filter((e) => {
-      if (f.cat !== "all" && e.category !== f.cat) return false;
-      if (f.severe && e.severity < 3) return false;
+      if (!matchesErrorFilters(e)) return false;
+      if (state.hideLowConfidence && e.confidence != null && e.confidence < state.confThreshold) {
+        return false;
+      }
       return true;
     });
   }
@@ -1026,6 +1096,10 @@
   function renderErrorList() {
     const all = filteredErrors();
     const total = (state.data && state.data.errors ? state.data.errors.length : 0);
+    const base = (state.data && state.data.errors ? state.data.errors : []).filter(matchesErrorFilters);
+    const hidden = state.hideLowConfidence
+      ? base.filter((e) => e.confidence != null && e.confidence < state.confThreshold).length
+      : 0;
     const shown = all.slice(0, state.errorShown);
 
     // 每 30 秒一段的条数：上千条时靠时间标题分段，比无脑往下滚好找得多
@@ -1056,7 +1130,8 @@
     const sum = $("errorSummary");
     if (sum) {
       const parts = ["共 " + total + " 条"];
-      if (all.length !== total) parts.push("筛选后 " + all.length + " 条");
+      if (hidden) parts.push("已隐藏 " + hidden + " 条低可信度（<" + Math.round(state.confThreshold * 100) + "%）");
+      if (all.length !== total) parts.push("当前筛选 " + all.length + " 条");
       parts.push("已显示 " + shown.length + " 条");
       sum.textContent = parts.join(" · ");
     }
@@ -1068,6 +1143,58 @@
     if (moreBox) moreBox.hidden = remain <= 0;
     if (more) more.textContent = "再看 " + Math.min(ERROR_PAGE, remain) + " 条（剩 " + remain + " 条）";
     if (allBtn) allBtn.hidden = remain <= ERROR_PAGE;
+  }
+
+  function syncThemeUI() {
+    document.querySelectorAll("#themeToggle [data-theme]").forEach((btn) => {
+      btn.classList.toggle("is-active", btn.dataset.theme === state.theme);
+    });
+  }
+
+  function applyTheme(theme) {
+    const next = theme === "sakura" ? "sakura" : "dark";
+    state.theme = next;
+    document.documentElement.setAttribute("data-theme", next);
+    savePrefs();
+    syncThemeUI();
+    if (state.player) {
+      state.player.setOptions({ theme: readTheme() });
+      state.player.render();
+    }
+    if (state.data || state.chartOnly) drawChartsForTab(state.tab);
+  }
+
+  function syncLowConfidenceUI() {
+    const cb = $("hideLowConfidence");
+    if (cb) cb.checked = state.hideLowConfidence;
+    const input = $("confThreshold");
+    if (input) input.value = String(Math.round(state.confThreshold * 100));
+    const btn = $("btnHideLowConf");
+    if (btn) {
+      btn.classList.toggle("is-on", state.hideLowConfidence);
+      btn.textContent = state.hideLowConfidence ? "显示全部" : "隐藏低可信度";
+    }
+  }
+
+  function setHideLowConfidence(on) {
+    state.hideLowConfidence = !!on;
+    savePrefs();
+    syncLowConfidenceUI();
+    state.errorShown = 50;
+    if (state.data) renderErrorList();
+  }
+
+  function updateConfThreshold() {
+    const input = $("confThreshold");
+    if (!input) return;
+    let v = Number(input.value);
+    if (!Number.isFinite(v)) v = 50;
+    v = Math.max(0, Math.min(100, v));
+    input.value = String(v);
+    state.confThreshold = v / 100;
+    savePrefs();
+    state.errorShown = 50;
+    if (state.data) renderErrorList();
   }
 
   // ---------------------------------------------------------------- 相似谱面
@@ -1343,6 +1470,7 @@
     window.UI.renderPatternShare(view);
     window.UI.renderJudgeBars(view);
     window.UI.renderRawTable(view);
+    renderLnStats(data);
 
     // 误差直方图标题里的摘要
     const sm = view.summary;
@@ -2086,6 +2214,19 @@
       });
     }
 
+    $("btnHideLowConf").addEventListener("click", () => {
+      setHideLowConfidence(!state.hideLowConfidence);
+    });
+    $("hideLowConfidence").addEventListener("change", (ev) => {
+      setHideLowConfidence(!!(ev.target && ev.target.checked));
+    });
+    $("confThreshold").addEventListener("change", updateConfThreshold);
+    syncLowConfidenceUI();
+
+    document.querySelectorAll("#themeToggle [data-theme]").forEach((btn) => {
+      btn.addEventListener("click", () => applyTheme(btn.dataset.theme));
+    });
+
     $("btnToggleErrors").addEventListener("click", () => {
       state.errorsOnly = !state.errorsOnly;
       $("btnToggleErrors").classList.toggle("is-on", state.errorsOnly);
@@ -2115,7 +2256,7 @@
 
   // 失误清单的筛选（类别单选 + 只看严重）与"再看 50 条"
   function bindErrorFilter() {
-    document.querySelectorAll("#errorFilters .chip-btn").forEach((btn) => {
+    document.querySelectorAll("#errorFilters .chip-btn[data-cat], #errorFilters .chip-btn[data-sev]").forEach((btn) => {
       btn.addEventListener("click", () => {
         if (btn.dataset.sev) {
           state.errorFilter.severe = !state.errorFilter.severe;
@@ -2261,6 +2402,7 @@
     bindEvents();
     setPlayIcon(false);
     loadPrefs();
+    applyTheme(state.theme);
     updateJudgeToggle();
     syncScrollUi();
     syncOffsetUi();
