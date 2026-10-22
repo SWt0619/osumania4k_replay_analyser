@@ -709,6 +709,19 @@ class _ApiMixin(_SessionView):
     # ---- 检查更新 --------------------------------------------------------
     # 只有用户打开「关于」页时才会请求，且只问 GitHub 的 latest release。
     def _check_update(self):
+        # 调试用：本地版本通常已经是最新，想测「发现新版本」分支时设这个环境变量。
+        # 例如 MANIA_FAKE_LATEST=9.9.9 会假装 GitHub 上有个 9.9.9；不设就走真实请求。
+        fake = (os.environ.get("MANIA_FAKE_LATEST") or "").strip().lstrip("vV")
+        if fake:
+            return self._json({
+                "ok": True,
+                "current": __version__,
+                "latest": fake,
+                "hasUpdate": _version_key(fake) > _version_key(__version__),
+                "url": ("https://github.com/SWt0619/osumania4k_replay_analyser"
+                        "/releases/latest"),
+                "notes": "调试用的假更新信息（MANIA_FAKE_LATEST）",
+            })
         api = ("https://api.github.com/repos/SWt0619/osumania4k_replay_analyser"
                "/releases/latest")
         try:
@@ -813,11 +826,14 @@ class _AnalyzeApiMixin(_SessionView):
             beatmap_path = _write_temp(tmp_dir, ".osu", bm_bytes)
 
         songs_root = _field(req, "songsRoot") or None
-        return self._finish_analyze(replay_path, beatmap_path, songs_root)
+        return self._finish_analyze(replay_path, beatmap_path, songs_root, _field(req, "algo") or "C")
 
-    def _finish_analyze(self, replay_path: str, beatmap_path: str | None, songs_root: str | None):
+    def _finish_analyze(self, replay_path: str, beatmap_path: str | None, songs_root: str | None,
+                        algo: str = "C"):
         """分析已落盘的回放并返回 JSON（直接上传 / 分片上传 / 本地文件夹共用）。"""
-        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root)
+        algo = algo if algo in ("C", "D") else "C"
+        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root,
+                          judge_algo=algo)
         audio, background, note_skin = _resolve_media(payload, beatmap_path, songs_root)
 
         # 谱面路径要在这里定下来：上传回放时 beatmap_path 是空的，真正的路径是
@@ -888,7 +904,9 @@ class _AnalyzeApiMixin(_SessionView):
             return self._error("找不到这个文件：" + name)
         t0 = time.time()
         log("[analyze-local] " + name)
-        resp = self._finish_analyze(replay_path, None, _field(req, "songsRoot") or None)
+        resp = self._finish_analyze(
+            replay_path, None, _field(req, "songsRoot") or None, _field(req, "algo") or "C"
+        )
         log("[analyze-local] 完成 用时 %.0f ms" % ((time.time() - t0) * 1000))
         return resp
 
@@ -1010,7 +1028,11 @@ class _ChunkUploadMixin:
                 with open(os.path.join(d, fn), "rb") as f:
                     out.write(f.read())
         try:
-            return self._finish_analyze(replay_path, beatmap_path=None, songs_root=_field(req, "songsRoot") or None)
+            return self._finish_analyze(
+                replay_path, beatmap_path=None,
+                songs_root=_field(req, "songsRoot") or None,
+                algo=_field(req, "algo") or "C",
+            )
         finally:
             try:
                 for fn in parts:
