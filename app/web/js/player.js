@@ -48,7 +48,8 @@
     // 轨道底色。osu!mania 的谱面舞台是近乎纯黑的实色（不是渐变、也不是半透明奶白），
     // 音符的高对比配色只有在黑底上才立得住。取 95% 而不是 100%，
     // 是为了让两侧的留白还能透出一丝页面底色，不至于糊成一块纯黑的洞。
-    laneBg: 'rgba(0, 0, 0, 0.95)'
+    laneBg: 'rgba(0, 0, 0, 0.95)',
+    laneLine: 'rgba(255, 255, 255, 0.12)'
   };
 
   // 主题键 -> CSS 变量名。用变量名做“事实来源”，页面改皮肤不用改 JS。
@@ -66,7 +67,8 @@
     catRhythm: '--cat-rhythm',
     catDistraction: '--cat-distraction',
     catSlip: '--cat-slip',
-    laneBg: '--lane-bg'
+    laneBg: '--lane-bg',
+    laneLine: '--lane-line'
   };
 
   // 判定码 -> 主题键。0=MAX 1=300 共用金色（都是“好”），2=200 绿，3=100 蓝，4=50 紫，5=MISS 红。
@@ -535,7 +537,7 @@
 
       // 列间 1px 分隔线。轨道底色恒为近黑，分隔线固定用极淡的白（见 LANE_LINE）。
       // 用 fillRect 而不是 stroke：1px 线用 stroke 在 DPR 非整数时特别容易糊成 2px 灰线。
-      ctx.fillStyle = LANE_LINE;
+      ctx.fillStyle = theme.laneLine || LANE_LINE;
       for (var k = 1; k < keys; k += 1) {
         ctx.fillRect(Math.round(stageLeft + k * laneW) - 0.5, 0, 1, H);
       }
@@ -794,10 +796,10 @@
       ctx.arc(cx, cy - 10, 4, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.fillStyle = LANE_LINE;
+      ctx.fillStyle = theme.laneLine || LANE_LINE;
       ctx.fillRect(cx - 22, cy + 20, 44, 2);
 
-      ctx.fillStyle = LANE_LINE;
+      ctx.fillStyle = theme.laneLine || LANE_LINE;
       ctx.fillRect(cx - 12, cy + 30, 24, 2);
 
       ctx.restore();
