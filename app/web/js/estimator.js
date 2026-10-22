@@ -42,21 +42,13 @@ async function beatmapText(session) {
   return data.text;
 }
 
-async function estimate(session, rate, opts) {
-  if (!session) return { ok: false, reason: "没有会话" };
+// 跑一整套估算链（Sunny → Azusa → Roxy）。入参就是 .osu 原文：
+// 回放页从会话取，仅看谱面页由 /api/chart 直接回传，两边跑的是同一份代码。
+async function estimateFromText(text, rate, opts) {
   const speedRate = Number(rate) > 0 ? Number(rate) : 1;
   // 几万物件的观赏图：Roxy/Azusa 的 O(n log n) 会占住主线程好几秒，
   // 这时只跑 Sunny 的快速估计，段位照样能给，页面不至于卡死。
   const fast = !!(opts && opts.fast);
-  const key = session + "|" + speedRate.toFixed(3) + (fast ? "|fast" : "");
-  if (cache.has(key)) return cache.get(key);
-
-  let text;
-  try {
-    text = await beatmapText(session);
-  } catch (e) {
-    return { ok: false, reason: (e && e.message) || "取谱面失败" };
-  }
 
   const t0Total = performance.now();
   let rc;
@@ -178,7 +170,24 @@ async function estimate(session, rate, opts) {
     timings: timings,
     ms: Math.round(performance.now() - t0Total),
   };
-  cache.set(key, out);
+  return out;
+}
+
+async function estimate(session, rate, opts) {
+  if (!session) return { ok: false, reason: "没有会话" };
+  const speedRate = Number(rate) > 0 ? Number(rate) : 1;
+  const fast = !!(opts && opts.fast);
+  const key = session + "|" + speedRate.toFixed(3) + (fast ? "|fast" : "");
+  if (cache.has(key)) return cache.get(key);
+
+  let text;
+  try {
+    text = await beatmapText(session);
+  } catch (e) {
+    return { ok: false, reason: (e && e.message) || "取谱面失败" };
+  }
+  const out = await estimateFromText(text, speedRate, { fast: fast });
+  if (out && out.ok) cache.set(key, out);
   return out;
 }
 
@@ -207,4 +216,4 @@ async function sunnyStar(session, rate) {
   }
 }
 
-window.Estimator = { estimate, sunnyStar };
+window.Estimator = { estimate, estimateFromText, sunnyStar };
