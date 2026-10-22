@@ -29,7 +29,7 @@ from .match import (
     v1_weight,
 )
 from .metrics import histogram, median, percentile, stdev, unstable_rate
-from .osr import MOD_MR, MOD_RANDOM, Replay, extract_events, mods_human, parse_osr
+from .osr import MOD_MR, MOD_RANDOM, Replay, detect_judge_mode, extract_events, judge_source, mods_human, parse_osr
 from ..version import __version__
 
 JUDGEMENT_CODE = {"perfect": 0, "great": 1, "good": 2, "ok": 3, "meh": 4, "miss": 5}
@@ -41,8 +41,8 @@ def _weight(note, mode: str = "v1") -> float:
     V1 用官方 ScoreV1 权重（MAX 与 300 同权）；V2 用判定分 ÷ 305，
     所以 V2 下只有全 MAX 才是 100%。分开写是为了时间轴、分段、总评都用同一把尺子。
     """
-    if mode == "v2":
-        return V2_ACC_VALUE.get(note.judged("v2"), 0) / 305.0
+    if mode in ("v2", "classic"):
+        return V2_ACC_VALUE.get(note.judged(mode), 0) / 305.0
     return v1_weight(note)
 
 # 时间轴分段：每段目标约 6 个音符（按密度反推时长），并夹在 250ms~2000ms 之间。
@@ -226,7 +226,7 @@ def _accumulate_buckets(
         if n.is_error_for(mode):
             acc.errors[idx] += 1
         # 单独记「漏接」和「长条断连」：时间轴上只给这两类画节点，其余判定的点太密看不出东西
-        broken = n.body_break if mode == "v2" else n.dropped
+        broken = n.body_break if mode in ("v2", "classic") else n.dropped
         if n.is_hold and broken:
             acc.breaks[idx] += 1
         elif n.judged(mode) == "miss":
@@ -392,10 +392,12 @@ def _combo_breaks(match: MatchResult, limit: int = 200, mode: str = "v1") -> lis
     out = []
     for n in match.notes:
         reason = ""
-        if mode == "v2":
-            if n.head_judgement == "miss":
+        if mode in ("v2", "classic"):
+            head = n.head_judgement_classic if mode == "classic" else n.head_judgement
+            tail = n.tail_judgement_classic if mode == "classic" else n.tail_judgement
+            if head == "miss":
                 reason = "漏接"
-            elif n.tail_judgement == "miss":
+            elif tail == "miss":
                 reason = "长按尾判失误"
             elif n.body_break:
                 reason = "长按提前松手"
@@ -430,28 +432,32 @@ def _warnings(replay: Replay, beatmap: Beatmap, presses) -> str:
     return warn
 
 
-def _compact_notes(match: MatchResult, atts: list, atts_v2: list | None = None) -> list[dict]:
+def _compact_notes(match: MatchResult, atts: list, atts_v2: list | None = None,
+                   atts_classic: list | None = None) -> list[dict]:
     """播放器与热力图用的紧凑 notes。
 
     键名压到一个字母是刻意的：完整 payload 里这一项占体积的大头（几千条 × 每条约 80 字节），
     短键名能把它砍掉一半以上，而前端只读这几个字段。
 
-    归因类别给两份（cat / cat2）：两套判定下的"失误"集合不同，切换口径时
+    归因类别给三份（cat / cat2 / catc）：三套判定下的"失误"集合不同，切换口径时
     失误清单的分类也要跟着变。时间、列、误差这些共用，不重复存。
     """
     att_by_note = {id(a.note): a for a in atts}
     att2_by_note = {id(a.note): a for a in (atts_v2 or [])}
+    att3_by_note = {id(a.note): a for a in (atts_classic or [])}
     out = []
     for n in match.notes:
         a = att_by_note.get(id(n))
         a2 = att2_by_note.get(id(n))
+        a3 = att3_by_note.get(id(n))
         out.append(
             {
                 "t": round(n.note_time, 2),
                 "c": n.column,
                 "j": JUDGEMENT_CODE.get(n.judgement, 5),
-                # V2 判定：切到 ScoreV2 口径时播放器读这个，颜色与失误过滤都用它
+                # V2 / Classic 判定：切口径时播放器读这个，颜色与失误过滤都用它
                 "j2": JUDGEMENT_CODE.get(n.judgement_v2 or n.judgement, 5),
+                "jc": JUDGEMENT_CODE.get(n.judgement_classic or n.judgement, 5),
                 "d": round(n.delta, 2) if n.delta is not None else None,
                 "h": round(n.end_time, 2) if n.is_hold and n.end_time is not None else None,
                 # 松手偏差（ms）：回放页要按它画出"实际松手的位置"，只有长按才有
@@ -463,6 +469,7 @@ def _compact_notes(match: MatchResult, atts: list, atts_v2: list | None = None) 
                 "bb": 1 if n.body_break else 0,
                 "cat": a.category if a else None,
                 "cat2": a2.category if a2 else None,
+                "catc": a3.category if a3 else None,
             }
         )
     return out
@@ -504,7 +511,7 @@ def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext],
                 "density": round(ctx.density_1s, 2) if ctx else None,
                 "chord": ctx.chord_size if ctx else None,
                 "isHold": n.is_hold,
-                "dropped": (n.body_break if mode == "v2" else n.dropped),
+                "dropped": (n.body_break if mode in ("v2", "classic") else n.dropped),
                 "bodyBreak": n.body_break,
                 "severity": n.severity_for(mode),
                 # 落在耐力窗口里才给：null 表示这条与耐力无关
@@ -523,11 +530,11 @@ def _summary(match: MatchResult, replay: Replay, atts: list, combo_breaks: list[
     """
     deltas = match.deltas(mode)
     notes = match.notes
-    v2_parts = match.score_v2_parts()
+    v2_parts = match.score_v2_parts(mode)
     # ScoreV2：osu! 现行计分，两段式（连击分 + 准度分），长按算头尾两次判定。
     # stable 的 ScoreV2 mod 是 20 万连击 / 80 万准度；lazer 默认是 1 万 / 99 万，两个都给。
-    score_v2, grade_v2 = match.score_v2()
-    score_v2_lazer, _ = match.score_v2(lazer=True)
+    score_v2, grade_v2 = match.score_v2(mode=mode)
+    score_v2_lazer, _ = match.score_v2(lazer=True, mode=mode)
     return {
         "accuracy": round(match.accuracy(mode), 2),
         # UR 官方口径：误差总体标准差 ×10，DT/HT 下还要除以倍率
@@ -766,7 +773,7 @@ def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str]
     cur_w = 0.0
     new_w = 0.0
     fixed = 0
-    fix_weight = (V2_ACC_VALUE["great"] / 305.0) if mode == "v2" else V1_WEIGHTS["great"]
+    fix_weight = (V2_ACC_VALUE["great"] / 305.0) if mode in ("v2", "classic") else V1_WEIGHTS["great"]
     for n in match.notes:
         judged = n.judged(mode)
         cur_js.append(judged)
@@ -1037,8 +1044,8 @@ def _prepare_events(replay: Replay, beatmap_path: str | None, songs_root: str | 
     return beatmap, source, presses, releases, warn, column_order
 
 
-def _pair(beatmap: Beatmap, presses, releases) -> MatchResult:
-    match = match_replay(beatmap, presses, releases)
+def _pair(beatmap: Beatmap, presses, releases, algo: str = "C") -> MatchResult:
+    match = match_replay(beatmap, presses, releases, algo=algo)
     if not match.notes:
         raise AnalyzeError("谱面里没有可分析的物件，或者回放与谱面完全不匹配。")
     return match
@@ -1118,6 +1125,7 @@ def analyze(
     replay_path: str,
     beatmap_path: str | None = None,
     songs_root: str | None = None,
+    judge_algo: str = "C",
 ) -> dict:
     watch = _Stopwatch()
     replay = _load_replay(replay_path)
@@ -1125,7 +1133,7 @@ def analyze(
         replay, beatmap_path, songs_root)
     watch.mark("parse")
 
-    match = _pair(beatmap, presses, releases)
+    match = _pair(beatmap, presses, releases, judge_algo)
     watch.mark("match")
 
     contexts, blocks = _build_contexts(beatmap)
@@ -1176,9 +1184,13 @@ def analyze(
     # 两套判定视图：V1（stable 合并口径）与 V2（头尾分判）。
     # 归因、时间轴、失误清单、评语都按各自口径重算一遍，
     # 这样页面切换时只是换一份数据，不会出现"判定变了、准确率没变"的矛盾。
+    judge_default = detect_judge_mode(replay.version, replay.mods, replay.score_info)
+    modes = ["v1", "v2"]
+    if judge_default == "classic":
+        modes.append("classic")
     views: dict[str, dict] = {}
     atts_by_mode: dict[str, list] = {}
-    for mode in ("v1", "v2"):
+    for mode in modes:
         atts, cat_summary = attribution.classify_all(match, contexts, blocks, mode)
         atts_by_mode[mode] = atts
         combo_breaks = _combo_breaks(match, mode=mode)
@@ -1201,8 +1213,10 @@ def analyze(
     watch.mark("classify")
 
     # notes 只存一份：时间/列/误差共用，判定与归因各留两套短字段
-    common["notes"] = _compact_notes(match, atts_by_mode["v1"], atts_by_mode["v2"])
-    for mode in ("v1", "v2"):
+    common["notes"] = _compact_notes(
+        match, atts_by_mode["v1"], atts_by_mode["v2"], atts_by_mode.get("classic")
+    )
+    for mode in modes:
         # judgeMode 必须一起传：评语里的“准确率 (v1/v2)”徽章与正文都靠它，
         # 漏了就会在 V2 视图里继续写 v1。
         view = {**common, **views[mode], "judgeMode": mode}
@@ -1213,7 +1227,12 @@ def analyze(
         # 顶层保留 V1 字段，旧版前端（以及单文件报告）不用改就能继续读
         **views["v1"],
         "modes": views,
-        "judge": {"default": "v1", "modes": ["v1", "v2"]},
+        "judge": {
+            "default": judge_default,
+            "source": judge_source(replay.version, replay.mods, replay.score_info),
+            "modes": modes,
+            "algo": judge_algo,
+        },
         "elapsedMs": watch.elapsed_ms(),
         "timings": watch.timings,
     }
