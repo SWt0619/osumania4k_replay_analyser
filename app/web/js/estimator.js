@@ -42,10 +42,13 @@ async function beatmapText(session) {
   return data.text;
 }
 
-async function estimate(session, rate) {
+async function estimate(session, rate, opts) {
   if (!session) return { ok: false, reason: "没有会话" };
   const speedRate = Number(rate) > 0 ? Number(rate) : 1;
-  const key = session + "|" + speedRate.toFixed(3);
+  // 几万物件的观赏图：Roxy/Azusa 的 O(n log n) 会占住主线程好几秒，
+  // 这时只跑 Sunny 的快速估计，段位照样能给，页面不至于卡死。
+  const fast = !!(opts && opts.fast);
+  const key = session + "|" + speedRate.toFixed(3) + (fast ? "|fast" : "");
   if (cache.has(key)) return cache.get(key);
 
   let text;
@@ -103,7 +106,7 @@ async function estimate(session, rate) {
   let roxyBoundary = false;
   const timings = { sunny: sunnyMs, azusa: 0, roxy: 0 };
 
-  if (!showLN) {
+  if (!showLN && !fast) {
     const rcOptions = {
       speedRate,
       withGraph: false,
@@ -171,6 +174,7 @@ async function estimate(session, rate) {
     roxy: roxyInfo,
     roxyTried: roxyTried,
     roxyBoundary: roxyBoundary,
+    fast: fast,
     timings: timings,
     ms: Math.round(performance.now() - t0Total),
   };
@@ -178,4 +182,29 @@ async function estimate(session, rate) {
   return out;
 }
 
-window.Estimator = { estimate };
+// 只算 Sunny 星数，不跑 Azusa/Roxy。分析前用它做 20 星上限的兜底判断，
+// 几十毫秒就能出结果；失败时返回 null，让调用方放行，不误杀正常图。
+const starCache = new Map();
+async function sunnyStar(session, rate) {
+  if (!session) return null;
+  const speedRate = Number(rate) > 0 ? Number(rate) : 1;
+  const key = session + "|" + speedRate.toFixed(3);
+  if (starCache.has(key)) return starCache.get(key);
+  let text;
+  try {
+    text = await beatmapText(session);
+  } catch (e) {
+    return null;
+  }
+  try {
+    const rc = normalize(calculateRC(text, speedRate, null, null, {}, null));
+    if (!Number.isFinite(rc.star)) return null;
+    const out = { star: rc.star, lnRatio: rc.lnRatio, keys: rc.keys };
+    starCache.set(key, out);
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+
+window.Estimator = { estimate, sunnyStar };
