@@ -404,8 +404,10 @@ HYBRID_LN_MIN = 0.30
 HYBRID_LN_FULL = 0.70
 # 第二条通道：长条**音符**占比高，但块级没凑够 45%（块里全是长条才判 LN 块）。
 # 一局里 38% 的音是长条、手感上一半时间在按长条，按块算却只有 23% —— 这类图
-# 归到 Jack 只讲了一半。实测全库长条占比 ≥35% 的只占 8.3%，不会把 Hybrid 撑爆。
-HYBRID_HOLD_MIN = 0.35
+# 归到 Jack 只讲了一半。门槛与块级那条一致取 30%：本机 46 局实测里，
+# 长条占比不是 0~4%（纯 RC）就是 30% 以上（真的两边都有），中间是空的，
+# 卡在 35% 只会把恰好 30% 的那几张漏成 RC。
+HYBRID_HOLD_MIN = 0.30
 HYBRID_HOLD_LN_MIN = 0.15
 RC_CLASSES = ("cut", "stack", "spam", "tech")
 
@@ -427,6 +429,18 @@ def dominant_class(share: dict, hold_ratio: float = 0.0) -> str:
     if float(hold_ratio or 0.0) >= HYBRID_HOLD_MIN and ln >= HYBRID_HOLD_LN_MIN:
         return "hybrid"
     return max(RC_CLASSES, key=lambda k: float(share.get(k) or 0.0))
+
+
+def class_group(share: dict, hold_ratio: float = 0.0) -> str:
+    """rc / ln / hybrid —— 这张图属于哪一大类，不细分 RC 的键型。
+
+    和 `dominant_class` 的分工：那个用来展示（"这张图主要是切/叠/乱"），
+    这个用来判断"能不能按 RC 的准确率口径去比"。
+    RC 图这里一律是 "rc" —— 以前把 stack/spam/tech 直接当 map_class 存下来，
+    评估那边只认 "rc"，等于把一大批正经 RC 图当成 LN/Hybrid 排除了。
+    """
+    key = dominant_class(share, hold_ratio)
+    return key if key in ("ln", "hybrid") else "rc"
 
 
 @dataclass
