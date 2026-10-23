@@ -123,6 +123,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(sql)
     _migrate_dan_scale(conn)
     _migrate_map_class(conn)
+    _migrate_skill_spread(conn)
 
 
 def _migrate_map_class(conn: sqlite3.Connection) -> int:
@@ -187,6 +188,42 @@ def _migrate_map_class(conn: sqlite3.Connection) -> int:
     return fixed
 
 
+def _migrate_skill_spread(conn: sqlite3.Connection) -> int:
+    """把"没有主导键型、却被归了练法"的历史记录清掉，只做一次。
+
+    能就地重算是因为键型构成早就存在 `patterns` 列里，不用找回谱面。
+    旧规则在最高键型不到 55% 时直接拿 MSD 的最高项兜底，段位谱这种
+    六成键型都是别的、只占三成叠的图就被塞进了"叠"的 b10。
+    """
+    try:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    if version >= SKILL_SPREAD_VERSION:
+        return 0
+
+    fixed = 0
+    for row in conn.execute("SELECT id, patterns, skill FROM sessions").fetchall():
+        try:
+            share = [x for x in json.loads(row["patterns"] or "[]") if isinstance(x, dict)]
+        except (TypeError, ValueError):
+            continue
+        total = sum(float(x.get("share") or 0) for x in share)
+        if total <= 0:
+            continue
+        top = max(share, key=lambda x: float(x.get("share") or 0))
+        part = float(top.get("share") or 0) / total
+        if part < SKILL_SPREAD_MIN and row["skill"]:
+            conn.execute(
+                "UPDATE sessions SET skill = NULL, pattern_label = ? WHERE id = ?",
+                ("键型分散（最高 %s %.0f%%），不参与单键型评估"
+                 % (top.get("label") or top.get("key"), part * 100), row["id"]),
+            )
+            fixed += 1
+    conn.execute("PRAGMA user_version = %d" % SKILL_SPREAD_VERSION)
+    return fixed
+
+
 def _migrate_dan_scale(conn: sqlite3.Connection) -> int:
     """把旧刻度的 dan_value 换算到新刻度，只做一次。
 
@@ -223,12 +260,25 @@ MSD_SKILL_KEYS = {
     "stamina": "stamina",
 }
 
+# 最高键型连这个比例都不到，就认为这张图没有主导键型（段位谱、综合考核图都是这样）：
+# 只进综合 b50，不参与单键型 b10。专项图普遍在 55% 以上，段位谱实测 30~40%，中间是空的。
+SKILL_SPREAD_MIN = 0.45
+# 历史记录里已经有按旧规则写死的 skill，需要重算一次；用 user_version 保证只跑一遍。
+SKILL_SPREAD_VERSION = 5
+
 
 def classify_skill(payload: dict) -> tuple[str | None, str]:
     """这张图算哪一类练法；返回 (skill, 依据文字)。
 
     先看键型构成：某一类占到 55% 以上才算"归属明显"，这样纯切、纯叠、纯乱能被认出来。
-    键型拉不开差距时看 MSD 的技能雷达，取高出第二名 8% 以上的那一项。
+    键型拉不开差距时看 MSD 的技能雷达，取最高的一项。
+
+    但有一个下限：最高的一类连 45% 都不到，说明这张图根本没有主导键型 ——
+    段位谱就是典型（Extra 3/4/5 的 Jack 只占 32% / 40% / 30%，其余六成是别的），
+    拿它去评"叠"会把这一类的 b10 搅浑。这种图只进综合 b50，不参与单键型评估。
+
+    阈值 45% 是照着实测分布定的：专项图普遍在 56% 以上（Alpha 系列最低 56%，
+    Signal of Abydos 67.6%），而段位谱最高只到 39.7%，中间是空的。
     """
     share = payload.get("patternShare") or []
     total = sum(float(x.get("share") or 0) for x in share)
@@ -239,6 +289,9 @@ def classify_skill(payload: dict) -> tuple[str | None, str]:
             skill = SKILL_KEYS.get(str(top.get("key")))
             if skill:
                 return skill, "%s 占 %.0f%%" % (top.get("label") or top.get("key"), part * 100)
+        if part < SKILL_SPREAD_MIN:
+            return None, "键型分散（最高 %s %.0f%%），不参与单键型评估" % (
+                top.get("label") or top.get("key"), part * 100)
 
     msd = payload.get("msd") or {}
     skills = msd.get("skillsets") or {}
