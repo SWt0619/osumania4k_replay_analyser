@@ -1,0 +1,279 @@
+{
+  "note": "Malody v3 段位谱用本程序的混合算法（Sunny → Azusa → Roxy）实测，原速 1.00×。数值是连续段位：Regular N 记为 N，Extra N 记为 10+N，Extra Final 记为 20。",
+  "measuredAt": "2026-10-23 02:17",
+  "levels": {
+    "0": {
+      "label": "Regular 0",
+      "dan": 0.67,
+      "measured": 0.67,
+      "charts": [
+        {
+          "name": "Regular-0",
+          "label": "Reform 1 low || < LN 5 mid",
+          "dan": 0.67,
+          "method": "sunny"
+        }
+      ]
+    },
+    "1": {
+      "label": "Regular 1",
+      "dan": 1.33,
+      "measured": 1.33,
+      "charts": [
+        {
+          "name": "Regular-1",
+          "label": "Reform 1 high || < LN 5 mid",
+          "dan": 1.33,
+          "method": "sunny"
+        }
+      ]
+    },
+    "2": {
+      "label": "Regular 2",
+      "dan": 3.0,
+      "measured": 3.0,
+      "charts": [
+        {
+          "name": "Regular-2",
+          "label": "Reform 3 mid || < LN 5 mid",
+          "dan": 3.0,
+          "method": "sunny"
+        }
+      ]
+    },
+    "3": {
+      "label": "Regular 3",
+      "dan": 3.67,
+      "measured": 3.67,
+      "charts": [
+        {
+          "name": "Regular-3",
+          "label": "Reform 4 low || < LN 5 mid",
+          "dan": 3.67,
+          "method": "sunny"
+        }
+      ]
+    },
+    "4": {
+      "label": "Regular 4",
+      "dan": 4.33,
+      "measured": 4.33,
+      "charts": [
+        {
+          "name": "Regular-4",
+          "label": "Reform 4 high",
+          "dan": 4.33,
+          "method": "azusa"
+        }
+      ]
+    },
+    "5": {
+      "label": "Regular 5",
+      "dan": 6.33,
+      "measured": 6.33,
+      "charts": [
+        {
+          "name": "Regular-5",
+          "label": "Reform 6 high",
+          "dan": 6.33,
+          "method": "azusa"
+        }
+      ]
+    },
+    "6": {
+      "label": "Regular 6",
+      "dan": 6.83,
+      "measured": 6.83,
+      "charts": [
+        {
+          "name": "Regular-6",
+          "label": "Reform 7 mid/low",
+          "dan": 6.83,
+          "method": "azusa"
+        }
+      ]
+    },
+    "7": {
+      "label": "Regular 7",
+      "dan": 7.33,
+      "measured": 7.33,
+      "charts": [
+        {
+          "name": "Regular-7",
+          "label": "Reform 7 high",
+          "dan": 7.33,
+          "method": "azusa"
+        }
+      ]
+    },
+    "8": {
+      "label": "Regular 8",
+      "dan": 9.67,
+      "measured": 9.67,
+      "charts": [
+        {
+          "name": "Regular-8",
+          "label": "Reform 10 low",
+          "dan": 9.67,
+          "method": "azusa"
+        }
+      ]
+    },
+    "9": {
+      "label": "Regular 9",
+      "dan": 9.67,
+      "measured": 9.67,
+      "charts": [
+        {
+          "name": "Regular-9",
+          "label": "Reform 10 low",
+          "dan": 9.67,
+          "method": "azusa"
+        }
+      ]
+    },
+    "10": {
+      "label": "Regular 10",
+      "dan": 9.83,
+      "measured": 9.83,
+      "charts": [
+        {
+          "name": "Regular-10",
+          "label": "Reform 10 mid/low",
+          "dan": 9.83,
+          "method": "azusa"
+        }
+      ]
+    },
+    "11": {
+      "label": "Extra 1",
+      "dan": 11.0,
+      "measured": 11.0,
+      "charts": [
+        {
+          "name": "Extra-1 v3",
+          "label": "Alpha mid",
+          "dan": 11.0,
+          "method": "roxy"
+        }
+      ]
+    },
+    "12": {
+      "label": "Extra 2",
+      "dan": 11.34,
+      "measured": 11.34,
+      "charts": [
+        {
+          "name": "Extra-2 v3",
+          "label": "Alpha high",
+          "dan": 11.34,
+          "method": "roxy"
+        }
+      ]
+    },
+    "13": {
+      "label": "Extra 3",
+      "dan": 12.16,
+      "measured": 12.16,
+      "charts": [
+        {
+          "name": "Extra-3 v3",
+          "label": "Beta mid/high",
+          "dan": 12.16,
+          "method": "roxy"
+        }
+      ]
+    },
+    "14": {
+      "label": "Extra 4",
+      "dan": 12.66,
+      "measured": 12.66,
+      "charts": [
+        {
+          "name": "Extra-4 v3",
+          "label": "Gamma low",
+          "dan": 12.66,
+          "method": "roxy"
+        }
+      ]
+    },
+    "15": {
+      "label": "Extra 5",
+      "dan": 13.0,
+      "measured": 13.0,
+      "charts": [
+        {
+          "name": "Extra-5 v3",
+          "label": "Gamma mid",
+          "dan": 13.0,
+          "method": "roxy"
+        }
+      ]
+    },
+    "16": {
+      "label": "Extra 6",
+      "dan": 13.84,
+      "measured": 13.84,
+      "charts": [
+        {
+          "name": "Extra-6 v3",
+          "label": "Delta mid/low",
+          "dan": 13.84,
+          "method": "roxy"
+        }
+      ]
+    },
+    "17": {
+      "label": "Extra 7",
+      "dan": 14.84,
+      "measured": 14.84,
+      "charts": [
+        {
+          "name": "Extra-7 v3",
+          "label": "Epsilon mid/low",
+          "dan": 14.84,
+          "method": "roxy"
+        }
+      ]
+    },
+    "18": {
+      "label": "Extra 8",
+      "dan": 15.16,
+      "measured": 15.16,
+      "charts": [
+        {
+          "name": "Extra-8 v3",
+          "label": "Epsilon mid/high",
+          "dan": 15.16,
+          "method": "roxy"
+        }
+      ]
+    },
+    "19": {
+      "label": "Extra 9",
+      "dan": 15.84,
+      "measured": 15.84,
+      "charts": [
+        {
+          "name": "Extra-9 v3",
+          "label": "Emik Zeta mid/low",
+          "dan": 15.84,
+          "method": "roxy"
+        }
+      ]
+    },
+    "20": {
+      "label": "Extra Final",
+      "dan": 16.84,
+      "measured": 16.84,
+      "charts": [
+        {
+          "name": "Ex-Final v3",
+          "label": "Thaumiel Eta mid/low",
+          "dan": 16.84,
+          "method": "roxy"
+        }
+      ]
+    }
+  }
+}
