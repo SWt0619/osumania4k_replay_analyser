@@ -49,7 +49,7 @@ def _stability_word(ur: float) -> str:
     return "波动很大"
 
 
-# 只有中位偏差超过这个值才动「改 offset」的念头。
+# 只有整局偏移超过这个值才动「改 offset」的念头。
 #
 # 理由很重要：单看一张图的偏差不足以断定是延迟问题 —— 一个人的手感、当天状态、
 # 甚至这一张图的鼓点都能造成几毫秒的整体偏移。贸然按这张图去改 universal offset，
@@ -59,21 +59,27 @@ MIN_OFFSET_ADVICE_MS = 15.0
 
 
 def _bias_sentence(median_delta: float) -> tuple[str, bool]:
-    """返回（描述, 是否值得动 offset）。"""
+    """返回（描述, 是否值得动 offset）。
+
+    这里的 median_delta 是**带符号**的中位数，全文统一叫「整局偏移」：正 = 整体打晚，
+    负 = 整体打早。它和「击打偏差」（每次击打偏离目标的幅度，取绝对值）不是同一个量 ——
+    有早有晚时整局偏移可能接近 0，但每次击打的偏差照样有十几毫秒。
+    以前两处都叫「中位偏差」，于是同一个页面里出现了 0.0ms 和 10.0ms 两个数。
+    """
     d = median_delta
     if abs(d) < 4:
-        return ("没有出现整体打早或打晚的情况（中位偏差 %.1fms）。" % d, False)
+        return ("没有出现整体打早或打晚的情况（整局偏移 %+.1fms）。" % d, False)
     direction = "偏晚" if d > 0 else "偏早"
     if abs(d) < 10:
-        return ("整体略微%s（中位 %.1fms），但还属于可接受范围。" % (direction, d), False)
+        return ("整体略微%s（整局偏移 %+.1fms），但还属于可接受范围。" % (direction, d), False)
     if abs(d) < MIN_OFFSET_ADVICE_MS:
         return (
-            "整体%s（中位 %.1fms），方向一致但幅度不大——单凭一张图还不足以判定是延迟问题，"
+            "整体%s（整局偏移 %+.1fms），方向一致但幅度不大——单凭一张图还不足以判定是延迟问题，"
             "先别动 offset。" % (direction, d),
             False,
         )
     return (
-        "整局系统性%s（中位 %.1fms），可以考虑调 offset（调整完记得再打别的图试试）。" % (direction, d),
+        "整局系统性%s（整局偏移 %+.1fms），可以考虑调 offset（调整完记得再打别的图试试）。" % (direction, d),
         True,
     )
 
@@ -278,7 +284,7 @@ def _advice_rhythm(payload: dict, share: float) -> dict | None:
         return {
             "tag": "rhythm",
             "title": "把 offset 校掉 %.0fms" % abs(median_delta),
-            "body": "整局中位%s %.1fms 且换密度也不改方向，这是判定时机没对齐而不是手抖。"
+            "body": "整局%s %.1fms 且换密度也不改方向，这是判定时机没对齐而不是手抖。"
             "在 osu! 里把 universal offset 往%s调 %.0fms 左右，再用另一张 2 分钟短图复核——"
             "**别只凭这一张图就定**，改完打别的图要确认没有更偏。"
             % (
@@ -292,7 +298,7 @@ def _advice_rhythm(payload: dict, share: float) -> dict | None:
     return {
         "tag": "rhythm",
         "title": "跟拍子练，别动 offset",
-        "body": "整局中位%s %.1fms，方向一致但幅度只有个位数——一张图不足以判定是延迟问题，"
+        "body": "整局%s %.1fms，方向一致但幅度只有个位数——一张图不足以判定是延迟问题，"
         "这时候改 offset 很可能让别的图更偏。更稳的做法是开 hitsound 或跟节拍器打一段慢速同图，"
         "把「每次击打落在同一个偏移」这件事做出来（当前 UR %.0f）。"
         % (direction, abs(median_delta), ur),
@@ -438,7 +444,7 @@ class _Draft:
         if self.ur and self.ur < 110:
             self.strengths.append("稳定性好（UR %.0f），说明手指控制已经成型。" % self.ur)
         if abs(self.median_delta) < 5 and (self.ur > 0 or self.acc > 0):
-            self.strengths.append("拍子咬得准（中位偏差 %+.1fms），节奏骨架没有问题。" % self.median_delta)
+            self.strengths.append("拍子咬得准（整局偏移 %+.1fms），节奏骨架没有问题。" % self.median_delta)
         if max_combo / notes_total >= 0.7:
             self.strengths.append(
                 "最长连击 %d（占全部物件的 %.0f%%），中途基本没崩。" % (int(max_combo), max_combo / notes_total * 100)
@@ -604,7 +610,7 @@ class _Draft:
             {
                 "tag": "rhythm",
                 "title": "先校一遍偏移",
-                "body": "整局中位偏差 %.1fms 且方向一致，先在 osu! 里用 universal offset 微调（或打一张短图确认手感），"
+                "body": "整局偏移 %.1fms 且方向一致，先在 osu! 里用 universal offset 微调（或打一张短图确认手感），"
                 "比硬练更省时间。" % self.median_delta,
             },
         )
@@ -628,16 +634,20 @@ def _headline(grade: str, counts: dict) -> str:
     return headline
 
 
-def _badges(acc: float, ur: float, median_delta: float, max_combo, tag: str) -> list[dict]:
-    """顶栏的四个数字。
+def _badges(acc: float, ur: float, abs_median: float, max_combo, tag: str) -> list[dict]:
+    """顶栏的几个数字。
 
     准确率跟着当前判定口径走；旁边还挂着 ScoreV2 的独立评分，
     不标口径的话两个数字很容易被当成同一个。
+
+    这一格放「击打偏差」（绝对值）而不是带符号的整局偏移：玩家想知道的是
+    「我每次偏离多远」，显示 +0.0ms 会让人以为打得完美，其实每次偏了 10ms。
+    整局偏移（有没有系统性偏早/偏晚）在正文里单独说。
     """
     return [
         {"key": "acc", "label": "准确率 (%s)" % tag, "value": "%.2f%%" % acc},
         {"key": "ur", "label": "UR", "value": "%.0f" % ur},
-        {"key": "bias", "label": "中位偏差", "value": "%+.1fms" % median_delta},
+        {"key": "bias", "label": "击打偏差", "value": "%.1fms" % abs_median},
         {"key": "combo", "label": "最大连击", "value": str(max_combo)},
     ]
 
@@ -688,5 +698,5 @@ def build_evaluation(payload: dict) -> dict:
         "strengths": draft.strengths[:5],
         "weaknesses": draft.weaknesses[:4],
         "advice": advice[:5],
-        "badges": _badges(acc, ur, median_delta, s.get("maxCombo", 0), draft.judge_mode),
+        "badges": _badges(acc, ur, _f(s.get("absMedian")), s.get("maxCombo", 0), draft.judge_mode),
     }
