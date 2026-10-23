@@ -128,6 +128,19 @@
       return jsonFetch("/api/hotkey");
     },
 
+    // 成长：本地存档的评估结果；保存自己选的当前段位
+    progress() {
+      return jsonFetch("/api/progress");
+    },
+
+    saveProfile(player, type, value) {
+      return jsonFetch("/api/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ player: player, type: type, value: value }),
+      });
+    },
+
     saveHotkey(combo) {
       return jsonFetch("/api/hotkey", {
         method: "POST",
@@ -214,6 +227,15 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+      });
+    },
+
+    // 把估算器算出的段位写回这一局，成长页折合要用同一个数
+    setHistoryDan(key, dan) {
+      return jsonFetch("/api/history/dan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: key, dan: dan }),
       });
     },
 
