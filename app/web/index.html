@@ -83,6 +83,14 @@
     <button class="rail-btn" data-tab="details" title="细节数据">
       <svg viewBox="0 0 24 24" class="ico"><path d="M5 6h14M5 12h14M5 18h9" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>
     </button>
+    <button class="rail-btn" data-tab="progress" title="成长 / 离下一段还有多远">
+      <svg viewBox="0 0 24 24" class="ico">
+        <path d="M4 19V5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".5"/>
+        <path d="M4 19h16" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".5"/>
+        <path d="M7 15l3.4-4 3 2.6L20 6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="20" cy="6" r="1.6" fill="currentColor"/>
+      </svg>
+    </button>
     <span class="rail-sep"></span>
     <button class="rail-btn" data-tab="settings" title="设置">
       <svg viewBox="0 0 24 24" class="ico">
@@ -367,6 +375,19 @@
               <input type="range" id="volume" class="mini-range" min="0" max="100" step="5" value="60" aria-label="音量">
               <b id="volumeVal">60%</b>
             </label>
+            <label class="mini-field" title="打击音：按谱面要求的时间响（正解音），还是按你实际按下的时间响（实际击打）。后者会把抢拍、拖拍、漏接直接放大成节奏上的错位">
+              <span>打击音</span>
+              <select id="hitsound" class="mini-select">
+                <option value="off" selected>关</option>
+                <option value="planned">正解音</option>
+                <option value="actual">实际击打</option>
+              </select>
+            </label>
+            <label class="mini-field" title="打击音自己的音量，和左边的回放音量分开调；谱面原声再大也不会盖住它">
+              <span>打击音量</span>
+              <input type="range" id="hitVol" class="mini-range" min="0" max="100" step="5" value="70" aria-label="打击音音量">
+              <b id="hitVolVal">70%</b>
+            </label>
           </div>
           <p class="fineprint" id="audioNote"></p>
         </article>
@@ -477,6 +498,62 @@
     </div>
 
     <!-- 设置：osu! 目录与长条物件计算方式。不依赖分析结果，随时可进。 -->
+    <div class="tab-panel" id="panel-progress" hidden>
+      <article class="card glass">
+        <div class="card-head">
+          <h2>成长</h2>
+          <p class="muted">用本机存档的每一局估算离下一个段位还有多远；数据只在本机</p>
+        </div>
+        <div class="card-body">
+          <div class="pg-profile">
+            <label class="pg-field pg-wide">
+              <span>你的 osu! 名字 / ID</span>
+              <input type="text" id="pgPlayer" class="text-input" placeholder="例如 Renjie Lan" autocomplete="off">
+            </label>
+            <label class="pg-field">
+              <span>段位体系</span>
+              <select id="pgType" class="text-input">
+                <option value="reform">REFORM</option>
+                <option value="malody">Malody（自动换算）</option>
+              </select>
+            </label>
+            <label class="pg-field">
+              <span>当前段位</span>
+              <select id="pgValue" class="text-input"></select>
+            </label>
+            <button class="btn btn-primary" id="btnSaveProfile" type="button">保存</button>
+          </div>
+          <p class="dir-status" id="pgStatus"></p>
+
+          <div id="pgBody" hidden>
+            <p class="pg-warn" id="pgWarn" hidden></p>
+            <div class="pg-hero" id="pgHero" hidden>
+            <div class="pg-hero-top">
+              <div>
+                <span class="pg-kicker">综合段位</span>
+                <span class="pg-dan" id="pgDan">—</span>
+              </div>
+              <div class="pg-side">
+                <span id="pgTarget" class="pg-target"></span>
+                <span id="pgSample" class="pg-sample"></span>
+              </div>
+            </div>
+            <div class="pg-bar"><i id="pgBarFill"></i></div>
+            <p class="pg-hint" id="pgHint"></p>
+            <p class="pg-open-hint" id="pgHeroHint">点这里看计入评估的 50 局</p>
+          </div>
+          <div class="pg-grid" id="pgGrid" hidden></div>
+
+          <h3 class="pg-sub">分练法评估</h3>
+          <p class="muted">只看键型归属明显的图（纯切、纯叠、纯乱这类），每类取最好的 10 局。</p>
+          <div class="pg-skills" id="pgSkills"></div>
+          <p class="pg-open-hint" id="pgSkillNote" hidden></p>
+          <div class="pg-grid" id="pgSkillGrid" hidden></div>
+          </div>
+        </div>
+      </article>
+    </div>
+
     <div class="tab-panel" id="panel-settings" hidden>
       <article class="card glass">
         <div class="card-head">
@@ -508,8 +585,10 @@
           </label>
 
           <p class="dir-status" id="pathStatus"></p>
+          <p class="fineprint" id="pathConfig"></p>
           <div class="settings-actions">
             <button class="btn btn-primary" id="btnSavePaths">保存并重新扫描</button>
+            <button class="btn btn-ghost" id="btnClearPaths" title="清掉手动指定的目录，改回自动探测">清除手动路径</button>
           </div>
 
           <hr class="settings-sep">
@@ -747,6 +826,7 @@
 </footer>
 
 <script src="/static/js/charts.js?v=__ASSET_V__"></script>
+<script src="/static/js/hitsound.js?v=__ASSET_V__"></script>
 <script src="/static/js/player.js?v=__ASSET_V__"></script>
 <script src="/static/js/api.js?v=__ASSET_V__"></script>
 <script src="/static/js/ui.js?v=__ASSET_V__"></script>
