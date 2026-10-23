@@ -45,3 +45,16 @@ estimator/roxyMetaModel.generated.js   Roxy 的 Ridge 元模型（111 特征，�
   返回 `< Alpha Low` / `> Emik Zeta high` 时 `numericDifficulty` 为 null，自动回退 Azusa。
 - 面图（LN 占比 >15%）与所有失败路径：保持 Sunny + LN 标尺。
 
+## 上游算法出处
+
+这一层的算法不是上面那个仓库自己发明的，它们各自有出处；引用时请一并标注：
+
+- **Sunny**（`rework/sunnyAlgorithm.js`、`rework/sunnyWindowAlgorithm.js`）：
+  [Sunny Rework / Star-Rating-Rebirth](https://github.com/sunnyxxy/Star-Rating-Rebirth)（MIT）。
+- **Daniel**（`rework/danielAlgorithm.js`）：[Daniel](https://thebagelofman.github.io/Daniel/)。
+- **Azusa / Roxy**（`estimator/azusaEstimator.js`、`estimator/roxyEstimator.js`）：
+  由 osumania_map_analyser 作者实现，算法文档见
+  [azusa_algorithm.md](https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/azusa_algorithm.md)、
+  [roxy_algorithm.md](https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/roxy_algorithm.md)。
+  Roxy 的 Ridge 元模型系数内嵌在 `roxyMetaModel.generated.js` 里。
+
