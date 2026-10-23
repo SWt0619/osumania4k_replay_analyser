@@ -8,6 +8,10 @@
   const ERROR_PAGE = 100;
   const ERROR_BUCKET_MS = 30000;
 
+  // 打击音音量的上限（3 = 300%）。回放音量仍然只到 1，两条滑杆量程不同：
+  // 谱面原声响的时候，100% 的打击音往往还是听不见，所以单独放开一档。
+  const HIT_VOL_MAX = 3;
+
   const state = {
     data: null,
     chartOnly: null,      // 只看谱面（.osu）时的精简结果；与 data 互斥
@@ -36,7 +40,7 @@
     muted: false,
     // 打击音：off / planned（按谱面时间响）/ actual（按实际击打时间响）
     hitsoundMode: "off",
-    hitsoundVolume: 0.7,   // 打击音自己的音量，和回放音量分开
+    hitsoundVolume: 0.7,   // 打击音自己的音量 0..HIT_VOL_MAX，和回放音量分开
     // 下面这些在流程中按需赋值，先在这里声明清楚类型与默认值，
     // 免得靠"某个函数里突然多出一个属性"来传递状态
     audioBroken: false,
@@ -77,7 +81,8 @@
       if (p.hitsoundMode === "off" || p.hitsoundMode === "planned" || p.hitsoundMode === "actual") {
         state.hitsoundMode = p.hitsoundMode;
       }
-      if (typeof p.hitsoundVolume === "number" && p.hitsoundVolume >= 0 && p.hitsoundVolume <= 1) {
+      // 打击音最高 300%，回放音量仍然只到 100%（两条滑杆的量程本来就不一样）
+      if (typeof p.hitsoundVolume === "number" && p.hitsoundVolume >= 0 && p.hitsoundVolume <= HIT_VOL_MAX) {
         state.hitsoundVolume = p.hitsoundVolume;
       }
       if (p.judgeMode === "v1" || p.judgeMode === "v2" || p.judgeMode === "classic") state.judgeMode = p.judgeMode;
@@ -973,13 +978,21 @@
     if (v) v.textContent = pct + "%";
   }
 
+  // 「打击音」下拉：bindEvents 里先按默认值画过一次，读完本地偏好要再同步一遍，
+  // 否则刷新后界面显示「关」，实际状态却还是上次选的那个 —— 看着像没保存。
+  function syncHitsoundUi() {
+    const sel = $("hitsound");
+    if (sel) sel.value = state.hitsoundMode;
+  }
+
   // 打击音自己的音量条（和上面那条回放音量互相独立）
   function syncHitVolUi() {
     const pct = Math.round(state.hitsoundVolume * 100);
     const s = $("hitVol");
     if (s) {
-      s.value = String(pct);
-      s.style.backgroundSize = pct + "% 100%";
+      s.value = String(Math.min(pct, HIT_VOL_MAX * 100));
+      // 滑杆量程是 0~300，填充按量程比例算 —— 直接用 pct 会在 100% 时就把整条填满
+      s.style.backgroundSize = Math.min(100, pct / HIT_VOL_MAX).toFixed(1) + "% 100%";
     }
     const v = $("hitVolVal");
     if (v) v.textContent = pct + "%";
@@ -2365,7 +2378,7 @@
     // 浏览器只认"用户手势"这个入口，等播放再解锁会漏掉第一小节。
     const hsSel = $("hitsound");
     if (hsSel) {
-      hsSel.value = state.hitsoundMode;
+      syncHitsoundUi();
       hsSel.addEventListener("change", () => {
         const v = hsSel.value;
         state.hitsoundMode = (v === "actual" || v === "planned") ? v : "off";
@@ -2385,7 +2398,7 @@
     const hv = $("hitVol");
     if (hv) {
       hv.addEventListener("input", () => {
-        state.hitsoundVolume = Math.max(0, Math.min(1, Number(hv.value) / 100));
+        state.hitsoundVolume = Math.max(0, Math.min(HIT_VOL_MAX, Number(hv.value) / 100));
         if (hitsoundInst) hitsoundInst.setHitVolume(state.hitsoundVolume);
         syncHitVolUi();
         savePrefs();
@@ -2788,7 +2801,8 @@
     cell.className = "pg-cell";
     cell.title = [(p.artist ? p.artist + " - " : "") + p.title, "[" + (p.difficulty || "") + "]",
       Number(p.acc || 0).toFixed(2) + "%", "谱面 " + Number(p.dan || 0).toFixed(2) + " 段",
-      "折算 " + Number(p.value || 0).toFixed(2) + " 段"].join(" · ");
+      "折算 " + Number(p.value || 0).toFixed(2) + " 段",
+      p.note || (p.skill ? "练法：" + p.skill : "")].filter(Boolean).join(" · ");
 
     const body = document.createElement("div");
     body.className = "pg-cell-body";
@@ -3086,6 +3100,7 @@
     // 勾选框是在 bindEvents 里先按默认值画的，那时还没读本地偏好。
     // 少了这一行，值其实存住了、过滤也生效，但界面永远显示成没勾 —— 看起来就像没保存。
     syncLowConfidenceUI();
+    syncHitsoundUi();
     syncHitVolUi();
 
     try {
