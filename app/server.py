@@ -36,6 +36,7 @@ from app.core import (  # noqa: E402
     hotkey,
     json_safe,
     osu_dirs,
+    progress,
     quick_import,
     recommend,
 )
@@ -48,6 +49,7 @@ from app.core.analyze import (  # noqa: E402
     unsupported_keys_message,
 )
 from app.core.beatmap import parse_osu_file  # noqa: E402
+from app.core import library as library_mod  # noqa: E402
 from app.core.library import default_songs_roots, get_library, reset_library, set_cache_path  # noqa: E402
 from app.core.osr import OsrError  # noqa: E402
 from app.core.skin import find_note_images, find_skin_in_exports  # noqa: E402
@@ -607,6 +609,24 @@ class _ApiMixin(_SessionView):
         info["ok"] = True
         return self._json(info)
 
+    def _history_dan(self, req: dict):
+        """把页面估算出的段位写回这一局。
+
+        段位卡片和成长页必须是同一个数：卡片显示 Roxy 11.17，折合却按 MSD 标定的
+        12.39 去算，用户会以为折合虚高。所以页面算完就回填，成长页直接读库。
+        """
+        key = str(_field(req, "key") or "").strip()
+        # dan 是 JSON 数字，_field 只认字符串，这里直接取原值
+        try:
+            value = float(req.get("dan"))
+        except (TypeError, ValueError):
+            return self._error("dan 必须是数字")
+        if not key:
+            return self._error("缺少回放标识")
+        updated = history.update_dan_value(key, value)
+        log("[dan] %s -> %.2f (%s)" % (key[:8], value, "更新" if updated else "没有对应记录"))
+        return self._json({"ok": True, "updated": updated})
+
     # ---- 游戏目录（自动探测失败时让玩家在网页里手动指定） ----------------
     def _paths_info(self):
         roots = default_songs_roots()
@@ -618,6 +638,10 @@ class _ApiMixin(_SessionView):
             "lazerDir": osu_dirs.config_lazer_dir(),
             "songsRoot": roots[0] if roots else "",
             "songsRoots": roots,
+            # 配置文件到底写在哪。存不住的时候这行是最快的判据：
+            # 如果它每次都指向不同的临时目录，说明程序是从压缩包里直接跑的。
+            "configPath": config_store.path_of(CACHE_DIR),
+            "configShared": bool(paths.CACHE_FALLBACK),
             "count": len(lib.entries),
             # 给输入框做占位提示：告诉玩家该选到哪一级。
             # 这里只给"形状"，不放本机的真实路径 —— 截图外发时不会带出账号名。
@@ -631,6 +655,24 @@ class _ApiMixin(_SessionView):
     def _paths_save(self, req: dict):
         stable = _field(req, "stableDir").strip('"').strip()
         lazer = _field(req, "lazerDir").strip('"').strip()
+
+        # 两栏都空 = 空表单。以前这里会走 remove 分支，把已经存好的路径删掉：
+        # 页面一刷新/一重启就发现"路径又没了"，其实是这个空提交干的。
+        # 空表单不应该有副作用，只有显式带 clear 才真的清除。
+        if not stable and not lazer and not req.get("clear"):
+            roots = default_songs_roots()
+            lib = get_library(roots[0] if roots else None)
+            log("[paths] 空表单 -> 保持原设置不变")
+            return self._json({
+                "ok": True,
+                "unchanged": True,
+                "songsRoot": roots[0] if roots else "",
+                "songsRoots": roots,
+                "count": len(lib.entries),
+                "buildMs": 0,
+                "notes": [],
+                "hint": "两栏都空着，已保留原来的设置。要清掉手动目录请点「清除手动路径」。",
+            })
 
         notes = []
         if stable:
@@ -654,6 +696,8 @@ class _ApiMixin(_SessionView):
         if stable or lazer:
             # 手动指定了游戏目录，就把更粗略的 songsRoot 清掉，免得两套配置打架
             remove.append("songsRoot")
+        elif req.get("clear"):
+            log("[paths] 按请求清除手动指定的目录")
         try:
             config_store.merge(changes, remove, cache_dir=CACHE_DIR)
         except OSError as e:
@@ -779,6 +823,63 @@ class _ApiMixin(_SessionView):
             return self._error(why, 400)
         return self._hotkey_info()
 
+    # ---- 成长评估 --------------------------------------------------------
+    def _progress_info(self):
+        """把本地的每局存档折成「离下一段还有多远」。"""
+        profile = _profile_from_config()
+        sessions = history.all_sessions()
+        data = progress.evaluate(sessions, profile)
+        data["history"] = history.stats()
+        # 没填本人名字时不算"有多少局"：这时候还算不出该用哪些局
+        data["needPlayer"] = not bool(profile.get("player"))
+        return self._json(data)
+
+    def _profile_save(self):
+        req = _parse_json(self._read_body())
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+
+        player = str(req.get("player") or "").strip()
+        if not player:
+            return self._error("先填自己的 osu! 名字或 ID：只有本人的成绩才算进成长评估")
+        if len(player) > 64:
+            return self._error("名字太长了，确认一下填的是 osu! 用户名")
+
+        kind = _field(req, "type") or "reform"
+        if kind not in ("reform", "malody"):
+            return self._error("段位类型只能是 reform 或 malody")
+        try:
+            # JSON 里的数字会被 _field 当成非字符串丢掉，这里直接读原值再转
+            value = float(req.get("value"))
+        except (TypeError, ValueError):
+            return self._error("段位数值不对")
+        if kind == "reform":
+            if not -3 <= value <= 17:
+                return self._error("REFORM 段位范围是 INTRO-1 到 Eta")
+            dan_value, label = value, progress.dan_label(value)
+        else:
+            if not 0 <= value <= 20:
+                return self._error("Malody 段位范围是常规 0~10、Extra 1~9 或 Extra Final")
+            conv = progress.malody_to_reform(value)
+            if not conv:
+                return self._error("这个 Malody 段位还没有标定数据")
+            dan_value, label = conv["dan"], conv["label"]
+
+        prof = {"type": kind, "value": value, "dan": dan_value, "label": label,
+                "scale": progress.DAN_SCALE}
+        if kind == "malody":
+            prof["malodyLabel"] = progress.malody_label(value)
+            # measured = 这个换算是把段位谱丢进混合算法测出来的；False 表示用的是老标定兜底
+            prof["measured"] = bool(conv.get("measured"))
+        try:
+            config_store.merge({"danProfile": prof, "playerName": player}, cache_dir=CACHE_DIR)
+        except OSError as e:
+            return self._error("保存失败：%s" % e)
+
+        # 名字一改，全部历史立刻按新名字重算归属：别人打的那几局当场退出评估
+        counts = history.set_player(player)
+        return self._json({"ok": True, "profile": prof, "player": player, "counts": counts})
+
     def _check_update(self):
         # 调试用：本地版本通常已经是最新，想测「发现新版本」分支时设这个环境变量。
         # 例如 MANIA_FAKE_LATEST=9.9.9 会假装 GitHub 上有个 9.9.9；不设就走真实请求。
@@ -819,11 +920,20 @@ class _ApiMixin(_SessionView):
     # 段位估算是前端算的（算法是 JS），它要的是谱面原文而不是我们解析后的 JSON；
     # 所以单独开一个接口，按会话把 .osu 文本给过去。页面只在打开难度页时才请求。
     def _beatmap_text(self, qs):
-        sid = (qs.get("session") or [""])[0]
-        sess = self._session(sid)
-        if not sess:
-            return self._error("会话已过期，请重新分析", 404)
-        path = sess.get("beatmapPath") or ""
+        # 两种取法：按分析会话（页面上刚导入的那份），或按谱面 MD5（历史记录里
+        # 只有哈希，补算段位时要靠它去曲库里找回 .osu）。
+        md5 = (qs.get("md5") or [""])[0].strip().lower()
+        if md5:
+            entry = get_library().find(md5)
+            if not entry:
+                return self._error("曲库里找不到这张谱面，无法估算段位", 404)
+            path = entry.path
+        else:
+            sid = (qs.get("session") or [""])[0]
+            sess = self._session(sid)
+            if not sess:
+                return self._error("会话已过期，请重新分析", 404)
+            path = sess.get("beatmapPath") or ""
         if not path or not os.path.isfile(path):
             return self._error("找不到这张谱面的文件，无法估算段位", 404)
         try:
@@ -1267,6 +1377,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
             return self._quick_pending(qs)
         if path == "/api/hotkey":
             return self._hotkey_info()
+        if path == "/api/progress":
+            return self._progress_info()
         if path == "/api/check-update":
             return self._check_update()
         if path == "/api/open-replays":
@@ -1341,6 +1453,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 return self._beatmap_search()
             if path == "/api/paths":
                 return self._paths_save(_parse_json(self._read_body()) or {})
+            if path == "/api/history/dan":
+                return self._history_dan(_parse_json(self._read_body()) or {})
             if path == "/api/beatmap-meta":
                 return self._beatmap_meta()
             if path == "/api/chart":
@@ -1353,6 +1467,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 return self._quick_import()
             if path == "/api/hotkey":
                 return self._hotkey_save()
+            if path == "/api/profile":
+                return self._profile_save()
             if path == "/api/audio-fetch":
                 return self._audio_fetch()
             if path == "/api/audio-pref":
@@ -1438,6 +1554,41 @@ def _resolve_bm(payload: dict, songs_root: str | None) -> str:
 # 只需要看 Replays / exports 里最新的那份文件，不必去猜 Data\r 里哪个加密文件是刚打完的，
 # 也不会把"只想导出"的人误判成"想做分析"。
 
+def _profile_from_config() -> dict:
+    """读用户选的当前段位与本人名字。"""
+    raw = config_store.read(CACHE_DIR).get("danProfile") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    # 旧版本存的是旧刻度（Alpha 记作 10.5）：读到就换算一次并存回去，
+    # 否则一个 Alpha 玩家会被当成 10.5 段，和迁移后的谱面段位对不上。
+    if raw and raw.get("scale") != progress.DAN_SCALE:
+        try:
+            raw = dict(raw)
+            raw["dan"] = progress.rescale_dan(raw.get("dan") or 0)
+            if raw.get("type") == "reform" and raw.get("value") is not None:
+                raw["value"] = progress.rescale_dan(raw.get("value"))
+            raw["scale"] = progress.DAN_SCALE
+            config_store.merge({"danProfile": raw}, cache_dir=CACHE_DIR)
+        except (TypeError, ValueError):
+            pass
+    try:
+        dan_value = float(raw.get("dan"))
+    except (TypeError, ValueError):
+        dan_value = 0.0
+    player = history.configured_player(CACHE_DIR)
+    if not dan_value and not player:
+        return {}
+    return {
+        "type": raw.get("type") or "reform",
+        "value": raw.get("value"),
+        "dan": dan_value or None,
+        "label": raw.get("label") or (progress.dan_label(dan_value) if dan_value else ""),
+        "player": player,
+        "malodyLabel": raw.get("malodyLabel") or "",
+        "measured": bool(raw.get("measured")),
+    }
+
+
 def _refresh_library() -> None:
     """分析/搜索前看一眼曲库有没有变化（新下载的谱面）。
 
@@ -1462,8 +1613,17 @@ def _analyze_and_store(replay_path: str, beatmap_path: str | None,
     """跑完分析、建会话、记历史，返回完整结果。HTTP 入口与热键共用这一份。"""
     _refresh_library()
     algo = algo if algo in ("C", "D") else "C"
-    payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root,
-                      judge_algo=algo)
+    before = library_mod.LAST_BUILD[0]
+    try:
+        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root,
+                          judge_algo=algo)
+    finally:
+        # 重扫恰好发生在"找不到这张图"这条路上，而那条路是会抛异常的，
+        # 所以日志必须写在 finally 里，否则最需要它的场景反而没有记录。
+        if library_mod.LAST_BUILD[0] > before:
+            lib = get_library(songs_root)
+            log("[library] 找不到谱面后重扫了曲库：%d 张，用时 %.0fms"
+                % (len(lib.entries), lib.build_ms))
     audio, background, note_skin = _resolve_media(payload, beatmap_path, songs_root)
 
     # 谱面路径要在这里定下来：上传回放时 beatmap_path 是空的，真正的路径是
@@ -1777,6 +1937,18 @@ def main() -> int:
         log("[startup] 程序目录不可写，缓存目录改为 %s" % paths.CACHE_DIR)
 
     _clean_chunks()
+
+    # 历史存档在启动时就打开一次：建表、补字段都在这里做完。
+    # 这样「换版本之后数据还在」这件事在启动日志里就能看到，
+    # 而不是等用户点开成长页才发现字段缺了。
+    try:
+        warm = history.warmup()
+        if warm.get("ok"):
+            log("[startup] 历史存档就绪：%d 局，%d 个字段" % (warm["sessions"], warm["columns"]))
+        else:
+            log("[startup] 历史存档打开失败：%s" % warm.get("error"))
+    except Exception:  # noqa: BLE001
+        log("[startup] 历史存档初始化异常：\n" + traceback.format_exc())
 
     if _reuse_running_instance(args):
         return 0
