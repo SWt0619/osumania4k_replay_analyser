@@ -125,7 +125,9 @@
   var IMG_MAX_H_RATIO = 2.2;     // 至多是宽度的 2.2 倍
   var IMG_MAX_LANE_RATIO = 1.15; // 绝对上限：不超过一个列宽，免得密集段糊成一片
   var PAST_MS = 80;              // 判定线以下的“刚判完”尾巴
-  var FLASH_MS = 120;            // 判定闪光存活时间
+  // 打击特效存活时间。原来 120ms 只够一个光点飘一下；现在换成横向扩散的冲击波，
+  // 扩散过程本身就是"这一下有多重"的读数，给到 220ms 才看得清，也不至于糊成一片。
+  var IMPACT_MS = 220;
   var ZONE_H = 40;               // 判定区色带高度
   var EMPTY_ALPHA = 0.2;
   // 轨道里的白色细线（列分隔 / 空状态短横线）。轨道底色恒为近黑，
@@ -255,7 +257,11 @@
       showJudgements: DEFAULTS.showJudgements,
       deviationBars: DEFAULTS.deviationBars,
       showPresses: DEFAULTS.showPresses,
-      fixedJudgeColors: DEFAULTS.fixedJudgeColors
+      fixedJudgeColors: DEFAULTS.fixedJudgeColors,
+      // 打击音效：hitsound 是 HitSound 实例（页面创建），mode 决定按哪个时间点触发。
+      // 播放器自己不出声，只负责"该响哪一下"的判断，方便两个实例里只让主播放器响。
+      hitsound: null,
+      hitsoundMode: 'off'
     };
     mergeOptions(options);
     var cssBgAtCreate = null; // CSS 里 --bg-1 的值，theme.bg 不透明性不可用时用它
@@ -264,6 +270,9 @@
     // 音符数据：按 t 升序的“引用数组”，load 时排一次，渲染时只做二分
     var notes = [];
     var keys = 4;
+    // 打击音的"上一帧时间"。每帧只在 (audioFrom, now] 这个区间里找该响的音符，
+    // 所以同一帧调两次 render 也不会重复出声；seek 时把它置空，避免补播一大段。
+    var audioFrom = null;
     var timeMs = 0;
     var maxHoldMs = 0;  // 最长长按时长，用来决定二分起点要往前退多少
     var minTime = 0;
@@ -371,6 +380,21 @@
       // 漏掉它们的话 create() 时传进来会被静默丢弃 —— 表现就是"说了没生效"。
       if (typeof partial.showPresses === 'boolean') opts.showPresses = partial.showPresses;
       if (typeof partial.fixedJudgeColors === 'boolean') opts.fixedJudgeColors = partial.fixedJudgeColors;
+      // 音效模式随时可切：切的时候把上一段的残留声音掐掉，否则新旧两种节奏会叠在一起
+      if (partial.hitsound !== undefined) {
+        opts.hitsound = partial.hitsound || null;
+        audioFrom = null;
+        if (opts.hitsound && typeof opts.hitsound.stopAll === 'function') opts.hitsound.stopAll();
+      }
+      if (typeof partial.hitsoundMode === 'string') {
+        var m = (partial.hitsoundMode === 'actual' || partial.hitsoundMode === 'planned')
+          ? partial.hitsoundMode : 'off';
+        if (m !== opts.hitsoundMode) {
+          opts.hitsoundMode = m;
+          audioFrom = null;
+          if (opts.hitsound && typeof opts.hitsound.stopAll === 'function') opts.hitsound.stopAll();
+        }
+      }
     }
 
     // DPR 从元素所在的 window 取：iframe / 不同缩放比的显示器上，
@@ -750,25 +774,57 @@
     // 绘制：判定闪光
     // -------------------------------------------------------------------------
 
-    function drawFlash(cx, p, color) {
-      // p: 0 -> 1 的存活进度。半径从 10 涨到 18，向上飘 22px，透明度平方衰减。
-      // 平方衰减是为了“刚判完很亮、随后迅速消失”，线性衰减会显得拖沓。
-      var radius = 10 + 8 * p;
-      var y = judgeY - 6 - 22 * p;
-      var alpha = 0.55 * (1 - p) * (1 - p);
+    // 打击特效：主色块放在判定线**下方**。
+    //
+    // 这一版是被实机截图打回来的：4K 皮肤的音符几乎占满整列宽，判定线附近从上方到线上
+    // 全被音符盖住，任何贴在线上画的特效都看不见。真正空着的地方只有判定线以下那一小条
+    // （已判完的音符 80ms 后就消失了），所以主色块必须画在那里。
+    //   1) 下方主色块 —— 整列宽，从上到下渐隐，是"这一下打在哪一列"的主要读数；
+    //   2) 色块下缘向两侧扫开的细线 —— 速度感，衰减更快；
+    //   3) 判定线上一条细亮线 —— 音符较小时能看清"有没有踩准"，被挡住也不影响前两层。
+    function drawImpact(cx, p, color, laneW) {
+      var alpha = (1 - p) * (1 - p);
       if (alpha <= 0.01) return;
-
-      var grad = ctx.createRadialGradient(cx, y, 0, cx, y, radius);
-      grad.addColorStop(0, withAlpha(color, alpha));
-      grad.addColorStop(0.55, withAlpha(color, alpha * 0.42));
-      grad.addColorStop(1, withAlpha(color, 0));
+      var ease = 1 - (1 - p) * (1 - p);      // 先快后慢：起手像被"打"出去，收尾稳住
+      var half = laneW * 0.5;
+      var top = judgeY + 3;
+      var h = 24 + 10 * ease;
 
       ctx.save();
-      ctx.globalCompositeOperation = 'lighter'; // 加法混合才有“发光”感
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(cx, y, radius, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.globalCompositeOperation = 'lighter';
+
+      // 1) 主色块
+      var body = ctx.createLinearGradient(0, top, 0, top + h);
+      body.addColorStop(0, withAlpha(color, 0.90 * alpha));
+      body.addColorStop(0.55, withAlpha(color, 0.34 * alpha));
+      body.addColorStop(1, withAlpha(color, 0));
+      ctx.fillStyle = body;
+      ctx.fillRect(cx - half * 0.88, top, laneW * 0.88, h);
+
+      // 2) 两侧竖括号 + 底边横杠。
+      // 只靠填充色的话，白色判定和白色音符会糊成一片；加一圈"硬边"之后，
+      // 不管底下是黑背景还是白色音符，轮廓都在。
+      var arm = 15 * (0.6 + 0.4 * ease);
+      var armW = Math.max(1.6, 2.6 * (1 - ease * 0.5));
+      var edge = withAlpha(color, 0.95 * alpha);
+      ctx.fillStyle = edge;
+      ctx.fillRect(cx - half * 0.92, top, armW, arm);
+      ctx.fillRect(cx + half * 0.92 - armW, top, armW, arm);
+      ctx.fillRect(cx - half * 0.92, top + arm, laneW * 0.92, armW * 0.8);
+
+      // 3) 下缘的横扫
+      var sweep = half * (0.5 + 0.95 * ease);
+      var line = ctx.createLinearGradient(cx - sweep, 0, cx + sweep, 0);
+      line.addColorStop(0, withAlpha(color, 0));
+      line.addColorStop(0.5, withAlpha(color, 0.6 * alpha));
+      line.addColorStop(1, withAlpha(color, 0));
+      ctx.fillStyle = line;
+      ctx.fillRect(cx - sweep, top + arm, sweep * 2, 1.6);
+
+      // 4) 判定线上的细亮线
+      ctx.fillStyle = withAlpha(color, 0.85 * alpha);
+      ctx.fillRect(cx - half * 0.8, judgeY - 1, laneW * 0.8, 2);
+
       ctx.restore();
     }
 
@@ -930,7 +986,7 @@
       // 二分起点要把“最长长按”退回去：一个很长的 LN 的头部可能早就过了
       // 判定线，但它的身体还在画面上（正在按住），不能因为 t < pastEdge 就漏掉。
       // 另外判定闪光（120ms）比音符尾巴（80ms）长，所以起点还要再兜住闪光那 40ms。
-      var startT = Math.min(pastEdge - maxHoldMs, now - FLASH_MS - 1);
+      var startT = Math.min(pastEdge - maxHoldMs, now - IMPACT_MS - 1);
       var i = lowerBound(startT);
 
       for (; i < n; i += 1) {
@@ -941,7 +997,7 @@
         var activeHold = isHold && note.h > now;
 
         var age = now - note.t;
-        var flashing = opts.showJudgements && age >= 0 && age <= FLASH_MS;
+        var flashing = opts.showJudgements && age >= 0 && age <= IMPACT_MS;
 
         // 已过去：超过 80ms 就整条不画。但“正在按住的长按”不算已过去
         // （它的身体还连着判定线），否则长条会在按住的中途突然消失。
@@ -973,7 +1029,7 @@
         }
 
         // 判定闪光：只在“刚判完”这 120ms 内出现（MISS 也给一个，提示这一下没接上）
-        if (flashing) drawFlash(cx, age / FLASH_MS, color);
+        if (flashing) drawImpact(cx, age / IMPACT_MS, color, laneW);
       }
     }
 
@@ -1042,6 +1098,44 @@
       ctx.restore();
     }
 
+    // 打击音：决定"这一帧该响哪几个音"，真正出声由 HitSound 负责。
+    //
+    // 两种口径的差别就是用户要听的东西：
+    //   planned（正解音）—— 一律用谱面时间 note.t，听起来是这张图本来的节奏；
+    //   actual（实际击打）—— 用 note.t + note.d，也就是手真正落下的时刻；
+    //                        d 缺失说明这一下没打（MISS），那就没有声音。
+    // 后者放出来会明显比前者"散"，抢拍会提前、拖拍会滞后，位置偏得越多听起来越乱。
+    function tickHitsound(now) {
+      var hs = opts.hitsound;
+      if (!hs || opts.hitsoundMode === 'off') { audioFrom = now; return; }
+      if (audioFrom === null) { audioFrom = now; return; }
+
+      var from = audioFrom;
+      audioFrom = now;
+      if (!(now > from)) return;
+      // 跳转、首帧、掉帧超过半秒：不补播。补播会把一整段音在几十毫秒里倒出来，像爆音。
+      if (now - from > 400) return;
+
+      var actual = opts.hitsoundMode === 'actual';
+      var hi = now + 260;
+      var i = lowerBound(Math.min(from, now) - 260);
+      for (; i < notes.length; i += 1) {
+        var n = notes[i];
+        if (n.t > hi) break;
+        var off = 0;
+        if (actual) {
+          // 实际击打模式：没有偏差记录 = 这一下根本没打出去，静音（这是"听出漏接"的关键）
+          if (typeof n.d !== 'number' || !isFinite(n.d)) continue;
+          off = n.d;
+        }
+        var trig = n.t + off;
+        if (trig > from && trig <= now) {
+          var hold = n.h !== null && n.h !== undefined && n.h > n.t;
+          hs.play(hold ? 'hold' : (n.j === 5 ? 'miss' : 'hit'));
+        }
+      }
+    }
+
     function render() {
       if (destroyed) return;
       if (needMeasure) measure();
@@ -1057,6 +1151,7 @@
         drawReleases(now);  // 长条松手位置（更淡更细，和按下线区分）
       }
       drawNotes(now);
+      tickHitsound(now);
     }
 
     // -------------------------------------------------------------------------
