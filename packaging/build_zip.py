@@ -31,7 +31,8 @@ SKIP_DIRS = {"__pycache__", "dist", "build", ".git", ".venv", "node_modules", "_
              # 崩溃报告是本机排障产物，不该跟着包发出去
              "crashreport"}
 # 回放、谱面、日志、本地配置一律不进压缩包：这些只可能是跑程序时产生的本机数据
-SKIP_EXT = {".pyc", ".pyo", ".osr", ".osu", ".osz", ".osb", ".osk", ".log", ".env"}
+SKIP_EXT = {".pyc", ".pyo", ".osr", ".osu", ".osz", ".osb", ".osk", ".log", ".env",
+            ".xlsx", ".xls", ".csv"}   # 表格只是设计期的参考，运行用不到
 SKIP_FILES = {"thumbs.db", "desktop.ini", "推送公开仓库.bat", "config.json", ".env",
               ".gitignore", "ROADMAP.md"}
 # 仓库根目录下这些前缀的 md 是给自己看的（审查报告、待修清单、检验记录），不进发行包
