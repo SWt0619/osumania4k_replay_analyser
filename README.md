@@ -26,7 +26,7 @@
 
 ### 使用便携版 zip（推荐）
 
-1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.6.0-win64.zip`。
+1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.7.0-win64.zip`。
 2. 解压到任意位置。
 3. 双击 `启动分析器.exe`。它会静默起服务，不弹任何窗口。
 4. 浏览器会打开 `http://127.0.0.1:8806/`。端口被占用时程序会自动往后找一个空的。
@@ -123,6 +123,7 @@
 10. **关掉网页，服务会自己退出**：页面每 10 秒报一次到，关标签页后 8 秒左右进程就结束，不用再手动清理（切到别的窗口不会误退，超时留了 75 秒）。调试时加 `--keep-alive` 可以让它常驻。
 11. **真出问题时先看 `crashreport\`**：页面提示「服务器内部错误」时，程序目录旁的 `crashreport\` 下会有一份 `crash-日期-时间-pid-指纹.txt`，里面是版本、系统、请求、完整堆栈和 `server.log` 的最后 60 行。提 issue 时把它一起发过来即可（同一处堆栈只会写一份，最多保留 50 份；回放坏掉、不是 4K 这类正常提示不会写进去）。
 12. **检查更新会请求 GitHub**：只有打开「关于」页或点「检查更新」时才会请求一次 GitHub 的 latest release，拿到版本号与下载地址，不上传任何本地数据；5 分钟内不会重复请求。没网时只显示「检查失败」，不影响其他功能。
+13. **浏览器要开硬件加速，别用节能模式**：回放是每帧重绘一块画布，一旦浏览器回落到软件渲染，播放会掉到个位数帧率（同一台机器上实测 198fps → 5fps）。使用前请确认浏览器**不在节能/省电模式**，并且**已开启硬件加速**。检查方法：地址栏打开 `chrome://gpu`（Helium 用 `helium://gpu`），看 `Compositing` 和 `Rasterization` 是不是 `Hardware accelerated`；如果写着 `Software only. Hardware acceleration disabled`，就是这个原因。
 
 ## 性能与排错
 
