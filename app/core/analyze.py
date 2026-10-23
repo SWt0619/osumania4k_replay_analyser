@@ -83,6 +83,12 @@ def ensure_supported(beatmap: Beatmap) -> None:
         raise AnalyzeError(unsupported_keys_message(beatmap))
 
 
+# 上一次"找不到谱面"时强制重扫的时间。用户连点几次导入时，
+# 不该每次都花一两秒重扫同一份曲库。
+_last_force_scan = [0.0]
+_FORCE_SCAN_GAP = 10.0
+
+
 def _find_beatmap(replay: Replay, beatmap_path: str | None, songs_root: str | None) -> tuple[Beatmap, str]:
     if beatmap_path:
         if not os.path.isfile(beatmap_path):
@@ -91,16 +97,28 @@ def _find_beatmap(replay: Replay, beatmap_path: str | None, songs_root: str | No
 
     lib = get_library(songs_root)
     if not lib.entries:
-        raise AnalyzeError(
-            "没找到 osu! 曲库，无法自动匹配谱面。请在页面下方手动选择对应的 .osu 文件"
-            "（或者告诉我你的 Songs 目录）。回放里的谱面 MD5 是 %s" % replay.beatmap_md5
-        )
+        # 连曲库都没建起来：可能是刚装的客户端，也可能路径指向了空目录。
+        lib = get_library(songs_root, force=True)
+        if not lib.entries:
+            raise AnalyzeError(
+                "没找到 osu! 曲库，无法自动匹配谱面。请在页面下方手动选择对应的 .osu 文件"
+                "（或者告诉我你的 Songs 目录）。回放里的谱面 MD5 是 %s" % replay.beatmap_md5
+            )
 
     entry = lib.find(replay.beatmap_md5)
     if entry is None:
+        # 走这一步的典型场景：用户在 lazer 里下载一张新图、打完直接导出回放拖进来。
+        # 这张图在 files/<x>/<xx>/ 里，Songs 一点没变，索引还是启动时建的那份。
+        # 与其让用户对着"曲库里没有这张谱面"重试，不如就地重扫一次再找。
+        # 带缓存的重扫只走目录，一两秒；扫完再找不到才是真的没有。
+        if time.time() - _last_force_scan[0] > _FORCE_SCAN_GAP:
+            _last_force_scan[0] = time.time()
+            lib = get_library(songs_root, force=True)
+            entry = lib.find(replay.beatmap_md5)
+    if entry is None:
         raise AnalyzeError(
-            "曲库里没有 MD5 为 %s 的谱面（可能没下载这张图）。请手动选择对应的 .osu 文件。"
-            % replay.beatmap_md5
+            "曲库里没有 MD5 为 %s 的谱面（已重新扫描过曲库，可能确实没下载这张图）。"
+            "请手动选择对应的 .osu 文件。" % replay.beatmap_md5
         )
     return parse_osu_file(entry.path), "auto"
 
@@ -887,12 +905,25 @@ def _pattern_breakdown(contexts) -> list[dict]:
 
 
 def _map_class(pattern_detail: list[dict], holds: int = 0, notes: int = 0) -> dict:
-    """整张图归到哪一类。Hybrid = RC 与 LN 都不占压倒性（见 patterns.dominant_class）。"""
+    """整张图归到哪一类。Hybrid = RC 与 LN 都不占压倒性（见 patterns.dominant_class）。
+
+    返回三样东西，别混用：
+      key       —— 细类（cut/stack/spam/tech/ln/hybrid），展示用；
+      group     —— 大类（rc/ln/hybrid），成长评估只认这个；
+      lnShare   —— **长条音符**占全部音符的比例，界面上"长条占 X%"就是它。
+    """
     share = {x["key"]: float(x["share"]) / 100.0 for x in pattern_detail}
     hold_ratio = (float(holds) / notes) if notes else 0.0
     key = patterns.dominant_class(share, hold_ratio)
-    return {"key": key, "label": patterns.CATEGORY_LABEL.get(key, key),
-            "lnShare": round(share.get("ln", 0.0) * 100, 1)}
+    return {
+        "key": key,
+        "group": "rc" if key in patterns.RC_CLASSES else key,
+        "label": patterns.CATEGORY_LABEL.get(key, key),
+        # 用音符比例，不是键型块比例：一张 RC1373 / LN920 的图，
+        # 块级只能数出 29%（长条在块里稀疏），而玩家看到的是 920/2293 = 40%。
+        "lnShare": round(hold_ratio * 100, 1),
+        "lnBlockShare": round(share.get("ln", 0.0) * 100, 1),
+    }
 
 
 def _ln_release_stats(match: MatchResult) -> dict:
