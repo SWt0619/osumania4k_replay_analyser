@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 from .beatmap import AUDIO_EXTS, compute_md5_variants, long_path, parse_osu_file, resolve_audio
 from .osu_dirs import (
+    _explicit_roots,
     default_export_roots,
     default_lazer_file_roots,
     default_songs_roots,
@@ -117,15 +118,55 @@ class LibraryEntry:
     mtime: float
 
 
-def _entry_for(full: str, cache: dict[str, LibraryEntry], sniff: bool = False) -> tuple[LibraryEntry | None, bool]:
+def _stamp_dir(path: str, deep: bool = False) -> tuple:
+    """一个目录的指纹：条目数 + 最新 mtime。
+
+    deep=True 给 lazer 的 files 库用：它按 <x>/<xx>/<哈希> 分三层，
+    新下载的图落在已经存在的第二层目录里，第一层 mtime 根本不变，
+    只看表层就会一直认为"曲库没变化"。多看一层是 256 次 stat，几十毫秒。
+    """
+    try:
+        names = os.listdir(long_path(path))
+    except OSError:
+        return (path, -1, 0.0)
+    latest = 0.0
+    for name in names:
+        try:
+            latest = max(latest, os.stat(os.path.join(long_path(path), name)).st_mtime)
+        except OSError:
+            continue
+    if not deep:
+        return (path, len(names), round(latest, 1))
+
+    count = 0
+    total = 0.0
+    for name in names:
+        sub = os.path.join(long_path(path), name)
+        try:
+            for sub2 in os.listdir(sub):
+                try:
+                    total += os.stat(os.path.join(sub, sub2)).st_mtime
+                    count += 1
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return (path, len(names), round(latest, 1), count, round(total, 1))
+
+
+def _entry_for(full: str, cache: dict[str, LibraryEntry], sniff: bool = False,
+               st: os.stat_result | None = None) -> tuple[LibraryEntry | None, bool]:
     """算（或复用）一个 .osu 的索引条目。返回 (entry, 是否新算了哈希)。
 
     复用条件同时比大小和 mtime：只比一个的话，改图但没改大小（换难度名）会被漏掉。
+    st 由遍历时顺手带过来：在 Windows 上每次 os.stat 都是实打实的一次系统调用，
+    几千个文件加起来就是一两秒。
     """
-    try:
-        st = os.stat(full)
-    except OSError:
-        return None, False
+    if st is None:
+        try:
+            st = os.stat(full)
+        except OSError:
+            return None, False
     hit = cache.get(full)
     if hit is not None and hit.size == st.st_size and abs(hit.mtime - st.st_mtime) < 1.0:
         return hit, False
@@ -148,44 +189,73 @@ def _entry_for(full: str, cache: dict[str, LibraryEntry], sniff: bool = False) -
     )
 
 
+def _iter_tree(root: str):
+    """遍历目录树，产出 (路径, stat)。用 scandir 顺手取 stat，避免再 stat 一遍。"""
+    stack = [long_path(root)]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            yield e.path, e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+
+
 def _scan_regular(scan_root: str, cache: dict[str, LibraryEntry]) -> tuple[list[LibraryEntry], list[bool]]:
     """普通目录树：直接按 .osu 扩展名收。"""
     found: list[LibraryEntry] = []
     hashed: list[bool] = []
     if not scan_root or not os.path.isdir(long_path(scan_root)):
         return found, hashed
-    for dirpath, _dirnames, filenames in os.walk(long_path(scan_root)):
-        for fn in filenames:
-            if not fn.lower().endswith(".osu"):
-                continue
-            entry, did_hash = _entry_for(os.path.join(dirpath, fn), cache)
-            if entry is None:
-                continue
-            found.append(entry)
-            hashed.append(did_hash)
+    for full, st in _iter_tree(scan_root):
+        if not full.lower().endswith(".osu"):
+            continue
+        entry, did_hash = _entry_for(full, cache, st=st)
+        if entry is None:
+            continue
+        found.append(entry)
+        hashed.append(did_hash)
     return found, hashed
 
 
-def _scan_lazer_store(store_root: str, cache: dict[str, LibraryEntry]) -> tuple[list[LibraryEntry], list[bool]]:
+def _scan_lazer_store(store_root: str, cache: dict[str, LibraryEntry],
+                      skip: dict[str, tuple[int, float]] | None = None,
+                      seen: set[str] | None = None) -> tuple[list[LibraryEntry], list[bool]]:
     """lazer 的 files 存储：哈希文件名、无扩展名，只能按内容辨认。
 
     超长图/新图往往只存在于这里（用户在 lazer 里玩，谱面不落在 Songs），
     不索引它的话回放永远提示"曲库里没有这张谱面"。
+
+    skip 是负缓存（见 `_load_cache_file`）：这里几千个文件绝大多数是音频和图片，
+    每次重扫都打开闻一遍要一两秒。大小和时间都没变就直接跳过。
     """
     found: list[LibraryEntry] = []
     hashed: list[bool] = []
     if not store_root or not os.path.isdir(long_path(store_root)):
         return found, hashed
-    for dirpath, _dirnames, filenames in os.walk(long_path(store_root)):
-        for fn in filenames:
-            full = os.path.join(dirpath, fn)
-            if fn.lower().endswith((".osu", ".osk", ".osr")):
-                continue  # 正常命名的交给普通扫描，免得同一份文件被索引两遍
-            entry, did_hash = _entry_for(full, cache, sniff=True)
-            if entry is None:
+    for full, st in _iter_tree(store_root):
+        if seen is not None:
+            seen.add(full)
+        if full.lower().endswith((".osu", ".osk", ".osr")):
+            continue  # 正常命名的交给普通扫描，免得同一份文件被索引两遍
+        if skip is not None:
+            prev = skip.get(full)
+            if prev and prev[0] == st.st_size and abs(prev[1] - st.st_mtime) < 1.0:
                 continue
-            found.append(entry)
-            hashed.append(did_hash)
+        entry, did_hash = _entry_for(full, cache, sniff=True, st=st)
+        if entry is None:
+            if skip is not None:
+                skip[full] = (st.st_size, st.st_mtime)
+            continue
+        found.append(entry)
+        hashed.append(did_hash)
     return found, hashed
 
 
@@ -204,17 +274,28 @@ def _resolve_md5_conflicts(entries: list[LibraryEntry]) -> dict[str, LibraryEntr
     return by_md5
 
 
-def _load_cache_file(cache_path: str, root: str) -> dict[str, LibraryEntry]:
-    """读落盘索引。版本号或根目录对不上就整份作废（宁可从算，也不用可疑数据）。"""
+def _load_cache_file(cache_path: str, root: str) -> tuple[dict[str, LibraryEntry], dict[str, tuple[int, float]]]:
+    """读落盘索引，返回（条目, 已确认不是谱面的文件）。
+
+    第二项是"负缓存"：lazer 的 files 库里有几千个音频、图片、视频，
+    每次重扫都要挨个打开闻一遍是不是 .osu，光这一步就一两秒。
+    记下"这个文件不是谱面"，下次大小和时间都没变就跳过。
+    """
     if not cache_path or not os.path.isfile(cache_path):
-        return {}
+        return {}, {}
     try:
         with open(cache_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:  # noqa: BLE001
-        return {}
+        return {}, {}
     if data.get("version") != CACHE_VERSION or data.get("root") != root:
-        return {}
+        return {}, {}
+    skipped: dict[str, tuple[int, float]] = {}
+    for item in data.get("skipped") or []:
+        try:
+            skipped[item["p"]] = (int(item["size"]), float(item["mtime"]))
+        except (KeyError, TypeError, ValueError):
+            continue
     out: dict[str, LibraryEntry] = {}
     for item in data.get("files", []):
         try:
@@ -228,7 +309,7 @@ def _load_cache_file(cache_path: str, root: str) -> dict[str, LibraryEntry]:
             )
         except (KeyError, TypeError, ValueError):
             continue
-    return out
+    return out, skipped
 
 
 def _save_cache_file(cache_path: str, lib: "Library") -> None:
@@ -242,6 +323,11 @@ def _save_cache_file(cache_path: str, lib: "Library") -> None:
         "files": [
             {"p": e.path, "raw": e.md5_raw, "lf": e.md5_lf, "crlf": e.md5_crlf, "size": e.size, "mtime": e.mtime}
             for e in lib.entries
+        ],
+        # 负缓存：确认过不是谱面的文件，下次别再打开闻一遍
+        "skipped": [
+            {"p": path, "size": size, "mtime": mtime}
+            for path, (size, mtime) in lib._skipped.items()
         ],
     }
     tmp = cache_path + ".tmp"
@@ -271,6 +357,8 @@ class Library:
     # 上次扫描时的曲库指纹与缓存路径：用来判断"这中间有没有下过新图"
     _stamp_at: tuple = field(default=(), repr=False)
     _cache_path: str = field(default="", repr=False)
+    # 扫过但不是谱面的文件 → (大小, mtime)，见 _load_cache_file 的说明
+    _skipped: dict[str, tuple[int, float]] = field(default_factory=dict, repr=False)
 
     # ---- 构建 -----------------------------------------------------------
     def build(self, root: str, force: bool = False, cache_path: str = "") -> None:
@@ -279,7 +367,11 @@ class Library:
             if not force and self.root == root and self.entries and (time.time() - self.built_at) < 3600:
                 return
 
-            cached = {} if force else _load_cache_file(cache_path, root)
+            # force 只表示"别管 TTL，现在重建"，不是"把所有文件重新哈希一遍"。
+            # 缓存按 (路径, 大小, mtime) 复用，重建基本只剩目录遍历；
+            # 丢掉缓存会让每次刷新都花四秒多去哈希几千个文件，而它们几乎全没变。
+            cached, skipped = _load_cache_file(cache_path, root)
+            self._skipped = skipped
             entries, stats = self._scan_all(root, cached)
             by_md5 = _resolve_md5_conflicts(entries)
 
@@ -296,6 +388,48 @@ class Library:
             self._stamp_at = self._stamp()
             if entries:
                 _save_cache_file(cache_path, self)
+            LAST_BUILD[0] = self.built_at
+
+    def _sources(self, root: str) -> list[tuple[str, bool]]:
+        """这次扫描会走到的全部目录，按（目录, 是否按内容辨认）给出。
+
+        `_scan_all` 和 `_stamp` 必须看同一批目录：只看主根的话，
+        lazer 新下载的图落在 files/ 里、父目录 mtime 不变，指纹就一直"没变化"，
+        索引永远不会刷新，导入回放就一直提示"曲库里没有这张谱面"。
+        """
+        out: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+
+        def add(path: str, sniff: bool) -> None:
+            if not path:
+                return
+            # 同一个目录常常既是"玩家手填的"又是"自动探测到的"（比如
+            # D://OSUStable//Databackup//Songs）。不去重就会扫两遍：
+            # 索引里多出一整份重复条目，右上角的谱面数也跟着虚高。
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                return
+            seen.add(key)
+            out.append((path, sniff))
+
+        add(root, False)
+        main = os.path.abspath(root or "")
+        # 玩家显式指定的其它根（设置页同时填了 stable 和 lazer）
+        for extra in _explicit_roots():
+            if os.path.abspath(extra) != main:
+                add(extra, False)
+        # 主根本身是自动探测到的曲库时，其它探测到的曲库也一起收
+        defaults = detected_songs_roots()
+        if any(main == os.path.abspath(d) for d in defaults):
+            for extra in defaults:
+                if os.path.abspath(extra) != main:
+                    add(extra, False)
+        for extra in default_export_roots():
+            if os.path.abspath(extra) != main:
+                add(extra, False)
+        for store in default_lazer_file_roots():
+            add(store, True)
+        return out
 
     def _scan_all(self, root: str, cached: dict[str, LibraryEntry]) -> tuple[list[LibraryEntry], tuple[int, int, int]]:
         """扫多处来源，返回（条目, (总数, 复用数, 新算哈希数)）。
@@ -314,22 +448,16 @@ class Library:
                 counts[0] += 1
                 counts[2 if did_hash else 1] += 1
 
-        collect(*_scan_regular(root, cached))
-        # 同时装了 lazer 与 stable 的人，两边 Songs 是两棵完全不同的树。
-        # 只扫主根的话，另一个客户端里的谱面会永远"曲库里没有这张谱面"。
-        # 仅在"主根本身就是自动探测到的曲库之一"时合并：玩家手填的目录（--songs、
-        # 网页里指定）不算，否则一次指定会把整机所有曲库都卷进来。
-        defaults = detected_songs_roots()
-        if any(os.path.abspath(root or "") == os.path.abspath(d) for d in defaults):
-            for extra in defaults:
-                if os.path.abspath(extra) != os.path.abspath(root or ""):
-                    collect(*_scan_regular(extra, cached))
-        # lazer 导出的谱面目录（osu\exports\<图集>\*.osu）也收进来
-        for extra in default_export_roots():
-            if os.path.abspath(extra) != os.path.abspath(root or ""):
-                collect(*_scan_regular(extra, cached))
-        for store in default_lazer_file_roots():
-            collect(*_scan_lazer_store(store, cached))
+        # 来源清单与 _stamp 共用一份，避免"指纹看的地方"和"实际扫的地方"慢慢对不上
+        seen: set[str] = set()
+        for path, sniff in self._sources(root):
+            if sniff:
+                collect(*_scan_lazer_store(path, cached, skip=self._skipped, seen=seen))
+            else:
+                collect(*_scan_regular(path, cached))
+        # 负缓存只留这次还见到的文件：lazer 删掉的图会一直留在里面，越积越多
+        if seen:
+            self._skipped = {p: v for p, v in self._skipped.items() if p in seen}
         # 扫描阶段就把 20 星以上的观赏图排掉：精确到 (bid, 难度名)，同包其他难度不受影响。
         high = _high_star_map()
         if high:
@@ -338,24 +466,18 @@ class Library:
 
     # ---- 新鲜度 ---------------------------------------------------------
     def _stamp(self) -> tuple:
-        """曲库目录的指纹：顶层条目数 + 最新 mtime。
+        """曲库的指纹，用来判断"该不该重扫"。
 
-        下载完一张新图，`Songs` 下会多一个目录，这两项都会变 —— 拿它当"该重扫了"的信号，
-        比定时重建便宜得多（几千个目录 stat 一遍，几十毫秒）。
+        必须和 `_sources()` 看同一批目录：只看主根的话，lazer 新下载的图落在
+        `files/<x>/<xx>/` 里，`Songs` 一点动静都没有，指纹就一直说"没变化"，
+        索引永远不刷新 —— 导入回放也就一直提示"曲库里没有这张谱面"。
         """
         if not self.root:
             return ()
-        try:
-            names = os.listdir(self.root)
-        except OSError:
-            return ()
-        latest = 0.0
-        for name in names:
-            try:
-                latest = max(latest, os.stat(os.path.join(self.root, name)).st_mtime)
-            except OSError:
-                continue
-        return (self.root, len(names), round(latest, 1))
+        marks = [self.root]
+        for path, sniff in self._sources(self.root):
+            marks.append(_stamp_dir(path, deep=sniff))
+        return tuple(marks)
 
     def ensure_fresh(self) -> bool:
         """曲库有变化就重建索引，返回是否重建了。
@@ -519,6 +641,9 @@ class Library:
 # 进程内单例（服务端只跑一个曲库索引）
 _LIB = Library()
 _CACHE_PATH = ""
+# 最近一次真正重建索引的时间。server 用它判断"这次分析里是不是重扫了曲库"，
+# 好在日志里留一句 —— 找不到谱面时静默扫一遍，事后排查会看不见线索。
+LAST_BUILD = [0.0]
 
 
 def set_cache_path(path: str) -> None:
@@ -541,10 +666,12 @@ def get_library(root: str | None = None, force: bool = False) -> Library:
         tmp = Library()
         tmp.build(root, force=force, cache_path="")
         return tmp
-    if not _LIB.entries:
+    # force 时即使已有条目也重建：调用方通常是因为"找不着这张谱面"才来的，
+    # 条目在不在并不代表它是最新的。
+    if force or not _LIB.entries:
         roots = default_songs_roots()
         if roots:
-            _LIB.build(roots[0], cache_path=_CACHE_PATH)
+            _LIB.build(roots[0], force=force, cache_path=_CACHE_PATH)
     return _LIB
 
 
