@@ -383,9 +383,9 @@
                 <option value="actual">实际击打</option>
               </select>
             </label>
-            <label class="mini-field" title="打击音自己的音量，和左边的回放音量分开调；谱面原声再大也不会盖住它">
+            <label class="mini-field" title="打击音自己的音量，和左边的回放音量分开调。最高 300%：谱面原声再大也能听见打击音（回放音量本身仍然最多 100%）">
               <span>打击音量</span>
-              <input type="range" id="hitVol" class="mini-range" min="0" max="100" step="5" value="70" aria-label="打击音音量">
+              <input type="range" id="hitVol" class="mini-range" min="0" max="300" step="5" value="70" aria-label="打击音音量">
               <b id="hitVolVal">70%</b>
             </label>
           </div>
@@ -508,7 +508,7 @@
           <div class="pg-profile">
             <label class="pg-field pg-wide">
               <span>你的 osu! 名字 / ID</span>
-              <input type="text" id="pgPlayer" class="text-input" placeholder="例如 Renjie Lan" autocomplete="off">
+              <input type="text" id="pgPlayer" class="text-input" placeholder="填写你在 osu! 里的名字" autocomplete="off">
             </label>
             <label class="pg-field">
               <span>段位体系</span>
@@ -574,7 +574,7 @@
 
           <label class="dir-field">
             <span>稳定版（osu!stable）</span>
-            <input type="text" id="pathStable" class="text-input" placeholder="例如 D:\OsuStable" autocomplete="off">
+            <input type="text" id="pathStable" class="text-input" placeholder="例如 D:\osu!" autocomplete="off">
             <em>选到<b>有 osu!.exe 的那一级</b>，不是里面的 Songs。</em>
           </label>
 
@@ -700,7 +700,19 @@
             </li>
             <li>
               <a href="https://github.com/LeoBlackMT/osumania_map_analyser" target="_blank" rel="noreferrer noopener">osumania_map_analyser</a>
-              <span>段位估算用的 Sunny 星级实现与 RC / LN 段位标尺（原样放在 <code>app\web\vendor\mma</code>）</span>
+              <span>段位估算的实现来源。Roxy 与 Azusa 两套算法、RC / LN 段位标尺都原样取自这里（见 <code>app\web\vendor\mma</code>）；
+                Roxy 是 4K RC 的元结构估算器，用 Ridge 元模型融合 Azusa / Daniel 的预测，
+                Azusa 则融合 Daniel 与 Sunny 的结果。算法细节见
+                <a href="https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/roxy_algorithm.md" target="_blank" rel="noreferrer noopener">Roxy</a> /
+                <a href="https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/azusa_algorithm.md" target="_blank" rel="noreferrer noopener">Azusa</a> 文档</span>
+            </li>
+            <li>
+              <a href="https://github.com/sunnyxxy/Star-Rating-Rebirth" target="_blank" rel="noreferrer noopener">Sunny Rework</a>
+              <span>Sunny 星级与长条（LN）星级。Roxy / Azusa 只做 4K RC，长条占比高的谱面在这里只用 Sunny 估段位</span>
+            </li>
+            <li>
+              <a href="https://thebagelofman.github.io/Daniel/" target="_blank" rel="noreferrer noopener">Daniel</a>
+              <span>Daniel 难度算法，作为 Azusa 与 Roxy 的输入之一</span>
             </li>
           </ul>
         </div>
