@@ -490,14 +490,17 @@ def judgement_windows(od: float, score_v2: bool = False) -> dict[str, float]:
     od = max(0.0, min(10.0, od))
     perfect = 16.0
     if score_v2:
-        perfect = float(math.floor(22.4 - 0.6 * od if od <= 5 else 24.9 - 1.1 * od))
+        raw = 22.4 - 0.6 * od if od <= 5 else 24.9 - 1.1 * od
+        # 别直接 floor(raw)：OD 9 时 raw 在二进制浮点里是 14.999999999999998，
+        # floor 成 14 会整整少给 1ms，v2 的 320 判定就比游戏里严一档。
+        perfect = float(math.floor(raw + 1e-9))
     return {
         "perfect": perfect,
-        "great": float(math.floor(64.0 - 3.0 * od)),
-        "good": float(math.floor(97.0 - 3.0 * od)),
-        "ok": float(math.floor(127.0 - 3.0 * od)),
-        "meh": float(math.floor(151.0 - 3.0 * od)),
-        "miss": float(math.floor(188.0 - 3.0 * od)),
+        "great": float(math.floor(64.0 - 3.0 * od + 1e-9)),
+        "good": float(math.floor(97.0 - 3.0 * od + 1e-9)),
+        "ok": float(math.floor(127.0 - 3.0 * od + 1e-9)),
+        "meh": float(math.floor(151.0 - 3.0 * od + 1e-9)),
+        "miss": float(math.floor(188.0 - 3.0 * od + 1e-9)),
     }
 
 
