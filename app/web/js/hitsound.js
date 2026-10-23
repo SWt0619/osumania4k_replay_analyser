@@ -17,9 +17,14 @@
   var LEVEL = { hit: 1.0, hold: 0.9, miss: 0.75 };
 
   function create() {
+    // 打击音自己的音量上限：3 = 300%。回放音量仍只到 1，这里单独放开，
+    // 因为谱面原声响的时候 100% 的打击音还是会被盖住。
+    var HIT_VOL_MAX = 3;
+
     var ctx = null;
     var master = null;                  // 回放音量 × MIX
-    var hitGain = null;                 // 打击音自己的比例（用户可调）
+    var hitGain = null;                 // 打击音自己的比例（用户可调，最高 3）
+    var limiter = null;                 // 只对峰值生效的限幅，防止 300% 时硬削波
     var buffers = null;                 // 合成音兜底
     var sample = null;                  // 解码后的 hihat
     var sampleState = 0;                // 0 未开始 / 1 加载中 / 2 就绪 / -1 失败
@@ -84,10 +89,19 @@
       }
       master = ctx.createGain();
       hitGain = ctx.createGain();
+      // 300% 叠在 100% 的回放音量上会超过 0 dB，硬削波听起来像"炸"。
+      // 挂一个只对峰值动作的限幅：正常音量下它完全不碰信号，只有冲顶才压一下。
+      limiter = ctx.createDynamicsCompressor();
+      limiter.threshold.value = -1;
+      limiter.knee.value = 4;
+      limiter.ratio.value = 20;
+      limiter.attack.value = 0.002;
+      limiter.release.value = 0.1;
       master.gain.value = 0;
       hitGain.gain.value = hitVolume;
       master.connect(hitGain);          // 两级串联：回放音量 × 打击音自己的音量
-      hitGain.connect(ctx.destination);
+      hitGain.connect(limiter);
+      limiter.connect(ctx.destination);
       buffers = {
         hit: render(980, 0.055, 0.55),
         hold: render(1240, 0.050, 0.35),
@@ -101,7 +115,7 @@
       if (!ctx || !master) return;
       var base = muted ? 0 : Math.max(0, Math.min(1, volume)) * MIX;
       master.gain.setTargetAtTime(base, ctx.currentTime, 0.01);
-      hitGain.gain.setTargetAtTime(muted ? 0 : Math.max(0, Math.min(1, hitVolume)),
+      hitGain.gain.setTargetAtTime(muted ? 0 : Math.max(0, Math.min(HIT_VOL_MAX, hitVolume)),
                                    ctx.currentTime, 0.01);
     }
 
