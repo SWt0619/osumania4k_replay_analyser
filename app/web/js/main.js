@@ -34,6 +34,9 @@
     audioOffset: 0,     // 音画偏移（ms）：正值 = 谱面比音频提前
     volume: 0.6,        // 回放音量 0..1（曲目原声往往很吵，默认压到 60%）
     muted: false,
+    // 打击音：off / planned（按谱面时间响）/ actual（按实际击打时间响）
+    hitsoundMode: "off",
+    hitsoundVolume: 0.7,   // 打击音自己的音量，和回放音量分开
     // 下面这些在流程中按需赋值，先在这里声明清楚类型与默认值，
     // 免得靠"某个函数里突然多出一个属性"来传递状态
     audioBroken: false,
@@ -71,6 +74,12 @@
       if (typeof p.scrollMs === "number" && p.scrollMs >= 300 && p.scrollMs <= 2600) state.scrollMs = p.scrollMs;
       if (typeof p.audioOffset === "number" && p.audioOffset >= -500 && p.audioOffset <= 500) state.audioOffset = p.audioOffset;
       if (typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1) state.volume = p.volume;
+      if (p.hitsoundMode === "off" || p.hitsoundMode === "planned" || p.hitsoundMode === "actual") {
+        state.hitsoundMode = p.hitsoundMode;
+      }
+      if (typeof p.hitsoundVolume === "number" && p.hitsoundVolume >= 0 && p.hitsoundVolume <= 1) {
+        state.hitsoundVolume = p.hitsoundVolume;
+      }
       if (p.judgeMode === "v1" || p.judgeMode === "v2" || p.judgeMode === "classic") state.judgeMode = p.judgeMode;
       if (p.judgeAlgo === "C" || p.judgeAlgo === "D") state.judgeAlgo = p.judgeAlgo;
       if (typeof p.hideLowConfidence === "boolean") state.hideLowConfidence = p.hideLowConfidence;
@@ -86,6 +95,8 @@
         scrollMs: state.scrollMs,
         audioOffset: state.audioOffset,
         volume: state.volume,
+        hitsoundMode: state.hitsoundMode,
+        hitsoundVolume: state.hitsoundVolume,
         judgeMode: state.judgeMode,
         judgeAlgo: state.judgeAlgo,
         hideLowConfidence: state.hideLowConfidence,
@@ -122,10 +133,28 @@
   //   * 刷新会先发 bye 再重新加载，新页面几毫秒内就报到，不会被误杀。
   var CLIENT_ID = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 
+  // 连续几次报不到就说明后台进程没了（重启、崩了、被别的东西关了）。
+  // 之前这里只是静默吞掉，页面会停在旧状态：设置页读不到配置、输入框空着，
+  // 用户以为是"没保存"，其实只是这个页面已经连不上服务了。
+  var lostCount = 0;
   function heartbeat() {
     try {
       fetch("/api/alive?c=" + CLIENT_ID, { cache: "no-store", keepalive: true })
-        .catch(function () { /* 服务没起也不影响页面 */ });
+        .then(function (r) {
+          if (!r.ok) throw new Error("bad");
+          if (lostCount >= 2) {
+            try { window.UI.toast("已重新连上服务"); } catch (e) { /* 界面还没就绪 */ }
+          }
+          lostCount = 0;
+        })
+        .catch(function () {
+          lostCount += 1;
+          if (lostCount === 2) {
+            try {
+              window.UI.toast("连不上服务了：重新打开程序后按 F5 刷新本页", true);
+            } catch (e) { /* 界面还没就绪 */ }
+          }
+        });
     } catch (e) { /* 忽略 */ }
   }
   heartbeat();
@@ -140,13 +169,15 @@
     document.querySelectorAll(".rail-btn").forEach((b) => {
       b.classList.toggle("is-active", b.dataset.tab === name);
     });
-    ["overview", "timeline", "errors", "replay", "chart", "chartonly", "details", "settings", "about"].forEach((t) => {
+    ["overview", "timeline", "errors", "replay", "chart", "chartonly", "details", "progress", "settings", "about"].forEach((t) => {
       const p = $("panel-" + t);
       if (p) p.hidden = t !== name;
     });
-    // 「关于」「设置」不依赖分析结果：没导入回放时也要能看；「只看谱面」同理
-    $("emptyState").hidden = !!state.data || name === "about" || name === "chartonly" || name === "settings";
+    // 「关于」「设置」「成长」不依赖分析结果：没导入回放时也要能看；「只看谱面」同理
+    $("emptyState").hidden = !!state.data || name === "about" || name === "chartonly"
+      || name === "settings" || name === "progress";
     if (name === "about") checkUpdate(false);
+    if (name === "progress") loadProgress();
     if (name === "settings") {
       loadPathSettings();
       loadHotkeySettings();
@@ -525,6 +556,36 @@
     state.player.render();
   }
 
+  // ---------------------------------------------------------------- 打击音
+  // AudioContext 要等用户真的点过播放才允许出声，所以实例建得晚、建一次就复用。
+  let hitsoundInst = null;
+  function ensureHitsound() {
+    if (hitsoundInst) return hitsoundInst;
+    if (!window.HitSound) return null;
+    hitsoundInst = window.HitSound.create();
+    return hitsoundInst;
+  }
+
+  // 把当前模式/音量推给播放器与音效引擎。切模式、拖音量、点静音都走这里，
+  // 免得三处各写一遍、日后漏掉一处就出现"看着开着但没声音"。
+  function syncHitsound() {
+    const on = state.hitsoundMode !== "off";
+    const hs = on ? ensureHitsound() : hitsoundInst;
+    if (hs) {
+      hs.setVolume(state.muted ? 0 : state.volume);
+      hs.setHitVolume(state.hitsoundVolume);
+      if (on) hs.unlock(state.muted ? 0 : state.volume);
+    }
+    if (state.player) {
+      state.player.setOptions({
+        hitsound: on ? hs : null,
+        hitsoundMode: state.hitsoundMode,
+      });
+    }
+    // 对比模式那一路不出声：两路同时响会变成两份叠在一起的节奏，反而听不清哪边有问题
+    if (state.player2) state.player2.setOptions({ hitsound: null, hitsoundMode: "off" });
+  }
+
   // ---------------------------------------------------------------- 播放器
   // 播放器实例只 create 一次，但每次分析都必须重新 load 音符：
   // 换第二份回放时实例已经存在，只更新选项不会换掉上一局的音符。
@@ -537,6 +598,8 @@
       judgementFilter: state.errorsOnly ? "errors" : "all",
       showJudgements: true,
       theme: readTheme(),
+      hitsound: state.hitsoundMode === "off" ? null : ensureHitsound(),
+      hitsoundMode: state.hitsoundMode,
     };
     if (!state.player) {
       state.player = window.ManiaPlayer.create(canvas, opts);
@@ -562,6 +625,7 @@
       lastObject: state.data.beatmap.lastObject,
     });
     applyNoteSkin(state.data);
+    syncHitsound();
     state.player.resize();
     state.player.setTime(currentTimeMs());
     state.player.render();
@@ -680,6 +744,12 @@
 
     state.playing = true;
     setPlayIcon(true);
+    // 打击音要在"用户手势"里解锁，点播放是最自然的一次。
+    // 没开音效时这里什么也不做，不会白建一个 AudioContext。
+    if (state.hitsoundMode !== "off") {
+      const hs = ensureHitsound();
+      if (hs) hs.unlock(state.muted ? 0 : state.volume);
+    }
     if (state.audio) {
       state.audio.play().then(() => {
         const wasBroken = state.audioBroken;
@@ -903,11 +973,26 @@
     if (v) v.textContent = pct + "%";
   }
 
+  // 打击音自己的音量条（和上面那条回放音量互相独立）
+  function syncHitVolUi() {
+    const pct = Math.round(state.hitsoundVolume * 100);
+    const s = $("hitVol");
+    if (s) {
+      s.value = String(pct);
+      s.style.backgroundSize = pct + "% 100%";
+    }
+    const v = $("hitVolVal");
+    if (v) v.textContent = pct + "%";
+  }
+
   // 把音量/静音状态推给音频元素（换歌、改设置、取消静音都要走这里）
   function applyVolume() {
-    if (!state.audio) return;
-    state.audio.volume = state.volume;
-    state.audio.muted = state.muted;
+    if (state.audio) {
+      state.audio.volume = state.volume;
+      state.audio.muted = state.muted;
+    }
+    // 打击音跟着同一个音量走：只调谱面原声、打击音不跟着变的话，静音时它还在响
+    if (hitsoundInst) hitsoundInst.setVolume(state.muted ? 0 : state.volume);
   }
 
   // 失误按时间预排序一次，播放时二分找最近的那条。
@@ -1205,9 +1290,25 @@
   // 难度轴是段位，而段位要前端用 Sunny 算（后端没有 JS 运行时），所以这条链是：
   // 「先算段位 → 把段位标签发给后端 → 后端用会话里已有的键型构成去索引里找」。
   // 任何一步失败都只是这张卡片不出现，不影响报告其余部分，也不弹错误。
+  // 段位卡片算出来是多少，成长页就该按多少折合。
+  // 卡片用的是 Sunny → Azusa → Roxy；写入历史时用的是 MSD 标定，两者能差一两段，
+  // 不回填就会出现"页面写 11.17、折合按 12.39 算"的错位。
+  function saveDanToHistory(data, res) {
+    if (!res || !res.ok) return;
+    // Sunny 只给星级，没有段位数值；只有 Azusa / Roxy 才有可比的数
+    if (res.method !== "roxy" && res.method !== "azusa") return;
+    const value = Number(res.numeric);
+    if (!Number.isFinite(value) || value <= 0) return;
+    const replay = (data && data.replay) || {};
+    const key = String(replay.replayMd5 || replay.fileHash || "").trim();
+    if (!key) return;
+    window.API.setHistoryDan(key, value).catch(() => { /* 回填失败不影响页面 */ });
+  }
+
   async function loadSimilar(data) {
     const res = await window.UI.applySunnyDan(data);
     if (!res || !res.label || state.data !== data) return;
+    saveDanToHistory(data, res);
     const items = await window.API.similar(data.session, res.label);
     if (state.data !== data) return;   // 期间换了回放，别把上一局的结果画上来
     window.UI.renderSimilar(items);
@@ -1507,6 +1608,12 @@
     $("emptyState").hidden = true;
 
     renderView(view);
+    // 导入这一刻曲库里可能刚多了一张图（lazer 下载之后索引往往是旧的）。
+    // 后端在找不到谱面时会自己重扫，这里把右上角的数量重新读一次，
+    // 否则那个数字会一直停在启动时的值。
+    window.API.library()
+      .then((info) => window.UI.renderLibrary(info))
+      .catch(() => { /* 读不到就保持原样，不影响报告 */ });
     window.UI.renderSimilar(null);   // 段位还没算出来，这张卡片先不显示
     scheduleSimilar(view);          // 首屏之后空闲时再算段位 → 推荐
     renderLnStats(data);
@@ -2034,27 +2141,53 @@
       const ex = info.examples || {};
       if (ex.stable) $("pathStable").placeholder = "例如 " + ex.stable;
       if (ex.lazer) $("pathLazer").placeholder = "例如 " + ex.lazer;
+      // 同时填了两个客户端时，只报第一个根会让人以为第二个没生效，这里标一下总数
+      const rootCount = (info.songsRoots || []).length;
       status.textContent = info.count
-        ? "当前曲库：" + info.songsRoot + "（" + info.count + " 张谱面）"
+        ? "当前曲库：" + info.songsRoot
+          + (rootCount > 1 ? "（共 " + rootCount + " 处曲库）" : "")
+          + "，" + info.count + " 张谱面"
         : "当前还没找到曲库。填完下面的路径点保存试试。";
+      // 把配置文件的落点写出来：存不住的时候，看这一行是不是每次都换地方就够了
+      const cfg = $("pathConfig");
+      if (cfg) {
+        cfg.textContent = info.configPath
+          ? (info.configShared
+            ? "配置文件（不在程序目录，已改存到固定位置）："
+            : "配置文件：") + info.configPath
+          : "";
+      }
     } catch (e) {
       status.textContent = "读取当前设置失败：" + (e.message || e);
     }
   }
 
-  async function savePaths() {
+  async function savePaths(forceClear) {
     const btn = $("btnSavePaths");
     const status = $("pathStatus");
+    const stable = $("pathStable").value.trim();
+    const lazer = $("pathLazer").value.trim();
+    const clearing = !!forceClear || (!stable && !lazer);
+    // 两栏都空 = 要清除。空表单本身不再有副作用（后端也拦了），
+    // 只有这里明确确认过、带上 clear 标记才真的删。
+    if (clearing && !forceClear
+        && !window.confirm("两栏都是空的，会清掉之前保存的目录、改回自动探测。确定吗？")) {
+      return;
+    }
     const old = btn.textContent;
     btn.disabled = true;
     btn.textContent = "扫描中…";
     status.className = "dir-status";
     status.textContent = "正在按新路径扫描曲库，谱面多的话要几秒…";
     try {
-      const r = await window.API.savePaths({
-        stableDir: $("pathStable").value.trim(),
-        lazerDir: $("pathLazer").value.trim(),
-      });
+      const r = await window.API.savePaths(clearing
+        ? { clear: true }
+        : { stableDir: stable, lazerDir: lazer });
+      if (r.unchanged) {
+        status.className = "dir-status";
+        status.textContent = r.hint || "没有改动。";
+        return;
+      }
       status.className = "dir-status " + (r.count ? "good" : "bad");
       status.textContent = r.count
         ? "完成：找到 " + r.count + " 张谱面（" + r.songsRoot + "）"
@@ -2166,7 +2299,15 @@
     $("btnCloseModal").addEventListener("click", () => closeModal("bmModal"));
     $("btnPickOsu").addEventListener("click", () => $("fileOsu").click());
     // 曲库标签点一下就能手动指定游戏目录（自动找不到时的兜底）
-    $("btnSavePaths").addEventListener("click", savePaths);
+    $("btnSavePaths").addEventListener("click", () => savePaths(false));
+    if ($("btnClearPaths")) {
+      $("btnClearPaths").addEventListener("click", async () => {
+        if (!window.confirm("清掉手动指定的游戏目录，改回自动探测？")) return;
+        $("pathStable").value = "";
+        $("pathLazer").value = "";
+        await savePaths(true);
+      });
+    }
     on("btnSaveHotkey", "click", saveHotkeySettings);
     $("btnAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = false; });
     $("btnCloseAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = true; });
@@ -2220,8 +2361,38 @@
       if (state.audio) state.audio.playbackRate = state.speed;
       window.UI.toast("播放速度 " + state.speed + "×（音频与画面同步变速）");
     });
+    // 打击音：关 / 正解音 / 实际击打。切换时顺手解锁 AudioContext ——
+    // 浏览器只认"用户手势"这个入口，等播放再解锁会漏掉第一小节。
+    const hsSel = $("hitsound");
+    if (hsSel) {
+      hsSel.value = state.hitsoundMode;
+      hsSel.addEventListener("change", () => {
+        const v = hsSel.value;
+        state.hitsoundMode = (v === "actual" || v === "planned") ? v : "off";
+        syncHitsound();
+        savePrefs();
+        if (state.hitsoundMode === "off") {
+          window.UI.toast("打击音已关闭");
+        } else if (state.hitsoundMode === "actual") {
+          window.UI.toast("打击音按实际击打播放：抢拍会更早、拖拍会更晚，漏接没有声音");
+        } else {
+          window.UI.toast("打击音按谱面正解时间播放：这是这张图本来的节奏");
+        }
+      });
+    }
+
+    // 打击音音量：独立于回放音量，调到 0 就等于只留谱面原声
+    const hv = $("hitVol");
+    if (hv) {
+      hv.addEventListener("input", () => {
+        state.hitsoundVolume = Math.max(0, Math.min(1, Number(hv.value) / 100));
+        if (hitsoundInst) hitsoundInst.setHitVolume(state.hitsoundVolume);
+        syncHitVolUi();
+        savePrefs();
+      });
+    }
+
     $("btnMute").addEventListener("click", () => {
-      if (!state.audio) return;
       state.muted = !state.muted;
       applyVolume();
       $("btnMute").classList.toggle("is-on", state.muted);
@@ -2573,6 +2744,322 @@
     }
   }
 
+  // ---------------------------------------------------------------- 成长
+  // 折算规则、段位换算都在服务端（app/core/progress.py），这里只负责选段位和摆结果。
+  // 段位阶梯要和后端 LADDER 一致：少一档，选了 Epsilon 就会出现"目标段位不在列表里"。
+  const REFORM_OPTIONS = [
+    { v: -3, t: "INTRO-1" }, { v: -2, t: "INTRO-2" }, { v: -1, t: "INTRO-3" },
+    { v: 1, t: "1 段" }, { v: 2, t: "2 段" }, { v: 3, t: "3 段" }, { v: 4, t: "4 段" },
+    { v: 5, t: "5 段" }, { v: 6, t: "6 段" }, { v: 7, t: "7 段" }, { v: 8, t: "8 段" },
+    { v: 9, t: "9 段" }, { v: 10, t: "10 段" },
+    // Alpha 起一律 1 段一跳：Alpha 就是 11 段，与后端 LADDER 保持一致
+    { v: 11, t: "Alpha" }, { v: 12, t: "Beta" }, { v: 13, t: "Gamma" },
+    { v: 14, t: "Delta" }, { v: 15, t: "Epsilon" },
+    { v: 16, t: "Zeta" }, { v: 17, t: "Eta" },
+  ];
+  // Malody v3 的段位顺序是 Regular 0~10 → Extra 1~9 → Extra Final。
+  // 值只是传给后端的选择码（11~19 表示 Extra 1~9、20 表示 Final），别拿它当段位用。
+  const MALODY_OPTIONS = [
+    ...Array.from({ length: 11 }, (_, i) => ({ v: i, t: "Regular " + i })),
+    ...Array.from({ length: 9 }, (_, i) => ({ v: 11 + i, t: "Extra " + (i + 1) })),
+    { v: 20, t: "Extra Final" },
+  ];
+
+  function fillDanOptions(type, current) {
+    const sel = $("pgValue");
+    if (!sel) return;
+    const list = type === "malody" ? MALODY_OPTIONS : REFORM_OPTIONS;
+    sel.replaceChildren(...list.map((o) => {
+      const opt = document.createElement("option");
+      opt.value = String(o.v);
+      opt.textContent = o.t;
+      return opt;
+    }));
+    const keep = list.find((o) => String(o.v) === String(current));
+    if (keep) sel.value = String(keep.v);
+  }
+
+  // 计入评估的回放：综合是 50 格（5×10），单个练法 10 格。没填满的格子留空，
+  // 玩家一眼就能看出"还差多少局"，也看得见具体是哪几把在算数。
+  let pgState = { open: null, data: null };
+
+  function playCell(p) {
+    const cell = document.createElement("div");
+    cell.className = "pg-cell";
+    cell.title = [(p.artist ? p.artist + " - " : "") + p.title, "[" + (p.difficulty || "") + "]",
+      Number(p.acc || 0).toFixed(2) + "%", "谱面 " + Number(p.dan || 0).toFixed(2) + " 段",
+      "折算 " + Number(p.value || 0).toFixed(2) + " 段"].join(" · ");
+
+    const body = document.createElement("div");
+    body.className = "pg-cell-body";
+    const title = document.createElement("span");
+    title.className = "pg-cell-title";
+    title.textContent = p.title || "—";
+    const diff = document.createElement("span");
+    diff.className = "pg-cell-diff";
+    diff.textContent = p.difficulty || "";
+    const acc = document.createElement("span");
+    acc.className = "pg-cell-acc" + (Number(p.acc) < 96 ? " is-low" : "");
+    acc.textContent = Number(p.acc || 0).toFixed(2) + "%";
+    body.append(title, diff, acc);
+
+    // 右侧竖条：这一局按我们的折算规则值多少段。窄格里放不下整句，
+    // 上面一行写"折合"，下面把数字和"段"并在一起，避免拆成三行显得散。
+    const side = document.createElement("div");
+    side.className = "pg-cell-side";
+    const cap = document.createElement("span");
+    cap.className = "pg-cell-cap";
+    cap.textContent = "折合";
+    const val = document.createElement("b");
+    val.className = "pg-cell-dan";
+    val.textContent = Number(p.value || 0).toFixed(1);
+    const unit = document.createElement("span");
+    unit.className = "pg-cell-unit";
+    unit.textContent = "段";
+    val.append(unit);
+    side.append(cap, val);
+
+    cell.append(body, side);
+    return cell;
+  }
+
+  function emptyCell() {
+    const cell = document.createElement("div");
+    cell.className = "pg-cell is-empty";
+    return cell;
+  }
+
+  function renderCells(box, plays, total) {
+    if (!box) return;
+    const list = Array.isArray(plays) ? plays : [];
+    const cells = [];
+    const n = Math.max(total, Math.min(list.length, total));
+    for (let i = 0; i < n; i += 1) {
+      cells.push(i < list.length ? playCell(list[i]) : emptyCell());
+    }
+    box.replaceChildren(...cells);
+  }
+
+  // 同一时间只展开一个：综合与四个练法互斥
+  function showGrid(which) {
+    const data = pgState.data;
+    if (!data) return;
+    const next = pgState.open === which ? null : which;
+    pgState.open = next;
+
+    const hero = $("pgHero");
+    if (hero) hero.classList.toggle("is-open", next === "overall");
+
+    document.querySelectorAll(".pg-skill").forEach((el) => {
+      el.classList.toggle("is-open", el.dataset.skill === next);
+    });
+
+    const grid = $("pgGrid");
+    const skillGrid = $("pgSkillGrid");
+    const note = $("pgSkillNote");
+    if (grid) grid.hidden = next !== "overall";
+    const skillOpen = next !== null && next !== "overall";
+    if (skillGrid) skillGrid.hidden = !skillOpen;
+    if (note) note.hidden = !skillOpen;
+
+    if (next === "overall") {
+      renderCells(grid, (data.overall || {}).plays || [], 50);
+    } else if (skillOpen) {
+      const s = (data.skills || {})[next] || {};
+      if (note) {
+        note.textContent = (s.label || next) + "：实际计入 " + (s.used || 0)
+          + " 局（每类最多取 10 局）";
+      }
+      renderCells(skillGrid, s.plays || [], 10);
+    }
+  }
+
+  function renderProgress(data) {
+    const overall = data.overall || {};
+    const target = data.target || {};
+    const prof = data.profile || {};
+    const owner = data.owner || {};
+
+    // 没填本人名字就不出任何评估：否则会把别人的成绩也算进来
+    const need = !!data.needPlayer;
+    if ($("pgBody")) $("pgBody").hidden = need;
+    if (need) return;
+
+    // 每次重绘都收起展开面：数据可能变了，留着旧的会误导
+    pgState = { open: null, data: data };
+    if ($("pgGrid")) $("pgGrid").hidden = true;
+    if ($("pgSkillGrid")) $("pgSkillGrid").hidden = true;
+    if ($("pgSkillNote")) $("pgSkillNote").hidden = true;
+
+    const hero = $("pgHero");
+    if (hero) hero.hidden = false;
+
+    const warn = $("pgWarn");
+    if (warn) {
+      if (data.beyond) {
+        warn.hidden = false;
+        warn.textContent = "Delta 及以上段位超出了这套评估的能力范围：能参考的谱面样本很少，"
+          + "MSD 标尺在高段位也不够稳。下面的结果只作参考。";
+      } else {
+        warn.hidden = true;
+      }
+    }
+
+    if ($("pgDan")) {
+      $("pgDan").textContent = overall.visible && overall.dan != null
+        ? Number(overall.dan).toFixed(2) + " 段" : "—";
+    }
+    if ($("pgSample")) {
+      // 只留最要紧的一条：参与评估的局数，以及为什么有些图不算。
+      // 别人打的、认不出玩家的数量放在 hover 里，避免这一行读起来像账单。
+      const f = data.filters || {};
+      const tip = ["参与评估 " + overall.count + " / " + data.minSessions + " 局"];
+      if (f.others) tip.push("已排除别人 " + f.others + " 局");
+      if (f.unknown) tip.push(f.unknown + " 局认不出玩家");
+      if (f.lnHybrid) tip.push("LN / Hybrid " + f.lnHybrid + " 局暂不计入");
+      // 这条是规则说明，不是统计：低于门槛的局直接不进估算，数字放括号里就够
+      tip.push("仅 v1acc 高于 91% 的成绩进入个人段位估算"
+        + (f.lowAcc ? "（已排除 " + f.lowAcc + " 局）" : ""));
+      $("pgSample").textContent = overall.count + " / " + data.minSessions
+        + " 局（LN Hybrid 图暂不进入评价体系）";
+      $("pgSample").title = tip.join(" · ");
+    }
+    if ($("pgTarget")) $("pgTarget").textContent = target.label ? "目标 " + target.label : "";
+    const fill = $("pgBarFill");
+    if (fill) fill.style.width = Math.round(Math.min(1, Math.max(0, target.progress || 0)) * 100) + "%";
+
+    const hint = $("pgHint");
+    if (hint) {
+      hint.className = "pg-hint";
+      if (!overall.visible) {
+        hint.textContent = "已记录 " + overall.count + " 局，再打 " + overall.need
+          + " 局才能出综合评估。样本少的时候结果不稳，先按感觉练。";
+        hint.classList.add("warn");
+      } else if (target.status === "above") {
+        hint.textContent = "现在的综合段位已经高出设定 " + Number(-target.gap).toFixed(2)
+          + " 段，可以把当前段位往上调一档，进度条才有意义。";
+      } else if (target.status === "ready") {
+        hint.textContent = "已经够到 " + target.label + "：把这几张稳住，过段就是时间问题。";
+      } else if (target.status === "close") {
+        hint.textContent = "离 " + target.label + " 还差 " + Number(target.gap).toFixed(2)
+          + " 段，最近这 50 局里已经有 " + target.qualified + " 局过了线。";
+      } else if (target.gap !== null && target.gap !== undefined) {
+        hint.textContent = "离 " + target.label + " 还差 " + Number(target.gap).toFixed(2)
+          + " 段，先把同段位稳定打到 96% 以上。";
+      } else {
+        hint.textContent = "";
+      }
+      if (overall.preliminary) {
+        hint.classList.add("warn");
+        hint.textContent += "（样本 " + overall.count + " 局，属于初步评估）";
+      }
+    }
+
+    const box = $("pgSkills");
+    if (!box) return;
+    const skills = data.skills || {};
+    box.replaceChildren(...Object.keys(skills).map((key) => {
+      const s = skills[key];
+      const card = document.createElement("div");
+      card.className = "pg-skill" + (s.visible ? "" : " is-empty");
+      card.dataset.skill = key;
+      card.title = "点一下展开这一类计入评估的回放";
+      card.addEventListener("click", () => showGrid(key));
+      const head = document.createElement("h4");
+      head.textContent = s.label + "（" + key + "）";
+      const big = document.createElement("b");
+      big.textContent = s.visible && s.dan != null ? Number(s.dan).toFixed(2) + " 段" : "样本不足";
+      const sub = document.createElement("span");
+      sub.textContent = s.visible
+        ? "样本 " + s.count + " 局 · 取最好 " + s.used + (s.preliminary ? " · 初步" : "")
+        : "已 " + s.count + " 局，还差 " + s.need + " 局";
+      card.append(head, big, sub);
+      return card;
+    }));
+  }
+
+  async function loadProgress() {
+    const status = $("pgStatus");
+    try {
+      const data = await window.API.progress();
+      const prof = data.profile || {};
+      if ($("pgType")) $("pgType").value = prof.type || "reform";
+      if ($("pgPlayer")) $("pgPlayer").value = prof.player || "";
+      fillDanOptions(prof.type || "reform", prof.value);
+      renderProgress(data);
+      if (status) {
+        status.className = "dir-status";
+        if (data.needPlayer) {
+          status.textContent = "先填自己的 osu! 名字并保存：只有本人的成绩才算进评估。";
+          return;
+        }
+        const owner = data.owner || {};
+        if (!prof.dan) {
+          status.textContent = "已认出你的记录 " + (owner.mine || 0) + " 局，选一个当前段位保存后就能看进度。";
+          return;
+        }
+        // Malody 的定位要说清是"段位谱实测"，不然和 REFORM 的数值容易被当成同一把尺
+        let head = "当前定位 " + (prof.label || "") + "（按 REFORM 标尺 "
+          + Number(prof.dan || 0).toFixed(2) + " 段）";
+        if (prof.type === "malody" && prof.malodyLabel) {
+          head = "当前定位 " + prof.malodyLabel + "（段位谱实测相当于 REFORM "
+            + Number(prof.dan || 0).toFixed(2) + " 段）";
+        }
+        const bits = [head];
+        if (owner.others) bits.push("已排除别人打的 " + owner.others + " 局");
+        if (owner.unknown) bits.push(owner.unknown + " 局认不出玩家，暂不计入");
+        status.textContent = bits.join("，");
+      }
+    } catch (e) {
+      if (status) {
+        status.className = "dir-status bad";
+        status.textContent = "读取失败：" + (e.message || e);
+      }
+    }
+  }
+
+  async function saveProfile() {
+    const player = $("pgPlayer") ? $("pgPlayer").value.trim() : "";
+    const type = $("pgType") ? $("pgType").value : "reform";
+    const value = $("pgValue") ? $("pgValue").value : "";
+    const status = $("pgStatus");
+    if (!player) {
+      if (status) {
+        status.className = "dir-status bad";
+        status.textContent = "先填自己的 osu! 名字或 ID。";
+      }
+      return;
+    }
+    if (status) {
+      status.className = "dir-status";
+      status.textContent = "换算中…";
+    }
+    try {
+      const res = await window.API.saveProfile(player, type, Number(value));
+      if (status) {
+        status.className = "dir-status good";
+        status.textContent = type === "malody"
+          ? "已保存：" + (res.profile.malodyLabel || "")
+            + "，段位谱实测相当于 REFORM " + Number(res.profile.dan).toFixed(2) + " 段"
+          : "已保存：" + (res.profile.label || "");
+      }
+      await loadProgress();
+    } catch (e) {
+      if (status) {
+        status.className = "dir-status bad";
+        status.textContent = e.message || "保存失败";
+      }
+    }
+  }
+
+  function bindProgress() {
+    on("pgType", "change", () => fillDanOptions($("pgType").value, null));
+    on("btnSaveProfile", "click", saveProfile);
+    // 综合卡片整块可点：展开 5×10 的明细
+    on("pgHero", "click", () => showGrid("overall"));
+    fillDanOptions("reform", 7);
+  }
+
   // ---------------------------------------------------------------- 启动
   async function init() {
     const ver = assetVersion() || "无版本参数";
@@ -2588,6 +3075,7 @@
     });
     bindFolds();
     bindEvents();
+    bindProgress();
     setPlayIcon(false);
     loadPrefs();
     applyTheme(state.theme);
@@ -2595,6 +3083,10 @@
     syncScrollUi();
     syncOffsetUi();
     syncVolumeUi();
+    // 勾选框是在 bindEvents 里先按默认值画的，那时还没读本地偏好。
+    // 少了这一行，值其实存住了、过滤也生效，但界面永远显示成没勾 —— 看起来就像没保存。
+    syncLowConfidenceUI();
+    syncHitVolUi();
 
     try {
       const info = await window.API.library();
