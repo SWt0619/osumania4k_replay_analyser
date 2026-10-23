@@ -223,6 +223,8 @@ def _play_row(session: dict, value: float) -> dict:
         "acc": round(float(session.get("accuracy") or 0), 2),
         "value": round(value, 2),
         "skill": session.get("skill"),
+        # 说明为什么这张没进单键型 b10（键型分散 / LN Hybrid / 认不出玩家）
+        "note": session.get("pattern_label") or "",
     }
 
 
