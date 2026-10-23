@@ -403,8 +403,8 @@ class Library:
         def add(path: str, sniff: bool) -> None:
             if not path:
                 return
-            # 同一个目录常常既是"玩家手填的"又是"自动探测到的"（比如
-            # D://OSUStable//Databackup//Songs）。不去重就会扫两遍：
+            # 同一个目录常常既是"玩家手填的"又是"自动探测到的"（比如手动填了
+            # 曲库路径，而那个路径本来就在探测结果里）。不去重就会扫两遍：
             # 索引里多出一整份重复条目，右上角的谱面数也跟着虚高。
             key = os.path.normcase(os.path.abspath(path))
             if key in seen:
