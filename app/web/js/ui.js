@@ -223,11 +223,17 @@
   // 四大类的颜色固定，和「分段」里的颜色一致，方便对上号。
   const PATTERN_COLORS = { stack: "#f472b6", cut: "#7c5cff", spam: "#22d3ee", tech: "#fbbf24", ln: "#34d399", calm: "#94a3b8" };
 
+  // 这里的 lnShare 是"长条音符占全部音符的比例"，和玩家数出来的 RC/LN 对得上。
+  // （键型块的比例会低不少：长条在块里稀疏，一张 40% 长条的图按块只数得出 29%。）
   function mapClassText(info) {
     if (!info || !info.label) return "";
-    return info.key === "hybrid"
-      ? "整图类型：" + info.label + "（长条占 " + info.lnShare + "%，常规键型占 " + (100 - info.lnShare).toFixed(1) + "%）"
-      : "整图类型：" + info.label + (info.key === "ln" ? "（长条占 " + info.lnShare + "%）" : "");
+    var group = info.group || info.key;
+    if (group === "hybrid" || group === "ln") {
+      return "整图类型：" + info.label
+        + "（长条音符占 " + info.lnShare + "%，常规音符占 " + (100 - info.lnShare).toFixed(1) + "%）"
+        + " · 长条的准确率口径不同，这张图不计入个人段位估算";
+    }
+    return "整图类型：" + info.label;
   }
 
   function renderPatternShare(data) {
