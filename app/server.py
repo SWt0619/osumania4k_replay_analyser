@@ -32,6 +32,7 @@ from app.core import (  # noqa: E402
     audio_fetch,
     config_store,
     crashreport,
+    finder,
     history,
     hotkey,
     json_safe,
@@ -1063,6 +1064,29 @@ class _AnalyzeApiMixin(_SessionView):
             items = []
         return self._json({"ok": True, "items": items})
 
+    # ---- 随机找图 -------------------------------------------------------
+    def _random_charts(self, qs):
+        """按星数与键型随机抽几张图。全部读随附索引，不联网。"""
+        def num(key, default):
+            try:
+                return float((qs.get(key) or [default])[0])
+            except (TypeError, ValueError):
+                return default
+
+        keys = [c.strip() for c in ((qs.get("keys") or [""])[0]).split(",") if c.strip()]
+        exclude = []
+        for part in ((qs.get("exclude") or [""])[0]).split(","):
+            part = part.strip()
+            if part.isdigit():
+                exclude.append(int(part))
+        try:
+            payload = finder.pick(num("starMin", 3.0), num("starMax", 6.0), keys,
+                                  int(num("n", 8)), exclude)
+        except Exception as e:  # noqa: BLE001 - 找图失败不该把页面带崩
+            log("[finder] 失败：%r" % (e,))
+            return self._error("找图出错了：%s" % (e,), 500)
+        return self._json(payload)
+
     # ---- 备用通道：直接读 _replays 目录 ---------------------------------
     def _local_replays(self):
         """列出备用目录里的回放（不经过浏览器上传）。"""
@@ -1287,7 +1311,9 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
         self.end_headers()
         try:
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionAbortedError):
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # 页面在响应发完之前被关掉/刷新（WinError 10054 也走这里）。
+            # 这不是服务端故障，不该在 crashreport 里记一笔。
             pass
 
     def _json(self, obj, code: int = 200):
@@ -1371,12 +1397,17 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
             return self._paths_info()
         if path == "/api/library":
             return self._library_info()
+        if path == "/api/library/progress":
+            # 只读快照，不触发构建：页面在建索引期间轮询它画进度条
+            return self._json(library_mod.progress_snapshot())
         if path == "/api/local-replays":
             return self._local_replays()
         if path == "/api/quick/pending":
             return self._quick_pending(qs)
         if path == "/api/hotkey":
             return self._hotkey_info()
+        if path == "/api/random-charts":
+            return self._random_charts(qs)
         if path == "/api/progress":
             return self._progress_info()
         if path == "/api/check-update":
