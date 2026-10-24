@@ -15,6 +15,12 @@
 </head>
 <body>
 
+<!-- 曲库扫描进度：首次启动要遍历上千个文件，这条细进度条是"程序没卡死"的唯一证据 -->
+<div class="lib-scan" id="libScan" hidden><i></i></div>
+
+<!-- 性能面板：设置里勾上才出现，平时不占资源也不挡视线 -->
+<div class="perf-panel" id="perfPanel" hidden></div>
+
 <!-- 背景光斑 -->
 <div class="bg-blobs" aria-hidden="true">
   <span class="blob blob-a"></span>
@@ -61,7 +67,7 @@
 
   <!-- 左：图标导航 -->
   <nav class="rail glass" id="rail" aria-label="页面切换">
-    <button class="rail-btn is-active" data-tab="overview" title="总览">
+    <button class="rail-btn is-active" data-tab="overview" title="导入回放 / 总览">
       <svg viewBox="0 0 24 24" class="ico"><path d="M4 13h4v7H4zM10 4h4v16h-4zM16 9h4v11h-4z" fill="currentColor" opacity=".9"/></svg>
     </button>
     <button class="rail-btn" data-tab="timeline" title="时间轴">
@@ -78,6 +84,16 @@
         <path d="M12 3.2 19.6 7.6v8.8L12 20.8 4.4 16.4V7.6Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round" opacity=".55"/>
         <path d="M12 7.6 16.2 10v4L12 16.4 7.8 14v-4Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/>
         <circle cx="12" cy="12" r="1.4" fill="currentColor"/>
+      </svg>
+    </button>
+    <button class="rail-btn" data-tab="finder" title="随机找图">
+      <svg viewBox="0 0 24 24" class="ico">
+        <rect x="4.4" y="4.4" width="15.2" height="15.2" rx="4.2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+        <circle cx="9" cy="9" r="1.25" fill="currentColor"/>
+        <circle cx="15" cy="15" r="1.25" fill="currentColor"/>
+        <circle cx="12" cy="12" r="1.25" fill="currentColor"/>
+        <circle cx="15" cy="9" r="1.05" fill="currentColor" opacity=".5"/>
+        <circle cx="9" cy="15" r="1.05" fill="currentColor" opacity=".5"/>
       </svg>
     </button>
     <button class="rail-btn" data-tab="details" title="细节数据">
@@ -462,6 +478,50 @@
       </article>
     </div>
 
+    <!-- 随机找图：输入难度与键型，从随附索引里随机抽。不依赖回放结果 -->
+    <div class="tab-panel" id="panel-finder" hidden>
+      <article class="card glass">
+        <div class="card-head">
+          <h2>随机找图</h2>
+          <p class="muted">给个难度区间和键型，从随附的 4 万张 4K 图里随机抽几张；不满意就再抽一批。封面点一下直接下载。</p>
+        </div>
+        <div class="card-body">
+          <div class="finder-form">
+            <div class="finder-field">
+              <span class="finder-label">难度（星数）</span>
+              <div class="finder-range">
+                <input type="number" id="fnStarMin" class="text-input" value="4" min="0" max="20" step="0.1" aria-label="最低星数">
+                <span class="finder-tilde">~</span>
+                <input type="number" id="fnStarMax" class="text-input" value="6" min="0" max="20" step="0.1" aria-label="最高星数">
+                <span class="finder-unit">星</span>
+              </div>
+            </div>
+
+            <div class="finder-field finder-field-cats">
+              <span class="finder-label">键型（可多选）</span>
+              <div class="seg" id="fnCats">
+                <button class="seg-btn is-active" data-cat="all">不限</button>
+                <button class="seg-btn" data-cat="cut">切 Stream</button>
+                <button class="seg-btn" data-cat="stack">叠 Jack</button>
+                <button class="seg-btn" data-cat="spam">乱 Speed</button>
+                <button class="seg-btn" data-cat="tech">技 Tech</button>
+                <button class="seg-btn" data-cat="ln">面 LN</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="finder-actions">
+            <button class="btn btn-primary" id="btnFind">找一批</button>
+            <button class="btn btn-ghost" id="btnFindAgain" hidden>再找一次</button>
+            <span class="tag" id="fnCount"></span>
+          </div>
+
+          <div class="finder-grid" id="fnGrid"></div>
+          <p class="fineprint" id="fnNote"></p>
+        </div>
+      </article>
+    </div>
+
     <!-- 细节 -->
     <div class="tab-panel" id="panel-details" hidden>
       <article class="card glass" id="patternCard">
@@ -558,17 +618,9 @@
       <article class="card glass">
         <div class="card-head">
           <h2>设置</h2>
-          <p class="muted">osu! 目录与长条物件计算方式</p>
+          <p class="muted">osu! 目录、快捷导入与界面</p>
         </div>
         <div class="card-body">
-          <h3>主题</h3>
-          <div class="seg" id="themeToggle">
-            <button class="seg-btn is-active" data-theme="dark">暗色</button>
-            <button class="seg-btn" data-theme="sakura">白色毛玻璃 · 浅粉</button>
-          </div>
-
-          <hr class="settings-sep">
-
           <h3>osu! 目录</h3>
           <p class="muted">默认会自动找曲库；找不到时在这里手动指定，填完保存会重新扫一遍。</p>
 
@@ -610,6 +662,37 @@
 
           <hr class="settings-sep">
 
+          <h3>回放帧率上限</h3>
+          <div class="seg" id="fpsCapToggle">
+            <button class="seg-btn" data-fps="30">30 帧</button>
+            <button class="seg-btn" data-fps="60">60 帧</button>
+            <button class="seg-btn" data-fps="90">90 帧</button>
+            <button class="seg-btn is-active" data-fps="120">120 帧</button>
+            <button class="seg-btn" data-fps="180">180 帧</button>
+            <button class="seg-btn" data-fps="240">240 帧</button>
+            <button class="seg-btn" data-fps="0">无限制</button>
+          </div>
+          <p class="muted">注意：选择较高帧率上限可能会对CPU造成更多负载，如果性能跟不上会自动降低帧率上限</p>
+
+          <hr class="settings-sep">
+
+          <h3>调试</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="perfPanelToggle">
+            <span>显示性能面板（渲染帧率 / 屏幕刷新率 / 每帧绘制耗时）</span>
+          </label>
+          <p class="muted">勾上之后面板出现在窗口<b>右下角</b>，不受当前页面影响；排查卡顿时再开，平时关着。</p>
+
+          <hr class="settings-sep">
+
+          <h3>动画</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="disableMotion">
+            <span>禁用动画（切换页面时不播放过渡效果）</span>
+          </label>
+
+          <hr class="settings-sep">
+
           <h3>长条物件计算方式
             <button class="info-btn" id="btnAlgoHelp" type="button" title="说明">i</button>
           </h3>
@@ -628,6 +711,14 @@
             <span>% 的失误</span>
           </label>
           <p class="muted">只影响失误清单显示，不改变判定和准确率。</p>
+
+          <hr class="settings-sep">
+
+          <h3>主题</h3>
+          <div class="seg" id="themeToggle">
+            <button class="seg-btn is-active" data-theme="dark">暗色</button>
+            <button class="seg-btn" data-theme="sakura">白色毛玻璃 · 浅粉</button>
+          </div>
         </div>
       </article>
     </div>
@@ -780,26 +871,164 @@
   </div>
 </div>
 
-<!-- 帮助 -->
+<!-- 帮助：分页教程。左边选章节，底部翻页；内容和当前版本的功能对齐 -->
 <div class="modal" id="helpModal" hidden>
   <div class="modal-card glass help-card">
-    <h3>怎么用</h3>
-    <ol class="help-steps">
-      <li>在 osu! 里打开成绩详情 → 导出回放，得到一个 <code>.osr</code>，拖到这里。</li>
-      <li>谱面会按回放里的 MD5 自动从曲库匹配；匹配不到会让你手动选 <code>.osu</code>。</li>
-      <li>「总览」看总体评价与失误成因；「时间轴」看波动；「失误清单」逐条看原因；「回放」边听边看。</li>
-      <li>打完一局想立刻分析：在结算屏按 <code>F2</code> 导出，再按 <code>Shift+F2</code>，页面会自动接住刚才那份回放。</li>
-    </ol>
-    <h4>失误是怎么分类的</h4>
-    <ul class="help-list">
-      <li><b>超出能力范围</b>：失误集中在高密度、高难度 pattern，且同类片段里反复吃亏。</li>
-      <li><b>节奏感弱</b>：误差方向稳定地偏（一直偏早/偏晚），换密度也照样偏。</li>
-      <li><b>分神</b>：失误成簇突发、伴随长停顿、难度不高、之后立刻恢复。</li>
-    </ul>
-    <p class="fineprint">判定窗口按 mania 的 OD 公式计算（MAX ±16ms，300/200/100/50 随 OD 收窄）。UR = 误差总体标准差 × 10。</p>
-    <div class="modal-actions">
+    <div class="tut-head">
+      <h3>怎么用</h3>
+      <span class="tut-counter" id="tutCounter">第 1 / 7 页</span>
+    </div>
+
+    <div class="tut-body">
+      <nav class="tut-nav" id="tutNav" aria-label="教程章节">
+        <button class="tut-tab is-active" data-page="0">先从导入开始</button>
+        <button class="tut-tab" data-page="1">总览：这局打得怎样</button>
+        <button class="tut-tab" data-page="2">时间轴与失误清单</button>
+        <button class="tut-tab" data-page="3">回放与打击音</button>
+        <button class="tut-tab" data-page="4">难度与细节数据</button>
+        <button class="tut-tab" data-page="5">随机找图</button>
+        <button class="tut-tab" data-page="6">成长：离下一段多远</button>
+        <button class="tut-tab" data-page="7">设置与常见问题</button>
+      </nav>
+
+      <div class="tut-pages" id="tutPages">
+        <!-- 1 -->
+        <section class="tut-page is-active" data-page="0">
+          <p class="tut-lead">三种导入方式，挑顺手的用。文件只在本机读，不会上传到任何服务器。</p>
+          <ol class="help-steps">
+            <li><b>直接拖</b>：把 <code>.osr</code> 拖到窗口任意位置；也可以点顶栏右上角的导入按钮选文件。</li>
+            <li><b>从 osu! 导出</b>：选好图进游戏打完，在结算屏按 <code>F2</code>，游戏会提示回放已保存。</li>
+            <li><b>快捷导入</b>：程序开着的时候，结算屏先按 <code>F2</code>，再按 <code>Shift+F2</code>（可在设置里改），页面会自己接住刚导出的那一份，不用再选文件。</li>
+          </ol>
+          <h4>谱面是怎么配上的</h4>
+          <ul class="help-list">
+            <li>回放里记着谱面的 MD5，程序拿它去曲库里找同款 <code>.osu</code>，找到就直接算。</li>
+            <li>找不到（超长图、刚下的图、曲库路径没设对）会弹窗让你手动选 <code>.osu</code>，并告诉你缺的是哪一张。</li>
+            <li>只在 lazer 玩过的图可能存在 lazer 的 <code>files</code> 目录里，把 lazer 路径填进设置就会一起索引。</li>
+          </ul>
+          <h4>只看谱面</h4>
+          <p>把 <code>.osu</code> 拖进来，不读成绩，只算难度和键型构成，适合赛前挑图。</p>
+          <p class="fineprint">入口被浏览器挡住时，还有一条不过浏览器的路：把 .osr 复制到页面给出的 <code>_replays</code> 目录，直接点文件名。</p>
+        </section>
+
+        <!-- 2 -->
+        <section class="tut-page" data-page="1">
+          <p class="tut-lead">一局打完先看这一页：结果怎么样、主要问题在哪。</p>
+          <ul class="help-list">
+            <li><b>等级与总评</b>：等级按这张图的难度和你的准确率给；总评一句话点出最该改的地方。</li>
+            <li><b>四个数字</b>：准确率（跟着顶栏口径走）、UR（误差离散程度，越小越稳）、击打偏差（每次击打偏离目标的典型幅度，不分早晚）、最大连击。</li>
+            <li><b>判定分布</b>：320 / 300 / 200 / 100 / 50 / miss 各多少个，和回放头记录的数字一致。</li>
+            <li><b>亮点与短板</b>：按分段、键型、判定类型挑出来的，不是套话。</li>
+            <li><b>相似谱面</b>：从曲库里找难度接近、键型相近的图，拿来补同类。</li>
+          </ul>
+          <h4>顶栏的 V1 / V2 是什么</h4>
+          <p>长条判定的两套口径：<b>V1</b> 头尾合并算一次，<b>V2</b> 头尾分开算（尾判窗口是 1.5 倍）。切换之后准确率、判定分布、报告措辞会一起重算，不用重新导入。选和自己客户端一致的那个。</p>
+          <h4>整局偏移和击打偏差别混</h4>
+          <p><b>整局偏移</b>带正负号，看的是有没有系统性偏早/偏晚；<b>击打偏差</b>只看幅度。有早有晚时前者会互相抵消成 0，后者仍然很大——两个都对，问的不是同一件事。</p>
+        </section>
+
+        <!-- 3 -->
+        <section class="tut-page" data-page="2">
+          <p class="tut-lead">想知道「从哪一刻开始崩的」，看这两页。</p>
+          <h4>时间轴</h4>
+          <ul class="help-list">
+            <li>最上面的密度曲线是每秒音符数（NPS），峰值段就是最吃体力的地方。</li>
+            <li>准确率与 UR 随时间各一条线，掉下去的位置往往就是断连的起点。</li>
+            <li>在曲线上点一下或按住拖动，会直接跳到那一刻；进度条上也有播放竖线跟着走。</li>
+          </ul>
+          <h4>失误清单</h4>
+          <ul class="help-list">
+            <li>每条失误都带成因（能力 / 节奏 / 分神 / 失手）和可信度；可信度低的是「证据不足」，不是「判定错了」。</li>
+            <li>筛选：只看某一类、只看严重；默认一次渲染 30 条，用「再看 100 条」「全部展开」加量。</li>
+            <li>点一条会跳到回放页，并停在音符落下前 0.2 秒——不自动播放，方便看清那一击。</li>
+            <li>「隐藏低可信度」的门槛在设置里调（0~1，默认 0.5）。</li>
+          </ul>
+        </section>
+
+        <!-- 4 -->
+        <section class="tut-page" data-page="3">
+          <p class="tut-lead">边听边看，判断是手慢、听错，还是根本读不出来。</p>
+          <ul class="help-list">
+            <li><b>播放</b>：按空格或点按钮播放/暂停（在回放页和时间轴页都有效），进度条可拖，倍速 0.5× ~ 1.5×。</li>
+            <li><b>下落</b>：音符从画布顶端落到判定线花多少毫秒，越小越快；300 ~ 2600ms 可调。</li>
+            <li><b>音画</b>：画面整体提前/延后，±500ms，用来对齐你自己设备的延迟。</li>
+            <li><b>打击音</b>：选「正解音」听到的是谱面要求的时间，选「实际击打」听到的是你真正按下的时间。两个交替听，抢拍和拖拍会立刻暴露。打击音量最高 300%，回放音量仍然最多 100%。</li>
+            <li><b>只看失误</b>：只画失误附近的音符，密集段落也能看清是哪一轨出的问题。</li>
+            <li><b>对比</b>：导入同一张图的第二份回放，两路并排、吃同一条时间轴，可以直接比同一段谁的手更稳。</li>
+          </ul>
+          <p class="fineprint">帧率上限在设置里（30 ~ 240 帧或「无限制」），想确认实际跑到多少，勾上性能面板看右下角。</p>
+        </section>
+
+        <!-- 5 -->
+        <section class="tut-page" data-page="4">
+          <p class="tut-lead">判断这张图是什么类型、难在哪一段。</p>
+          <ul class="help-list">
+            <li><b>MSD</b>：MinaCalc 给的综合难度和六维雷达（速度、耐力、技术、叠、乱等），只看谱面本身。</li>
+            <li><b>段位估计</b>：依次用 Sunny → Azusa → Roxy 估，卡片上标了实际生效的是哪一个；低段位图 Roxy 不给值，会自动回退到 Azusa。</li>
+            <li><b>键型构成</b>：切、叠、乱、耐力、速度各占多少，用来解释为什么失误集中在某一段。</li>
+            <li><b>判定分布</b>：这张图上你的 320 占比，比准确率更直观地反映稳定性。</li>
+            <li><b>LN 松手偏差</b>：长条是早松还是晚松，左侧蓝、右侧粉，右侧列是具体毫秒。</li>
+          </ul>
+          <p class="fineprint">已知限制：谱面的 BPM 如果是歌曲实际 BPM 的整数倍，切 / 叠判定可能错乱；遇到明显不对的构成，先怀疑这一点。</p>
+        </section>
+
+        <!-- 6 -->
+        <section class="tut-page" data-page="5">
+          <p class="tut-lead">只想找几张图练、又没有具体目标时用它。</p>
+          <ul class="help-list">
+            <li><b>难度</b>：填星数区间（和别的页说的是同一把星数）。只填一个也行，程序会把它当成上下限。</li>
+            <li><b>键型</b>：切 / 叠 / 乱 / 技 / 面，可以多选；多选表示"这几类加起来要占一半以上"，不是每类各占一半。</li>
+            <li><b>再找一次</b>：换一批没出现过的图；符合条件的都被你看完了，会自动从头再来。</li>
+            <li><b>点封面下载</b>：星数在封面左上角，底部一行是时长、段位和主键型占比，封面本身就是下载链接（sayobot 镜像）。</li>
+          </ul>
+          <p class="fineprint">图库是随程序发布的 4 万张 2020 年后 4K 图，筛选完全离线；封面走 osu! 官方 CDN，断网时只显示底色，不影响下载。</p>
+        </section>
+
+        <!-- 7 -->
+        <section class="tut-page" data-page="6">
+          <p class="tut-lead">把每局存下来，估算离下一段还有多远。</p>
+          <ol class="help-steps">
+            <li>第一次进成长页先填自己的 osu! 名字——不联网，只用来区分导入的是不是本人的回放。</li>
+            <li>选一个当前段位基准：REFORM 或 Malody；Malody 的段位会按段位谱实测表换算成 REFORM。</li>
+            <li>之后每导入一局都会自动记档，不用手动保存。</li>
+          </ol>
+          <ul class="help-list">
+            <li><b>综合段位</b>：取最好的 50 局；上方是目标进度条，右侧写着还差多少段。</li>
+            <li><b>四类练法</b>：叠 / 技术 / 速度 / 耐力各取最好的 10 局，能看出偏科在哪。</li>
+            <li><b>明细</b>：点综合卡片展开 5×10 共 50 格，每格有歌名、难度名、准确率和折算段位；点练法卡片展开该类实际计入的 10 局。</li>
+            <li>鼠标停在格子上会说明它为什么没进分键型评估（例如「键型分散，最高 Jack 32%」）。</li>
+          </ul>
+          <p class="fineprint">折合规则：V1 准确率 96% 为过段线，91% 以下不计入；LN 与 Hybrid 谱面不参与；键型分散的图只进综合、不进分键型。这套评估是程序自己拟合的，仅供参考。</p>
+        </section>
+
+        <!-- 8 -->
+        <section class="tut-page" data-page="7">
+          <h4>设置里值得看一眼的</h4>
+          <ul class="help-list">
+            <li><b>osu! 目录</b>：stable 选到有 <code>osu!.exe</code> 的那一级；lazer 选到同时有 <code>Songs</code> 和 <code>files</code> 的那一级。保存后会重扫曲库。</li>
+            <li><b>快捷导入</b>：默认 <code>Shift+F2</code>，可以改，但至少要带一个修饰键。</li>
+            <li><b>回放帧率上限</b>：30 / 60 / 90 / 120 / 180 / 240 帧或「无限制」，默认 120。选得太高会给 CPU 更多压力，性能跟不上时程序会自动降低一档。</li>
+            <li><b>性能面板</b>：勾上后右下角显示渲染帧率、屏幕刷新率、每帧绘制耗时，排查卡顿时用。</li>
+            <li><b>禁用动画</b>：勾上后切换页面不再播放过渡动画，界面直接到位；默认关着。</li>
+            <li><b>长条计算方式</b>：Lazer（默认）和 Stable 的尾判算法不同，选和自己客户端一致的。</li>
+          </ul>
+          <h4>常见问题</h4>
+          <ul class="help-list">
+            <li><b>准确率和游戏里差一点点？</b>判定口径（V1/V2）、客户端版本、尾判细节都会造成 0.0x% 的差别，靠近就是对的。</li>
+            <li><b>提示曲库里没有这张谱面？</b>先确认设置里的目录填对；还是找不到，就在弹窗里直接选 <code>.osu</code>。</li>
+            <li><b>拖进去没反应 / 浏览器上传被挡？</b>把 <code>.osr</code> 复制到页面给出的 <code>_replays</code> 目录，点文件名——这条路不过浏览器，服务端自己读盘。</li>
+            <li><b>点下面的「测试后端连接」没反应？</b>说明本地服务没起来，重开一次启动器。</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+
+    <div class="modal-actions tut-actions">
       <button class="btn btn-ghost" id="btnSelfTest">测试后端连接</button>
-      <button class="btn btn-primary" id="btnCloseHelp">知道了</button>
+      <span class="tut-spacer"></span>
+      <button class="btn btn-ghost" id="tutPrev">上一页</button>
+      <button class="btn btn-primary" id="tutNext">下一页</button>
+      <button class="btn btn-ghost" id="btnCloseHelp">关闭</button>
     </div>
   </div>
 </div>
