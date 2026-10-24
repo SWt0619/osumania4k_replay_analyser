@@ -35,6 +35,7 @@
     lastFrame: 0,
     speed: 1,
     scrollMs: 1200,     // 下落时间：音符从画布顶端落到判定线的毫秒数（越小越快）
+    fpsCap: 120,        // 回放帧率上限：60 / 120 / 240，跑不动会自动降到一半
     audioOffset: 0,     // 音画偏移（ms）：正值 = 谱面比音频提前
     volume: 0.6,        // 回放音量 0..1（曲目原声往往很吵，默认压到 60%）
     muted: false,
@@ -66,6 +67,11 @@
     hideLowConfidence: false,
     confThreshold: 0.5,
     theme: "dark",
+    // 禁用动画：默认关。开了以后切页不再播 rise/fade，界面立刻到位
+    disableMotion: false,
+    // 性能面板：默认关。开着的时候播放会在右下角显示 FPS 与每帧耗时，
+    // 只有排查卡顿时才需要，平时关掉免得自己成为负担。
+    perfPanel: false,
   };
 
   // 回放页的两个滑杆记在本地，下次打开还是上次的设置
@@ -76,6 +82,7 @@
       if (!raw) return;
       const p = JSON.parse(raw);
       if (typeof p.scrollMs === "number" && p.scrollMs >= 300 && p.scrollMs <= 2600) state.scrollMs = p.scrollMs;
+      if (FPS_CAPS.indexOf(p.fpsCap) >= 0) state.fpsCap = p.fpsCap;
       if (typeof p.audioOffset === "number" && p.audioOffset >= -500 && p.audioOffset <= 500) state.audioOffset = p.audioOffset;
       if (typeof p.volume === "number" && p.volume >= 0 && p.volume <= 1) state.volume = p.volume;
       if (p.hitsoundMode === "off" || p.hitsoundMode === "planned" || p.hitsoundMode === "actual") {
@@ -92,12 +99,15 @@
         state.confThreshold = p.confThreshold;
       }
       if (p.theme === "dark" || p.theme === "sakura") state.theme = p.theme;
+      if (typeof p.disableMotion === "boolean") state.disableMotion = p.disableMotion;
+      if (typeof p.perfPanel === "boolean") state.perfPanel = p.perfPanel;
     } catch (e) { /* 隐私模式下拿不到就算了 */ }
   }
   function savePrefs() {
     try {
       localStorage.setItem(PREFS_KEY, JSON.stringify({
         scrollMs: state.scrollMs,
+        fpsCap: state.fpsCap,
         audioOffset: state.audioOffset,
         volume: state.volume,
         hitsoundMode: state.hitsoundMode,
@@ -107,8 +117,113 @@
         hideLowConfidence: state.hideLowConfidence,
         confThreshold: state.confThreshold,
         theme: state.theme,
+        disableMotion: state.disableMotion,
+        perfPanel: state.perfPanel,
       }));
     } catch (e) { /* ignore */ }
+  }
+
+  // 性能面板：只在设置里勾了才统计。样本用中位数——偶尔一帧卡顿不该被当成常态，
+  // 但连续掉帧会立刻把中位数拉上去，正好是排查时想看的信号。
+  // 面板自己跑一条 rAF 循环：没在放回放时也能看到刷新率，不至于勾上之后一片空白。
+  // 注意「渲染」和「刷新」是两个数：渲染是程序真的画了多少帧（受帧率上限与机器影响），
+  // 刷新是屏幕给 rAF 的节奏。60Hz 屏上选 120 档时前者 120、后者 60，别混为一谈。
+  let perfCost = [];
+  let perfDt = [];
+  let perfStamp = [];
+  let perfPaintedAt = 0;
+  let perfRaf = 0;
+  let perfLastAt = 0;
+
+  function applyPerfPanel(on) {
+    state.perfPanel = !!on;
+    const box = $("perfPanel");
+    if (box) {
+      box.hidden = !state.perfPanel;
+      if (state.perfPanel) box.textContent = "性能面板\n等待第一帧…";
+    }
+    const toggle = $("perfPanelToggle");
+    if (toggle) toggle.checked = state.perfPanel;
+    perfCost = [];
+    perfDt = [];
+    perfStamp = [];
+    perfPaintedAt = 0;
+    perfLastAt = 0;
+    if (state.perfPanel) startPerfLoop();
+    else stopPerfLoop();
+  }
+
+  function startPerfLoop() {
+    if (perfRaf) return;      // 已经在跑，别叠第二条
+    const loop = (now) => {
+      if (!state.perfPanel) { perfRaf = 0; return; }
+      if (perfLastAt) {
+        const dt = now - perfLastAt;
+        // 超过 500ms 多半是切到后台/最小化了，记进去会把中位数整体带偏
+        if (dt > 0 && dt < 500) {
+          perfDt.push(dt);
+          if (perfDt.length > 90) perfDt.shift();
+        }
+      }
+      perfLastAt = now;
+      paintPerf();
+      perfRaf = requestAnimationFrame(loop);
+    };
+    perfRaf = requestAnimationFrame(loop);
+  }
+
+  function stopPerfLoop() {
+    if (perfRaf) cancelAnimationFrame(perfRaf);
+    perfRaf = 0;
+  }
+
+  // 播放循环每帧报一次：绘制耗时 + 这一帧的时间戳（用来算真正画出来的帧率）
+  function perfCostSample(cost) {
+    if (!state.perfPanel) return;
+    perfCost.push(cost);
+    if (perfCost.length > 90) perfCost.shift();
+    const t = performance.now();
+    perfStamp.push(t);
+    if (perfStamp.length > 120) perfStamp.shift();
+  }
+
+  function perfMedian(arr) {
+    if (!arr.length) return 0;
+    const s = arr.slice().sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  }
+
+  // 用最近若干帧的间隔算"程序实际渲染帧率"
+  function perfRenderFps() {
+    if (perfStamp.length < 8) return 0;
+    const gaps = [];
+    for (let i = 1; i < perfStamp.length; i += 1) gaps.push(perfStamp[i] - perfStamp[i - 1]);
+    const m = perfMedian(gaps);
+    return m > 0 ? 1000 / m : 0;
+  }
+
+  function paintPerf() {
+    const now = performance.now();
+    if (now - perfPaintedAt < 400) return;   // 4Hz 就够看，写太勤反而看不清数字
+    perfPaintedAt = now;
+    const el = $("perfPanel");
+    if (!el) return;
+    const medDt = perfMedian(perfDt);
+    const render = perfRenderFps();
+    const notes = (state.data && (state.data.notes || []).length) || 0;
+    // 撑不住时 noteFrame 会把 frameMs 降一档，这里说清楚，免得和设置里选的档位对不上
+    const dropped = frameMs > capToMs(state.fpsCap) + 0.01;
+    const target = Math.round(1000 / frameMs);
+    const targetText = dropped
+      ? target + " fps（已降档）"
+      : (state.fpsCap === 0 ? "无限制（≈ " + target + " fps）" : target + " fps");
+    el.textContent =
+      "性能面板" + (state.playing ? " · 播放中" : "") + "\n" +
+      "渲染     " + (render > 0 ? render.toFixed(1) + " fps" : "—") + "\n" +
+      "绘制     " + (perfCost.length ? perfMedian(perfCost).toFixed(2) + " ms" : "—") + "\n" +
+      "刷新     " + (medDt > 0 ? (1000 / medDt).toFixed(0) + " Hz" : "—") + "\n" +
+      "目标     " + targetText + "\n" +
+      "音符     " + notes;
   }
 
   // 轻量自报：用 GET 把一个事件打到服务端日志里（GET 在浏览器上传被挡时仍然可用）
@@ -169,18 +284,40 @@
   });
 
   // ---------------------------------------------------------------- 标签页
+  // 这些页签的数据全部来自回放分析结果。没导入回放时点进去只有空壳，
+  // 所以直接把入口收起来，只留「导入（总览）/ 成长 / 设置 / 关于」。
+  const DATA_TABS = ["timeline", "errors", "replay", "chart", "details"];
+
+  function syncTabLocks() {
+    const hasData = !!state.data;
+    document.querySelectorAll(".rail-btn[data-tab]").forEach((b) => {
+      const tab = b.dataset.tab;
+      // 「谱面难度」还有另一条入口：只导入 .osu 时它是有内容的，要留着
+      if (tab === "chart") {
+        b.hidden = !(hasData || state.chartOnly);
+        return;
+      }
+      b.hidden = !hasData && DATA_TABS.indexOf(tab) >= 0;
+    });
+  }
+
   function switchTab(name) {
+    // 兜底：热键、旧链接、或者刚清掉数据时仍可能喊到这些页签
+    if (!state.data && DATA_TABS.indexOf(name) >= 0) name = "overview";
+    // 只看谱面时那页叫 chartonly；点回「谱面难度」要落到它上面，否则是空壳
+    if (!state.data && state.chartOnly && name === "chart") name = "chartonly";
+    syncTabLocks();
     state.tab = name;
     document.querySelectorAll(".rail-btn").forEach((b) => {
       b.classList.toggle("is-active", b.dataset.tab === name);
     });
-    ["overview", "timeline", "errors", "replay", "chart", "chartonly", "details", "progress", "settings", "about"].forEach((t) => {
+    ["overview", "timeline", "errors", "replay", "chart", "chartonly", "finder", "details", "progress", "settings", "about"].forEach((t) => {
       const p = $("panel-" + t);
       if (p) p.hidden = t !== name;
     });
     // 「关于」「设置」「成长」不依赖分析结果：没导入回放时也要能看；「只看谱面」同理
     $("emptyState").hidden = !!state.data || name === "about" || name === "chartonly"
-      || name === "settings" || name === "progress";
+      || name === "settings" || name === "progress" || name === "finder";
     if (name === "about") checkUpdate(false);
     if (name === "progress") loadProgress();
     if (name === "settings") {
@@ -808,29 +945,67 @@
     });
   }
 
-  // ---- 画面刷新：目标 144Hz ----
+  // ---- 画面刷新：上限取设置里的「回放帧率上限」（30 / 60 / 90 / 120 / 180 / 240 / 无限制）----
   // requestAnimationFrame 只在显示器刷新时回调，60Hz 屏就是 60 次/秒 —— 对音游分析来说，
   // 快速拖动时每帧跨过的距离太大（1200ms 窗口 / 60fps ≈ 每帧 8px），看着是"跳"的。
-  // 所以：RAF 照用（高刷屏上它自己就是 144），另外补一个 6.94ms 的定时器，
-  // 让"计算 + 重绘"也跑到 144；两条路径共用 lastFrame 闸门，不会重复画同一帧。
-  // 目标 120Hz；跑不动就自动退到 60（比如集显、后台标签、超大窗口）
-  const TARGET_FPS = 120;
-  const FPS_FALLBACK = 60;
-  let frameMs = 1000 / TARGET_FPS;
+  // 所以：RAF 照用，另外补一个 frameMs 的定时器，让"计算 + 重绘"也能超过刷新率；
+  // 两条路径共用 lastFrame 闸门，不会重复画同一帧。
+  // 0 表示"无限制"：定时器本身有 4ms 下限，实际天花板约 250fps，
+  // 这里就按 250 当目标来节流和判断要不要降档。
+  const FPS_CAPS = [30, 60, 90, 120, 180, 240, 0];
+  const UNLIMITED_FPS = 250;
+  let frameMs = 1000 / 120;       // 当前实际节拍（降档后比设置值慢）
+  let fallbackMs = 1000 / 60;     // 撑不住时退到这一档，只降不升
   let rafId = 0;
   let timerId = 0;
   let frameSamples = [];
 
+  function capToMs(cap) {
+    return 1000 / (cap === 0 ? UNLIMITED_FPS : cap);
+  }
+
+  // 撑不住时退到哪一档：无限制退 240（它没有更高的档可退，退一档反而更稳），
+  // 其余退一半，但不低于 30。
+  function capFallbackMs(cap) {
+    if (cap === 0) return 1000 / 240;
+    return 1000 / Math.max(30, cap / 2);
+  }
+
+  function syncFpsCapUI() {
+    document.querySelectorAll("#fpsCapToggle [data-fps]").forEach((btn) => {
+      btn.classList.toggle("is-active", Number(btn.dataset.fps) === state.fpsCap);
+    });
+  }
+
+  // 换档要立刻生效：正在播时重排下一帧的时间点，
+  // 否则得等旧节拍走完才换速，看起来像卡了一下。
+  function applyFpsCap(cap, opts) {
+    const next = FPS_CAPS.indexOf(Number(cap)) >= 0 ? Number(cap) : 120;
+    state.fpsCap = next;
+    frameMs = capToMs(next);
+    fallbackMs = capFallbackMs(next);
+    frameSamples = [];
+    if (!(opts && opts.silent)) savePrefs();
+    syncFpsCapUI();
+    if (state.playing) {
+      nextFrameAt = performance.now() + frameMs;
+      scheduleNext();
+    }
+  }
+
   // 用最近 40 帧的**中位间隔**判断"撑不撑得住"：
   // 偶尔掉一帧不算，连续 40 帧都远超目标才降级（且只降一次，不再回弹）
   function noteFrame(dt) {
-    if (!(dt > 0) || dt > frameMs * 4) return; // seek 后的第一帧 dt 很大，是噪声
+    // 超过 500ms 的那种间隔是切后台/最小化回来，不是"机器慢"，记进去会把中位数带偏。
+    // 原来按 frameMs*4 过滤，240 档等于只收 16ms 以内的帧——真慢到 30fps 反而被当成噪声丢掉，
+    // 降档永远不触发。
+    if (!(dt > 0) || dt > 500) return;
     frameSamples.push(dt);
     if (frameSamples.length > 40) frameSamples.shift();
-    if (frameSamples.length < 40 || frameMs >= 1000 / FPS_FALLBACK - 0.01) return;
+    if (frameSamples.length < 40 || frameMs >= fallbackMs - 0.01) return;
     const sorted = frameSamples.slice().sort((a, b) => a - b);
     if (sorted[20] > frameMs * 1.5) {
-      frameMs = 1000 / FPS_FALLBACK;
+      frameMs = fallbackMs;
       frameSamples = [];
     }
   }
@@ -852,24 +1027,31 @@
 
   function scheduleNext() {
     stopScheduler();
-    rafId = requestAnimationFrame(tick);
+    // 两条路都排：RAF 跟着屏幕走，定时器补 RAF 之间的空隙（高帧率档就靠它）
+    rafId = requestAnimationFrame((t) => tick(t, false));
     const wait = Math.max(0, nextFrameAt - performance.now());
-    timerId = setTimeout(() => tick(performance.now()), wait);
+    timerId = setTimeout(() => tick(performance.now(), true), wait);
   }
 
-  function tick(now) {
+  function tick(now, fromTimer) {
     if (!state.playing) {
       stopScheduler();
       return;
     }
-    // 这一帧离上一帧太近（RAF 和定时器撞在一起了）：丢掉它，等下一拍
-    if (now - state.lastFrame < frameMs * 0.8) {
+    // 这一帧离上一帧太近：丢掉，等下一拍。两个来源的容差不一样：
+    //   · 定时器：浏览器会把小数延迟截断/合并到整数毫秒，11.11ms 的请求常在 11.0 就来，
+    //     容差给 2ms 才不会把自己的帧全拒掉（拒掉的代价是退到下一个 RAF，90 档会掉成 66.7）。
+    //   · RAF：容差必须很小，否则它会抢在定时器前面把帧画掉 —— 200Hz 屏上 60 档的 RAF
+    //     落在 15ms 处，容差一大就跑成 66.7fps。
+    const tolerance = fromTimer ? 2 : 0.5;
+    if (now - state.lastFrame < Math.max(0.5, frameMs - tolerance)) {
       scheduleNext();
       return;
     }
     const dt = Math.max(0, now - state.lastFrame);
     state.lastFrame = now;
     noteFrame(dt);
+    const perfT0 = performance.now();
     if (!audioUsable()) {
       state.virtualTime += dt * state.speed;
     }
@@ -898,6 +1080,12 @@
     updateTransport();
     updateNowPanel(t);
     updateTimelineMark();
+    // 这一帧花在"计算 + 绘制"上的时间，不含浏览器合成
+    perfCostSample(performance.now() - perfT0);
+    // 按绝对时间网格推进：nextFrameAt += frameMs 会把每次的误差补回来。
+    // 若写成 now + frameMs，240 档的 4.17ms 会被浏览器的 4ms 定时器下限一直压到 4.0，
+    // 实测多跑出 10 帧（250fps）；网格推进则稳定落在 240。
+    // 落后太多（切后台回来、机器突然卡）就重新起网格，不然会补一串帧。
     nextFrameAt = now + frameMs;
     scheduleNext();
   }
@@ -1083,13 +1271,24 @@
     hint.hidden = true;
   }
 
+  // 「此刻」卡片跟着播放每帧刷新，但里面的内容是离散的：
+  // 时间数字只在毫秒变化时变，标签只在"最近一条失误"换了之后才需要重建。
+  // 之前每帧都 innerHTML 重写一遍，播放时 120 次/秒的 DOM 重建白烧 CPU。
+  let nowSig = "";
+
   function updateNowPanel(t) {
-    $("nowTime").textContent = (t / 1000).toFixed(3) + "s";
+    const timeEl = $("nowTime");
+    const txt = (t / 1000).toFixed(3) + "s";
+    if (timeEl.textContent !== txt) timeEl.textContent = txt;
     if (!state.data) return;
     const box = $("nowCats");
     const hint = $("nowHint");
 
     if (state.compare) {
+      // 对比模式的三张卡片数值是连续变化的，按 100ms 刷新足够肉眼跟得上
+      const sig = "c:" + Math.round(t / 100);
+      if (sig === nowSig) return;
+      nowSig = sig;
       renderCompareNow(box, hint, t);
       return;
     }
@@ -1098,6 +1297,9 @@
     // 手动选中的那条优先：它是用户主动钉住的，不能被"附近恰好有别的失误"抢走
     const pinned = state.selectedError;
     if (pinned) {
+      const sig = "p:" + pinned.t + "/" + pinned.category + "/" + (pinned.pattern || "");
+      if (sig === nowSig) return;
+      nowSig = sig;
       box.innerHTML = errorChips(pinned);
       // 文案直接复用「失误」清单里的原文（原因 + 副文本），不再自己拼"已选中…"
       const reason = (pinned.reasons && pinned.reasons[0]) || "没有足够证据判断原因";
@@ -1108,7 +1310,12 @@
     const found = nearestError(t);
     const near = found ? found.err : null;
     const best = found ? found.dist : 1e9;
-    if (near && best <= 2500) {
+    const inRange = !!(near && best <= 2500);
+    const sig = inRange ? "n:" + near.t + "/" + near.category + "/" + (near.pattern || "") : "none";
+    if (sig === nowSig) return;
+    nowSig = sig;
+
+    if (inRange) {
       const catLabel = (CATS[near.category] || {}).label || near.category;
       box.innerHTML = errorChips(near);
       // 键型取的是这条失误自己的键型（errors[].pattern）——和「失误」页的统计同一个来源，
@@ -1264,6 +1471,17 @@
       state.player.render();
     }
     if (state.data || state.chartOnly) drawChartsForTab(state.tab);
+  }
+
+  // 禁用动画：只挂一个属性到 <html>，样式表那边统一关掉进场与过渡。
+  // 关的是"显示效果"，不影响任何逻辑——播放器是 canvas 自绘，照样走自己的帧循环。
+  function applyMotionPref(on) {
+    state.disableMotion = !!on;
+    const root = document.documentElement;
+    if (state.disableMotion) root.setAttribute("data-motion", "off");
+    else root.removeAttribute("data-motion");
+    const cb = $("disableMotion");
+    if (cb) cb.checked = state.disableMotion;
   }
 
   function syncLowConfidenceUI() {
@@ -1614,6 +1832,8 @@
     state.data = viewOf(data, state.judgeMode);
     updateJudgeToggle();
     state.selectedError = null;
+    // 换了回放，「此刻」卡片的内容整个作废，否则相同时间点的旧失误会让它以为没必要重画
+    nowSig = "";
     const view = state.data;
     showReplayNotices(view);
     resetPlaybackState();
@@ -1874,11 +2094,34 @@
     }
   }
 
+  // .osr 头第一个字节就是 gameMode（1 字节），后面紧跟 4 字节的版本号。
+  // 按 int32 读前 4 字节会把 stable 的版本号（如 30000019）当成模式，认不出来，
+  // 所以我只读这 1 个字节。读到的值不是 0~3 就当没结论，交给后端解析。
+  async function osrModeProblem(file) {
+    if (!/\.osr$/i.test(file.name || "")) return "";
+    let head;
+    try {
+      head = await file.slice(0, 1).arrayBuffer();
+    } catch (e) {
+      return "";   // 读不出来就交给后端判断，别在本地误拦
+    }
+    if (!head || head.byteLength < 1) return "";
+    const mode = new DataView(head).getUint8(0);
+    if (mode === 3 || mode > 3) return "";
+    const NAMES = { 0: "osu!standard", 1: "osu!taiko", 2: "osu!catch" };
+    return "这可能是其他模式的回放（" + NAMES[mode] + "），本工具只支持 osu!mania";
+  }
+
   async function handleReplayFile(file) {
     if (!file) return;
     const problem = replayFileProblem(file);
     if (problem) {
       window.UI.toast(problem, true);
+      return;
+    }
+    const wrongMode = await osrModeProblem(file);
+    if (wrongMode) {
+      window.UI.toast(wrongMode, true);
       return;
     }
 
@@ -2307,8 +2550,6 @@
       handleBeatmapFile(f);
     });
 
-    $("btnHelp").addEventListener("click", () => ($("helpModal").hidden = false));
-    $("btnCloseHelp").addEventListener("click", () => closeModal("helpModal"));
     $("btnCloseModal").addEventListener("click", () => closeModal("bmModal"));
     $("btnPickOsu").addEventListener("click", () => $("fileOsu").click());
     // 曲库标签点一下就能手动指定游戏目录（自动找不到时的兜底）
@@ -2478,6 +2719,14 @@
     });
     $("confThreshold").addEventListener("change", updateConfThreshold);
     syncLowConfidenceUI();
+
+    const perfToggle = $("perfPanelToggle");
+    if (perfToggle) {
+      perfToggle.addEventListener("change", (ev) => {
+        applyPerfPanel(!!(ev.target && ev.target.checked));
+        savePrefs();
+      });
+    }
   }
 
   // 回放页的显示开关：主题、只看失误
@@ -2485,6 +2734,18 @@
     document.querySelectorAll("#themeToggle [data-theme]").forEach((btn) => {
       btn.addEventListener("click", () => applyTheme(btn.dataset.theme));
     });
+
+    document.querySelectorAll("#fpsCapToggle [data-fps]").forEach((btn) => {
+      btn.addEventListener("click", () => applyFpsCap(btn.dataset.fps));
+    });
+
+    const motion = $("disableMotion");
+    if (motion) {
+      motion.addEventListener("change", (ev) => {
+        applyMotionPref(!!(ev.target && ev.target.checked));
+        savePrefs();
+      });
+    }
 
     $("btnToggleErrors").addEventListener("click", () => {
       state.errorsOnly = !state.errorsOnly;
@@ -2568,10 +2829,16 @@
       }, 160);
     });
 
-    // 空格播放/暂停（回放页与时间轴页，且焦点不在输入控件上）
+    // 空格播放/暂停（回放页与时间轴页，且焦点不在输入控件上，也没有弹窗挡着）
     window.addEventListener("keydown", (e) => {
       const onPlayableTab = state.tab === "replay" || state.tab === "timeline";
-      if (e.code === "Space" && onPlayableTab && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) {
+      // 弹窗开着时空格属于弹窗（教程里正好在读字），别让底下的回放跟着动
+      const modalOpen = ["helpModal", "bmModal", "uploadBlocked"].some((id) => {
+        const m = $(id);
+        return m && !m.hidden;
+      });
+      if (e.code === "Space" && onPlayableTab && !modalOpen
+          && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) {
         e.preventDefault();
         togglePlay();
       }
@@ -2585,6 +2852,60 @@
     bindPlaybackControls();
     bindErrorFilter();
     bindNavigation();
+    bindFinder();
+    bindHelp();
+  }
+
+  // 帮助弹窗：分页教程。页号只存在闭包里 —— 一次会话内翻到哪、合上再开还在哪，
+  // 关掉程序重开就从头讲，符合"教程"的预期。
+  function bindHelp() {
+    let page = 0;
+
+    function show(i) {
+      const pages = document.querySelectorAll("#tutPages .tut-page");
+      const tabs = document.querySelectorAll("#tutNav .tut-tab");
+      if (!pages.length) return;
+      page = Math.max(0, Math.min(pages.length - 1, i));
+      pages.forEach((el, idx) => el.classList.toggle("is-active", idx === page));
+      tabs.forEach((el, idx) => el.classList.toggle("is-active", idx === page));
+      const counter = $("tutCounter");
+      if (counter) counter.textContent = "第 " + (page + 1) + " / " + pages.length + " 页";
+      const prev = $("tutPrev");
+      const next = $("tutNext");
+      if (prev) prev.disabled = page === 0;
+      if (next) next.disabled = page === pages.length - 1;
+      const box = $("tutPages");
+      if (box) box.scrollTop = 0;
+    }
+
+    document.querySelectorAll("#tutNav .tut-tab").forEach((btn) => {
+      btn.addEventListener("click", () => show(Number(btn.dataset.page) || 0));
+    });
+    const prev = $("tutPrev");
+    const next = $("tutNext");
+    if (prev) prev.addEventListener("click", () => show(page - 1));
+    if (next) next.addEventListener("click", () => show(page + 1));
+
+    const open = $("btnHelp");
+    if (open) {
+      open.addEventListener("click", () => {
+        $("helpModal").hidden = false;
+        show(page);
+      });
+    }
+    const close = $("btnCloseHelp");
+    if (close) close.addEventListener("click", () => closeModal("helpModal"));
+
+    // 弹窗开着时：Esc 关闭、左右方向键翻页
+    window.addEventListener("keydown", (e) => {
+      const modal = $("helpModal");
+      if (!modal || modal.hidden) return;
+      if (e.key === "Escape") { closeModal("helpModal"); return; }
+      if (e.key === "ArrowRight") { e.preventDefault(); show(page + 1); }
+      if (e.key === "ArrowLeft") { e.preventDefault(); show(page - 1); }
+    });
+
+    show(0);
   }
 
   // 备用通道：直接列 _replays 文件夹里的回放
@@ -2927,14 +3248,18 @@
       // 只留最要紧的一条：参与评估的局数，以及为什么有些图不算。
       // 别人打的、认不出玩家的数量放在 hover 里，避免这一行读起来像账单。
       const f = data.filters || {};
-      const tip = ["参与评估 " + overall.count + " / " + data.minSessions + " 局"];
+      // 分母是"样本目标"：没过 25 局门槛时是门槛本身；过了门槛就换成满样本 50 局，
+      // 不然会出现「34 / 25 局」这种读起来像出错的比例。
+      const full = data.fullSessions || 50;
+      const denom = overall.count > data.minSessions ? full : data.minSessions;
+      const tip = ["参与评估 " + overall.count + " / " + denom + " 局"];
       if (f.others) tip.push("已排除别人 " + f.others + " 局");
       if (f.unknown) tip.push(f.unknown + " 局认不出玩家");
       if (f.lnHybrid) tip.push("LN / Hybrid " + f.lnHybrid + " 局暂不计入");
       // 这条是规则说明，不是统计：低于门槛的局直接不进估算，数字放括号里就够
       tip.push("仅 v1acc 高于 91% 的成绩进入个人段位估算"
         + (f.lowAcc ? "（已排除 " + f.lowAcc + " 局）" : ""));
-      $("pgSample").textContent = overall.count + " / " + data.minSessions
+      $("pgSample").textContent = overall.count + " / " + denom
         + " 局（LN Hybrid 图暂不进入评价体系）";
       $("pgSample").title = tip.join(" · ");
     }
@@ -2990,6 +3315,225 @@
       card.append(head, big, sub);
       return card;
     }));
+  }
+
+  // ---------------------------------------------------------------- 随机找图
+  // 筛选全部在本地索引里做（后端 finder.py），前端只管输入、请求和卡片。
+  // 之所以把条件也存进 localStorage：找图是"挑着玩"的动作，关掉页面再回来
+  // 还得重新调一遍星数区间会很烦。
+  const FINDER_KEY = "mania-finder";
+  const FINDER_CATS = ["cut", "stack", "spam", "tech", "ln"];
+  const FINDER_N = 8;
+  const finder = { cats: [], starMin: 4, starMax: 6, seen: [] };
+
+  function loadFinderPrefs() {
+    try {
+      const p = JSON.parse(localStorage.getItem(FINDER_KEY) || "{}");
+      if (Array.isArray(p.cats)) finder.cats = p.cats.filter((c) => FINDER_CATS.indexOf(c) >= 0);
+      if (typeof p.starMin === "number") finder.starMin = Math.min(20, Math.max(0, p.starMin));
+      if (typeof p.starMax === "number") finder.starMax = Math.min(20, Math.max(0, p.starMax));
+    } catch (e) { /* 隐私模式下读不到就用默认值 */ }
+  }
+
+  function saveFinderPrefs() {
+    try {
+      localStorage.setItem(FINDER_KEY, JSON.stringify({
+        cats: finder.cats, starMin: finder.starMin, starMax: finder.starMax,
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  function syncFinderUi() {
+    const lo = $("fnStarMin");
+    const hi = $("fnStarMax");
+    if (lo) lo.value = String(finder.starMin);
+    if (hi) hi.value = String(finder.starMax);
+    document.querySelectorAll("#fnCats [data-cat]").forEach((btn) => {
+      const on = btn.dataset.cat === "all" ? !finder.cats.length
+        : finder.cats.indexOf(btn.dataset.cat) >= 0;
+      btn.classList.toggle("is-active", on);
+    });
+  }
+
+  function readFinderInputs() {
+    const lo = Number($("fnStarMin").value);
+    const hi = Number($("fnStarMax").value);
+    finder.starMin = isFinite(lo) ? Math.min(20, Math.max(0, lo)) : 0;
+    finder.starMax = isFinite(hi) ? Math.min(20, Math.max(0, hi)) : 20;
+    if (finder.starMin > finder.starMax) {   // 填反了直接换过来，不弹错让人改
+      const t = finder.starMin;
+      finder.starMin = finder.starMax;
+      finder.starMax = t;
+    }
+    saveFinderPrefs();
+    syncFinderUi();
+  }
+
+  function finderCard(it) {
+    const card = document.createElement("article");
+    card.className = "map-card";
+
+    // 下载绑在封面上：用户明确要求"点封面下载"，所以只有封面是链接，其余不抢点击
+    const cover = document.createElement("a");
+    cover.className = "map-cover";
+    cover.href = it.download;
+    cover.target = "_blank";
+    cover.rel = "noopener";
+    cover.title = "点击封面下载 " + (it.title || "") + "（.osz）";
+
+    const img = document.createElement("img");
+    img.src = it.cover;
+    img.alt = "";
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    // 封面走外网 CDN，断网或被墙时会 404 —— 退回渐变底色，别显示裂图
+    img.addEventListener("error", () => { img.remove(); cover.classList.add("is-blank"); });
+    cover.appendChild(img);
+
+    const tip = document.createElement("span");
+    tip.className = "map-cover-tip";
+    tip.textContent = "点击下载 .osz";
+    cover.appendChild(tip);
+
+    const star = document.createElement("span");
+    star.className = "map-star";
+    star.textContent = "★ " + Number(it.star || 0).toFixed(2);
+    cover.appendChild(star);
+
+    const info = document.createElement("div");
+    info.className = "map-info";
+
+    const title = document.createElement("div");
+    title.className = "map-title";
+    title.textContent = it.title || "（无标题）";
+
+    const sub = document.createElement("div");
+    sub.className = "map-sub";
+    sub.textContent = [it.artist, it.creator].filter(Boolean).join(" · ");
+
+    const ver = document.createElement("div");
+    ver.className = "map-version";
+    ver.textContent = it.version || "";
+
+    const foot = document.createElement("div");
+    foot.className = "map-foot";
+    [it.length, it.dan, it.pattern ? it.pattern + " " + it.patternShare + "%" : ""]
+      .filter(Boolean).forEach((text) => {
+        const chip = document.createElement("span");
+        chip.className = "map-chip";
+        chip.textContent = text;
+        foot.appendChild(chip);
+      });
+
+    info.append(title, sub, ver, foot);
+    card.append(cover, info);
+    return card;
+  }
+
+  function renderFinder(data) {
+    const grid = $("fnGrid");
+    if (!grid) return;
+    grid.textContent = "";
+    const items = (data && data.items) || [];
+    if (!items.length) {
+      const empty = document.createElement("p");
+      empty.className = "find-empty";
+      empty.textContent = "这个条件下没有找到图，把星数区间放宽一点或换一类键型再试。";
+      grid.appendChild(empty);
+    } else {
+      items.forEach((it) => {
+        grid.appendChild(finderCard(it));
+        if (finder.seen.indexOf(it.sid) < 0) finder.seen.push(it.sid);
+      });
+    }
+    if (finder.seen.length > 60) finder.seen = finder.seen.slice(-60);
+
+    const count = $("fnCount");
+    if (count) {
+      const total = (data && data.total) || 0;
+      count.textContent = "共 " + total.toLocaleString() + " 张符合 · 本次 " + items.length + " 张";
+    }
+    const note = $("fnNote");
+    if (note) {
+      const used = (data && data.used) || {};
+      const parts = [];
+      if (data && data.relaxed) {
+        let relax = "条件偏窄，已放宽到 " + Number(used.starMin || 0).toFixed(1)
+          + "~" + Number(used.starMax || 0).toFixed(1) + " 星";
+        if (used.cats && used.cats.length) relax += "、" + used.cats.join("+") + " ≥ " + used.share + "%";
+        parts.push(relax);
+      }
+      parts.push("封面来自 osu! 官方 CDN；点封面直接下 .osz（sayobot 镜像），下不动可换 nerinyan");
+      note.textContent = parts.join("　·　");
+    }
+  }
+
+  async function runFinder(again) {
+    readFinderInputs();
+    const btn = $("btnFind");
+    const btnAgain = $("btnFindAgain");
+    if (btn) btn.disabled = true;
+    if (btnAgain) btnAgain.disabled = true;
+    if (!again) finder.seen = [];
+    try {
+      let data = await window.API.randomCharts({
+        starMin: finder.starMin,
+        starMax: finder.starMax,
+        keys: finder.cats,
+        exclude: again ? finder.seen : [],
+        n: FINDER_N,
+      });
+      // 符合条件的图都被看过了：清空"已经给过"的列表重来，别让用户对着空列表
+      if (again && !((data && data.items) || []).length && finder.seen.length) {
+        finder.seen = [];
+        data = await window.API.randomCharts({
+          starMin: finder.starMin, starMax: finder.starMax,
+          keys: finder.cats, exclude: [], n: FINDER_N,
+        });
+      }
+      renderFinder(data);
+      if (btnAgain) btnAgain.hidden = false;
+    } catch (e) {
+      window.UI.toast("找图失败：" + ((e && e.message) || "服务没有响应"), true);
+    } finally {
+      if (btn) btn.disabled = false;
+      if (btnAgain) btnAgain.disabled = false;
+    }
+  }
+
+  function bindFinder() {
+    loadFinderPrefs();
+    syncFinderUi();
+    const cats = $("fnCats");
+    if (cats) {
+      cats.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-cat]");
+        if (!btn) return;
+        const key = btn.dataset.cat;
+        if (key === "all") {
+          finder.cats = [];
+        } else {
+          const at = finder.cats.indexOf(key);
+          if (at >= 0) finder.cats.splice(at, 1);
+          else finder.cats.push(key);
+        }
+        saveFinderPrefs();
+        syncFinderUi();
+      });
+    }
+    const find = $("btnFind");
+    if (find) find.addEventListener("click", () => runFinder(false));
+    const again = $("btnFindAgain");
+    if (again) again.addEventListener("click", () => runFinder(true));
+    // 改完星数直接回车也能找
+    ["fnStarMin", "fnStarMax"].forEach((id) => {
+      const input = $(id);
+      if (input) {
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); runFinder(false); }
+        });
+      }
+    });
   }
 
   async function loadProgress() {
@@ -3075,6 +3619,38 @@
   }
 
   // ---------------------------------------------------------------- 启动
+  // 建索引期间轮询进度：顶上那条细线负责"在动"，右上角曲库标签负责"到哪儿了"。
+  // 索引建好后曲库标签换成张数，细线收起来。
+  async function loadLibraryWithProgress() {
+    const bar = $("libScan");
+    const chipText = $("libChipText");
+    let polling = true;
+    const tick = async () => {
+      if (!polling) return;
+      try {
+        const p = await window.API.libraryProgress();
+        if (p && p.building) {
+          if (bar) bar.hidden = false;
+          if (chipText) chipText.textContent = "扫描中 " + (p.scanned || 0).toLocaleString() + "…";
+        }
+      } catch (e) {
+        /* 轮询失败不影响主流程：索引建完总会走到下面的 renderLibrary */
+      }
+    };
+    const timer = setInterval(tick, 500);
+    void tick();
+    try {
+      const info = await window.API.library();
+      window.UI.renderLibrary(info);
+    } catch (e) {
+      window.UI.renderLibrary(null);
+    } finally {
+      polling = false;
+      clearInterval(timer);
+      if (bar) bar.hidden = true;
+    }
+  }
+
   async function init() {
     const ver = assetVersion() || "无版本参数";
     beacon("boot", {
@@ -3093,6 +3669,9 @@
     setPlayIcon(false);
     loadPrefs();
     applyTheme(state.theme);
+    // 帧率上限跟着偏好走：这里把 frameMs 定下来，后面的播放/降档都用它
+    applyFpsCap(state.fpsCap, { silent: true });
+    applyMotionPref(state.disableMotion);
     updateJudgeToggle();
     syncScrollUi();
     syncOffsetUi();
@@ -3102,13 +3681,13 @@
     syncLowConfidenceUI();
     syncHitsoundUi();
     syncHitVolUi();
+    applyPerfPanel(state.perfPanel || /(?:^|[?&])perf=1(?:&|$)/.test(location.search));
+    syncTabLocks();
 
-    try {
-      const info = await window.API.library();
-      window.UI.renderLibrary(info);
-    } catch (e) {
-      window.UI.renderLibrary(null);
-    }
+    // 首次启动要遍历上千个文件建索引。这一步不能挡住后面的初始化
+    // （热键、快捷导入、健康检查都得在它之前就绪），所以放出去异步跑，
+    // 期间用顶部细进度条 + 右上角文字告诉用户"程序还在动"。
+    void loadLibraryWithProgress();
 
     // 启动时也做一次版本自愈（拿着旧缓存的标签页能自己刷新）；顺便看看服务端是不是旧进程
     try {
