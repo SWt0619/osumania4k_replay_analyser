@@ -390,6 +390,7 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
         "skills": skills,
         "target": target,
         "minSessions": MIN_SESSIONS,
+        "fullSessions": FULL_SESSIONS,
         "minSkill": MIN_SKILL,
         "passAcc": PASS_ACC,
     }
