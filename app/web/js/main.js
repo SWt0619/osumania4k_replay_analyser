@@ -3320,50 +3320,98 @@
   // ---------------------------------------------------------------- 随机找图
   // 筛选全部在本地索引里做（后端 finder.py），前端只管输入、请求和卡片。
   // 之所以把条件也存进 localStorage：找图是"挑着玩"的动作，关掉页面再回来
-  // 还得重新调一遍星数区间会很烦。
+  // 还得重新调一遍段位区间会很烦。
   const FINDER_KEY = "mania-finder";
   const FINDER_CATS = ["cut", "stack", "spam", "tech", "ln"];
   const FINDER_N = 8;
-  const finder = { cats: [], starMin: 4, starMax: 6, seen: [] };
+
+  // 两套段位下拉：常规用 RC 标尺，面条用 LN 标尺（LN 5~17，16 段起有专门的名字）。
+  // 面条段位单独一套是有原因的：面图的 RC 段位和 LN 段位能差好几段，用 RC 段位筛
+  // 面条图只会筛出一堆根本不打 LN 的图。
+  const FINDER_DAN = {
+    rc: [
+      { v: -3, t: "Intro 1" }, { v: -2, t: "Intro 2" }, { v: -1, t: "Intro 3" },
+      { v: 1, t: "Reform 1" }, { v: 2, t: "Reform 2" }, { v: 3, t: "Reform 3" },
+      { v: 4, t: "Reform 4" }, { v: 5, t: "Reform 5" }, { v: 6, t: "Reform 6" },
+      { v: 7, t: "Reform 7" }, { v: 8, t: "Reform 8" }, { v: 9, t: "Reform 9" },
+      { v: 10, t: "Reform 10" },
+      { v: 11, t: "Alpha" }, { v: 12, t: "Beta" }, { v: 13, t: "Gamma" },
+      { v: 14, t: "Delta" }, { v: 15, t: "Epsilon" }, { v: 16, t: "Emik Zeta" },
+      { v: 17, t: "Thaumiel Eta" }, { v: 18, t: "CloverWisp Theta" },
+    ],
+    ln: [
+      { v: 5, t: "LN 5" }, { v: 6, t: "LN 6" }, { v: 7, t: "LN 7" },
+      { v: 8, t: "LN 8" }, { v: 9, t: "LN 9" }, { v: 10, t: "LN 10" },
+      { v: 11, t: "LN 11" }, { v: 12, t: "LN 12" }, { v: 13, t: "LN 13" },
+      { v: 14, t: "LN 14" }, { v: 15, t: "LN 15" },
+      { v: 16, t: "Hypersovae LN 16" }, { v: 17, t: "Lnlism LN 17" },
+    ],
+  };
+  const FINDER_DEFAULT_DAN = { rc: 6, ln: 7 };
+  const finder = { mode: "rc", dan: { rc: 6, ln: 7 }, cat: "", seen: [] };
 
   function loadFinderPrefs() {
     try {
       const p = JSON.parse(localStorage.getItem(FINDER_KEY) || "{}");
-      if (Array.isArray(p.cats)) finder.cats = p.cats.filter((c) => FINDER_CATS.indexOf(c) >= 0);
-      if (typeof p.starMin === "number") finder.starMin = Math.min(20, Math.max(0, p.starMin));
-      if (typeof p.starMax === "number") finder.starMax = Math.min(20, Math.max(0, p.starMax));
+      if (p.mode === "rc" || p.mode === "ln") finder.mode = p.mode;
+      if (FINDER_CATS.indexOf(p.cat) >= 0 || p.cat === "") finder.cat = p.cat || "";
+      ["rc", "ln"].forEach((m) => {
+        const v = p.dan && Number(p.dan[m]);
+        const list = FINDER_DAN[m];
+        if (isFinite(v) && list.some((it) => it.v === v)) finder.dan[m] = v;
+      });
     } catch (e) { /* 隐私模式下读不到就用默认值 */ }
   }
 
   function saveFinderPrefs() {
     try {
       localStorage.setItem(FINDER_KEY, JSON.stringify({
-        cats: finder.cats, starMin: finder.starMin, starMax: finder.starMax,
+        mode: finder.mode, dan: finder.dan, cat: finder.cat,
       }));
     } catch (e) { /* ignore */ }
   }
 
-  function syncFinderUi() {
-    const lo = $("fnStarMin");
-    const hi = $("fnStarMax");
-    if (lo) lo.value = String(finder.starMin);
-    if (hi) hi.value = String(finder.starMax);
-    document.querySelectorAll("#fnCats [data-cat]").forEach((btn) => {
-      const on = btn.dataset.cat === "all" ? !finder.cats.length
-        : finder.cats.indexOf(btn.dataset.cat) >= 0;
-      btn.classList.toggle("is-active", on);
+  // 切类型时段位下拉要整条换掉：常规 21 项、面条 13 项，值域完全不重叠
+  function fillFinderDanOptions() {
+    const sel = $("fnDan");
+    if (!sel) return;
+    sel.textContent = "";
+    FINDER_DAN[finder.mode].forEach((item) => {
+      const opt = document.createElement("option");
+      opt.value = String(item.v);
+      opt.textContent = item.t;
+      sel.appendChild(opt);
     });
+    sel.value = String(finder.dan[finder.mode]);
   }
 
-  function readFinderInputs() {
-    const lo = Number($("fnStarMin").value);
-    const hi = Number($("fnStarMax").value);
-    finder.starMin = isFinite(lo) ? Math.min(20, Math.max(0, lo)) : 0;
-    finder.starMax = isFinite(hi) ? Math.min(20, Math.max(0, hi)) : 20;
-    if (finder.starMin > finder.starMax) {   // 填反了直接换过来，不弹错让人改
-      const t = finder.starMin;
-      finder.starMin = finder.starMax;
-      finder.starMax = t;
+  function syncFinderUi() {
+    const mode = $("fnMode");
+    if (mode) mode.value = finder.mode;
+    fillFinderDanOptions();
+    const cat = $("fnCat");
+    if (cat) {
+      cat.value = finder.cat;
+      // 面条图的主键型本来就是 LN，再选键型没有意义
+      cat.disabled = finder.mode === "ln";
+    }
+  }
+
+  // changed 是刚变动的控件 id。切类型时下拉里还是旧模式的值（"6" 在两边都存在），
+  // 照着读会把常规的 6 段带进面条，所以那种情况下只认模式，段位回到它自己记着的值。
+  function readFinderInputs(changed) {
+    const mode = $("fnMode");
+    if (mode) finder.mode = mode.value === "ln" ? "ln" : "rc";
+    if (changed !== "fnMode") {
+      const dan = $("fnDan");
+      if (dan) {
+        const value = Number(dan.value);
+        const list = FINDER_DAN[finder.mode];
+        finder.dan[finder.mode] = list.some((it) => it.v === value)
+          ? value : FINDER_DEFAULT_DAN[finder.mode];
+      }
+      const cat = $("fnCat");
+      if (cat) finder.cat = FINDER_CATS.indexOf(cat.value) >= 0 ? cat.value : "";
     }
     saveFinderPrefs();
     syncFinderUi();
@@ -3395,6 +3443,12 @@
     tip.textContent = "点击下载 .osz";
     cover.appendChild(tip);
 
+    // 段位是筛选依据，放左上角（数值形式，方便横着比）；星数退到右上角当参考
+    const danBadge = document.createElement("span");
+    danBadge.className = "map-dan";
+    danBadge.textContent = it.danShort || "";
+    cover.appendChild(danBadge);
+
     const star = document.createElement("span");
     star.className = "map-star";
     star.textContent = "★ " + Number(it.star || 0).toFixed(2);
@@ -3417,7 +3471,15 @@
 
     const foot = document.createElement("div");
     foot.className = "map-foot";
-    [it.length, it.dan, it.pattern ? it.pattern + " " + it.patternShare + "%" : ""]
+    // 段位标签带上估算依据（Roxy / Azusa / Sunny）：同一张图换算法能差一两段，
+    // 只给个名字的话，用户遇到"这图怎么会是这难度"就没法判断该信几分。
+    // 面条图一律走 Sunny，再标一遍是噪音。
+    const danText = [it.dan, it.mode === "ln" ? "" : it.danMethod].filter(Boolean).join(" · ");
+    // 面条模式看的是"这张图有多少面条"，主键型往往是 Jack/Stream 反而误导
+    const mixText = it.mode === "ln"
+      ? "LN " + Math.round(Number(it.lnRatio || 0) * 100) + "%"
+      : (it.pattern ? it.pattern + " " + it.patternShare + "%" : "");
+    [it.length, danText, mixText]
       .filter(Boolean).forEach((text) => {
         const chip = document.createElement("span");
         chip.className = "map-chip";
@@ -3438,7 +3500,7 @@
     if (!items.length) {
       const empty = document.createElement("p");
       empty.className = "find-empty";
-      empty.textContent = "这个条件下没有找到图，把星数区间放宽一点或换一类键型再试。";
+      empty.textContent = "这个条件下没有找到图，把段位区间放宽一点或换一类键型再试。";
       grid.appendChild(empty);
     } else {
       items.forEach((it) => {
@@ -3449,18 +3511,19 @@
     if (finder.seen.length > 60) finder.seen = finder.seen.slice(-60);
 
     const count = $("fnCount");
-    if (count) {
-      const total = (data && data.total) || 0;
-      count.textContent = "共 " + total.toLocaleString() + " 张符合 · 本次 " + items.length + " 张";
-    }
+    if (count) count.textContent = "本批 " + items.length + " 张";
     const note = $("fnNote");
     if (note) {
       const used = (data && data.used) || {};
       const parts = [];
       if (data && data.relaxed) {
-        let relax = "条件偏窄，已放宽到 " + Number(used.starMin || 0).toFixed(1)
-          + "~" + Number(used.starMax || 0).toFixed(1) + " 星";
-        if (used.cats && used.cats.length) relax += "、" + used.cats.join("+") + " ≥ " + used.share + "%";
+        const unit = used.mode === "ln" ? "" : " 段";
+        let relax = "±1 段里没凑够，已放宽到 "
+          + Number(used.danMin || 0).toFixed(1) + "~" + Number(used.danMax || 0).toFixed(1) + unit;
+        if (used.danMinLabel || used.danMaxLabel) {
+          relax += "（" + [used.danMinLabel, used.danMaxLabel].filter(Boolean).join(" ~ ") + "）";
+        }
+        if (used.cat) relax += "、" + used.cat + " ≥ " + used.share + "%";
         parts.push(relax);
       }
       parts.push("封面来自 osu! 官方 CDN；点封面直接下 .osz（sayobot 镜像），下不动可换 nerinyan");
@@ -3468,8 +3531,8 @@
     }
   }
 
-  async function runFinder(again) {
-    readFinderInputs();
+  async function runFinder(again, changed) {
+    readFinderInputs(changed);
     const btn = $("btnFind");
     const btnAgain = $("btnFindAgain");
     if (btn) btn.disabled = true;
@@ -3477,9 +3540,9 @@
     if (!again) finder.seen = [];
     try {
       let data = await window.API.randomCharts({
-        starMin: finder.starMin,
-        starMax: finder.starMax,
-        keys: finder.cats,
+        mode: finder.mode,
+        dan: finder.dan[finder.mode],
+        cat: finder.cat,
         exclude: again ? finder.seen : [],
         n: FINDER_N,
       });
@@ -3487,8 +3550,8 @@
       if (again && !((data && data.items) || []).length && finder.seen.length) {
         finder.seen = [];
         data = await window.API.randomCharts({
-          starMin: finder.starMin, starMax: finder.starMax,
-          keys: finder.cats, exclude: [], n: FINDER_N,
+          mode: finder.mode, dan: finder.dan[finder.mode],
+          cat: finder.cat, exclude: [], n: FINDER_N,
         });
       }
       renderFinder(data);
@@ -3504,36 +3567,15 @@
   function bindFinder() {
     loadFinderPrefs();
     syncFinderUi();
-    const cats = $("fnCats");
-    if (cats) {
-      cats.addEventListener("click", (e) => {
-        const btn = e.target.closest("[data-cat]");
-        if (!btn) return;
-        const key = btn.dataset.cat;
-        if (key === "all") {
-          finder.cats = [];
-        } else {
-          const at = finder.cats.indexOf(key);
-          if (at >= 0) finder.cats.splice(at, 1);
-          else finder.cats.push(key);
-        }
-        saveFinderPrefs();
-        syncFinderUi();
-      });
-    }
+    // 改任一项都直接重新找一批：下拉本身就是"确认"，再点一次按钮是多余动作
+    ["fnMode", "fnDan", "fnCat"].forEach((id) => {
+      const sel = $(id);
+      if (sel) sel.addEventListener("change", () => runFinder(false, id));
+    });
     const find = $("btnFind");
     if (find) find.addEventListener("click", () => runFinder(false));
     const again = $("btnFindAgain");
     if (again) again.addEventListener("click", () => runFinder(true));
-    // 改完星数直接回车也能找
-    ["fnStarMin", "fnStarMax"].forEach((id) => {
-      const input = $(id);
-      if (input) {
-        input.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") { e.preventDefault(); runFinder(false); }
-        });
-      }
-    });
   }
 
   async function loadProgress() {
