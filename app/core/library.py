@@ -116,6 +116,19 @@ class LibraryEntry:
     md5_crlf: str
     size: int
     mtime: float
+    # 搜索用的预处理：文件名与父目录名的小写形式。
+    # 以前每次搜索都对 1900 多条各做两次 basename + lower（含路径拆分），
+    # 挪到建索引时算一次，搜索循环里只剩两次字符串包含判断。
+    name_lc: str = ""
+    parent_lc: str = ""
+
+
+def _search_names(path: str) -> tuple[str, str]:
+    """(文件名小写, 父目录名小写)。取不到就给空串，不让一条坏路径炸掉整次索引。"""
+    try:
+        return os.path.basename(path).lower(), os.path.basename(os.path.dirname(path)).lower()
+    except (ValueError, OSError):
+        return "", ""
 
 
 def _stamp_dir(path: str, deep: bool = False) -> tuple:
@@ -176,6 +189,7 @@ def _entry_for(full: str, cache: dict[str, LibraryEntry], sniff: bool = False,
         hashes = compute_md5_variants(full)
     except OSError:
         return None, False
+    name_lc, parent_lc = _search_names(full)
     return (
         LibraryEntry(
             path=full,
@@ -184,6 +198,8 @@ def _entry_for(full: str, cache: dict[str, LibraryEntry], sniff: bool = False,
             md5_crlf=hashes["crlf"],
             size=st.st_size,
             mtime=st.st_mtime,
+            name_lc=name_lc,
+            parent_lc=parent_lc,
         ),
         True,
     )
@@ -208,13 +224,17 @@ def _iter_tree(root: str):
             continue
 
 
-def _scan_regular(scan_root: str, cache: dict[str, LibraryEntry]) -> tuple[list[LibraryEntry], list[bool]]:
+def _scan_regular(scan_root: str, cache: dict[str, LibraryEntry],
+                  on_tick=None) -> tuple[list[LibraryEntry], list[bool]]:
     """普通目录树：直接按 .osu 扩展名收。"""
     found: list[LibraryEntry] = []
     hashed: list[bool] = []
     if not scan_root or not os.path.isdir(long_path(scan_root)):
         return found, hashed
-    for full, st in _iter_tree(scan_root):
+    for i, (full, st) in enumerate(_iter_tree(scan_root)):
+        # 每 64 个文件报一次：调用方的进度条只需要"在动"，逐文件回调反而添开销
+        if on_tick is not None and (i & 63) == 0:
+            on_tick(64)
         if not full.lower().endswith(".osu"):
             continue
         entry, did_hash = _entry_for(full, cache, st=st)
@@ -227,7 +247,8 @@ def _scan_regular(scan_root: str, cache: dict[str, LibraryEntry]) -> tuple[list[
 
 def _scan_lazer_store(store_root: str, cache: dict[str, LibraryEntry],
                       skip: dict[str, tuple[int, float]] | None = None,
-                      seen: set[str] | None = None) -> tuple[list[LibraryEntry], list[bool]]:
+                      seen: set[str] | None = None,
+                      on_tick=None) -> tuple[list[LibraryEntry], list[bool]]:
     """lazer 的 files 存储：哈希文件名、无扩展名，只能按内容辨认。
 
     超长图/新图往往只存在于这里（用户在 lazer 里玩，谱面不落在 Songs），
@@ -240,7 +261,9 @@ def _scan_lazer_store(store_root: str, cache: dict[str, LibraryEntry],
     hashed: list[bool] = []
     if not store_root or not os.path.isdir(long_path(store_root)):
         return found, hashed
-    for full, st in _iter_tree(store_root):
+    for i, (full, st) in enumerate(_iter_tree(store_root)):
+        if on_tick is not None and (i & 63) == 0:
+            on_tick(64)
         if seen is not None:
             seen.add(full)
         if full.lower().endswith((".osu", ".osk", ".osr")):
@@ -299,6 +322,7 @@ def _load_cache_file(cache_path: str, root: str) -> tuple[dict[str, LibraryEntry
     out: dict[str, LibraryEntry] = {}
     for item in data.get("files", []):
         try:
+            name_lc, parent_lc = _search_names(item["p"])
             out[item["p"]] = LibraryEntry(
                 path=item["p"],
                 md5_raw=item["raw"],
@@ -306,6 +330,8 @@ def _load_cache_file(cache_path: str, root: str) -> tuple[dict[str, LibraryEntry
                 md5_crlf=item["crlf"],
                 size=int(item["size"]),
                 mtime=float(item["mtime"]),
+                name_lc=name_lc,
+                parent_lc=parent_lc,
             )
         except (KeyError, TypeError, ValueError):
             continue
@@ -359,6 +385,11 @@ class Library:
     _cache_path: str = field(default="", repr=False)
     # 扫过但不是谱面的文件 → (大小, mtime)，见 _load_cache_file 的说明
     _skipped: dict[str, tuple[int, float]] = field(default_factory=dict, repr=False)
+    # 建索引的实时进度：扫描期间页面拿它画进度条。
+    # 目录里的文件总数事先不知道（要遍历完才知道），所以只报"已看过多少个文件"，
+    # 进度条走不确定动画，不做假百分比。
+    progress: dict = field(default_factory=lambda: {"building": False, "scanned": 0, "entries": 0},
+                           repr=False)
 
     # ---- 构建 -----------------------------------------------------------
     def build(self, root: str, force: bool = False, cache_path: str = "") -> None:
@@ -372,11 +403,17 @@ class Library:
             # 丢掉缓存会让每次刷新都花四秒多去哈希几千个文件，而它们几乎全没变。
             cached, skipped = _load_cache_file(cache_path, root)
             self._skipped = skipped
-            entries, stats = self._scan_all(root, cached)
+            # 扫描期间页面会轮询这个字典画进度条；结束后保留最后的值，方便前端读到"已完成"
+            self.progress = {"building": True, "scanned": 0, "entries": len(self.entries)}
+            try:
+                entries, stats = self._scan_all(root, cached)
+            finally:
+                self.progress["building"] = False
             by_md5 = _resolve_md5_conflicts(entries)
 
             self.root = root
             self.entries = entries
+            self.progress["entries"] = len(entries)
             self._by_md5 = by_md5
             self._meta_cache = {}
             self._audio_cache = {}
@@ -389,6 +426,16 @@ class Library:
             if entries:
                 _save_cache_file(cache_path, self)
             LAST_BUILD[0] = self.built_at
+
+    def _tick(self, n: int) -> None:
+        """扫描回调：累加"已看过多少个文件"。
+
+        读的一方在 HTTP 线程，这里只做一次 int 自增，靠 GIL 就够安全，
+        不必再抢 self._lock（build 期间它已经被占着，再抢会死锁）。
+        """
+        p = self.progress
+        if p.get("building"):
+            p["scanned"] = int(p.get("scanned") or 0) + n
 
     def _sources(self, root: str) -> list[tuple[str, bool]]:
         """这次扫描会走到的全部目录，按（目录, 是否按内容辨认）给出。
@@ -452,9 +499,10 @@ class Library:
         seen: set[str] = set()
         for path, sniff in self._sources(root):
             if sniff:
-                collect(*_scan_lazer_store(path, cached, skip=self._skipped, seen=seen))
+                collect(*_scan_lazer_store(path, cached, skip=self._skipped, seen=seen,
+                                           on_tick=self._tick))
             else:
-                collect(*_scan_regular(path, cached))
+                collect(*_scan_regular(path, cached, on_tick=self._tick))
         # 负缓存只留这次还见到的文件：lazer 删掉的图会一直留在里面，越积越多
         if seen:
             self._skipped = {p: v for p, v in self._skipped.items() if p in seen}
@@ -609,8 +657,8 @@ class Library:
         hits = []
         late: list[LibraryEntry] = []
         for e in self.entries:
-            name = os.path.basename(e.path).lower()
-            parent = os.path.basename(os.path.dirname(e.path)).lower()
+            name = e.name_lc or os.path.basename(e.path).lower()
+            parent = e.parent_lc or os.path.basename(os.path.dirname(e.path)).lower()
             if q in name or q in parent:
                 hits.append(e)
                 continue
@@ -675,8 +723,21 @@ def get_library(root: str | None = None, force: bool = False) -> Library:
     return _LIB
 
 
+def progress_snapshot() -> dict:
+    """当前索引进度。**不触发构建** —— 页面在扫描期间轮询它画进度条，
+    要是这里顺手调一次 get_library()，等于把建索引又排一次队。
+    """
+    p = _LIB.progress
+    return {
+        "ok": True,
+        "building": bool(p.get("building")),
+        "scanned": int(p.get("scanned") or 0),
+        "entries": int(p.get("entries") or len(_LIB.entries)),
+    }
+
+
 def reset_library() -> None:
-    """丢掉进程内索引，下次 get_library 会按新的根重建。
+    """丢掉进程内索引，下次 get_library() 会按新的根重建。
 
     玩家在网页上改了游戏目录后必须调用：否则单例还指着旧目录，
     新设的路径看起来"不生效"。
