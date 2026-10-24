@@ -348,9 +348,9 @@
     // 随机找图：筛选全在本地索引里做，唯一的外部依赖是卡片上的封面与下载链接。
     randomCharts(params) {
       const qs = new URLSearchParams();
-      if (params.starMin != null) qs.set("starMin", params.starMin);
-      if (params.starMax != null) qs.set("starMax", params.starMax);
-      if (params.keys && params.keys.length) qs.set("keys", params.keys.join(","));
+      if (params.mode) qs.set("mode", params.mode);
+      if (params.dan != null) qs.set("dan", params.dan);
+      if (params.cat) qs.set("cat", params.cat);
       if (params.exclude && params.exclude.length) qs.set("exclude", params.exclude.join(","));
       qs.set("n", params.n || 8);
       return jsonFetch("/api/random-charts?" + qs.toString());
