@@ -483,31 +483,34 @@
       <article class="card glass">
         <div class="card-head">
           <h2>随机找图</h2>
-          <p class="muted">给个难度区间和键型，从随附的 4 万张 4K 图里随机抽几张；不满意就再抽一批。封面点一下直接下载。</p>
+          <p class="muted">选择段位和键型，会自动帮你推荐 ±1 段的图谱。</p>
         </div>
         <div class="card-body">
           <div class="finder-form">
-            <div class="finder-field">
-              <span class="finder-label">难度（星数）</span>
-              <div class="finder-range">
-                <input type="number" id="fnStarMin" class="text-input" value="4" min="0" max="20" step="0.1" aria-label="最低星数">
-                <span class="finder-tilde">~</span>
-                <input type="number" id="fnStarMax" class="text-input" value="6" min="0" max="20" step="0.1" aria-label="最高星数">
-                <span class="finder-unit">星</span>
-              </div>
-            </div>
+            <label class="finder-field">
+              <span class="finder-label">类型</span>
+              <select class="text-input finder-select" id="fnMode">
+                <option value="rc" selected>常规</option>
+                <option value="ln">面条</option>
+              </select>
+            </label>
 
-            <div class="finder-field finder-field-cats">
-              <span class="finder-label">键型（可多选）</span>
-              <div class="seg" id="fnCats">
-                <button class="seg-btn is-active" data-cat="all">不限</button>
-                <button class="seg-btn" data-cat="cut">切 Stream</button>
-                <button class="seg-btn" data-cat="stack">叠 Jack</button>
-                <button class="seg-btn" data-cat="spam">乱 Speed</button>
-                <button class="seg-btn" data-cat="tech">技 Tech</button>
-                <button class="seg-btn" data-cat="ln">面 LN</button>
-              </div>
-            </div>
+            <label class="finder-field">
+              <span class="finder-label">段位</span>
+              <select class="text-input finder-select" id="fnDan"></select>
+            </label>
+
+            <label class="finder-field">
+              <span class="finder-label">键型</span>
+              <select class="text-input finder-select" id="fnCat">
+                <option value="" selected>不限</option>
+                <option value="cut">切 Stream</option>
+                <option value="stack">叠 Jack</option>
+                <option value="spam">乱 Speed</option>
+                <option value="tech">技 Tech</option>
+                <option value="ln">面 LN</option>
+              </select>
+            </label>
           </div>
 
           <div class="finder-actions">
@@ -974,12 +977,13 @@
 
         <!-- 6 -->
         <section class="tut-page" data-page="5">
-          <p class="tut-lead">只想找几张图练、又没有具体目标时用它。</p>
+          <p class="tut-lead">只想找几张图练、又没有具体目标时用它：选好段位和键型，程序会给你这个段位上下各一段的图。</p>
           <ul class="help-list">
-            <li><b>难度</b>：填星数区间（和别的页说的是同一把星数）。只填一个也行，程序会把它当成上下限。</li>
-            <li><b>键型</b>：切 / 叠 / 乱 / 技 / 面，可以多选；多选表示"这几类加起来要占一半以上"，不是每类各占一半。</li>
-            <li><b>再找一次</b>：换一批没出现过的图；符合条件的都被你看完了，会自动从头再来。</li>
-            <li><b>点封面下载</b>：星数在封面左上角，底部一行是时长、段位和主键型占比，封面本身就是下载链接（sayobot 镜像）。</li>
+            <li><b>类型</b>：常规和面条二选一。常规按 RC 段位（1 段到 Alpha 以上）；面条按 LN 段位（LN 5 到 LN 17），只给长条占一半以上的图。两者不能同时选，因为面图的 RC 段位和 LN 段位差得远，混着筛一定挑歪。</li>
+            <li><b>段位</b>：选一个段位，程序取它的 ±1 段。比如选 Reform 6 就是 5~7 段，选 LN 7 就是 LN 6~8。</li>
+            <li><b>键型</b>：切 / 叠 / 乱 / 技 / 面，单选。面条模式下这一项会变灰——面图的主键型本来就是长条，再选没有意义。</li>
+            <li><b>自动刷新</b>：改任何一项都会立刻重新抽一批，不用再点按钮；「再找一次」是同一条件下换一批没出现过的图。±1 段里凑不够 8 张时会自动放宽，并在下方注明放宽到了多少。</li>
+            <li><b>点封面下载</b>：左上角是段位、右上角是星数，底部一行是时长、段位名称、键型占比（面条模式显示长条占比），封面本身就是下载链接（sayobot 镜像）。</li>
           </ul>
           <p class="fineprint">图库是随程序发布的 4 万张 2020 年后 4K 图，筛选完全离线；封面走 osu! 官方 CDN，断网时只显示底色，不影响下载。</p>
         </section>
