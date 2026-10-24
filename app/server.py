@@ -1066,21 +1066,24 @@ class _AnalyzeApiMixin(_SessionView):
 
     # ---- 随机找图 -------------------------------------------------------
     def _random_charts(self, qs):
-        """按星数与键型随机抽几张图。全部读随附索引，不联网。"""
+        """按段位与键型随机抽几张图。全部读随附索引，不联网。"""
+        def one(key, default=""):
+            return ((qs.get(key) or [default])[0] or default).strip()
+
         def num(key, default):
             try:
-                return float((qs.get(key) or [default])[0])
+                return float(one(key, default))
             except (TypeError, ValueError):
                 return default
 
-        keys = [c.strip() for c in ((qs.get("keys") or [""])[0]).split(",") if c.strip()]
         exclude = []
-        for part in ((qs.get("exclude") or [""])[0]).split(","):
+        for part in one("exclude").split(","):
             part = part.strip()
             if part.isdigit():
                 exclude.append(int(part))
         try:
-            payload = finder.pick(num("starMin", 3.0), num("starMax", 6.0), keys,
+            # mode 决定用常规段位（rc）还是面条段位（ln），两者互斥
+            payload = finder.pick(one("mode", "rc"), num("dan", 6.0), one("cat"),
                                   int(num("n", 8)), exclude)
         except Exception as e:  # noqa: BLE001 - 找图失败不该把页面带崩
             log("[finder] 失败：%r" % (e,))
