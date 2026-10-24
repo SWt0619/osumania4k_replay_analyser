@@ -297,9 +297,13 @@
     var noteW = 0;
 
     // 缓存：渐变每帧重建会白白分配对象，但这几样只跟尺寸/主题/列数有关
-    var bgGrad = null;
     var zoneGrad = null;
     var laneFill = THEME_DEFAULTS.laneBg; // 轨道底色（纯色，见 THEME_DEFAULTS.laneBg 的注释）
+    // 背景与轨道是静态的：每帧重画等于白扔一次全屏填充 + 每列一次填充。
+    // 画进离屏 canvas，只在尺寸 / 主题 / 列宽变化时重建，每帧一次 drawImage。
+    var staticLayer = null;
+    var staticCtx = null;
+    var staticDirty = true;
 
     // 皮肤素材：noteImgs[列号] 是一张 <img>，lnBodyImg / lnTailImg 是长按条的身体与尾巴。
     // 站点把素材 URL 通过 /api/media 发过来，这里是异步加载的——
@@ -453,13 +457,6 @@
     function rebuildGradients() {
       if (!(W > 0 && H > 0)) return;
 
-      // 背景：很淡的纵向渐变，制造纵深（顶部略亮、底部压暗）
-      var bg = effectiveBg();
-      bgGrad = ctx.createLinearGradient(0, 0, 0, H);
-      bgGrad.addColorStop(0, shade(bg, 1.35));
-      bgGrad.addColorStop(0.55, bg);
-      bgGrad.addColorStop(1, shade(bg, 0.7));
-
       // 判定区色带：主题色从上到下淡出
       zoneGrad = ctx.createLinearGradient(0, judgeY, 0, judgeY + ZONE_H);
       zoneGrad.addColorStop(0, withAlpha(theme.accent, 0.2));
@@ -469,6 +466,9 @@
       // 全透明 / 空字符串，就退回不透明黑 —— 舞台必须是实的，
       // 透出去会看见上一帧的音符残渣。
       laneFill = usableBg(theme.laneBg) || 'rgba(0, 0, 0, 0.95)';
+
+      // 背景渐变色、列宽、主题色都可能刚变过，静态层要重画
+      staticDirty = true;
     }
 
     // -------------------------------------------------------------------------
@@ -546,25 +546,56 @@
     // 绘制：基础层
     // -------------------------------------------------------------------------
 
-    function drawBackground() {
-      ctx.fillStyle = bgGrad || effectiveBg();
-      ctx.fillRect(0, 0, W, H);
+    function paintBackground(c) {
+      // 很淡的纵向渐变，制造纵深（顶部略亮、底部压暗）。
+      // 在主画布和离屏层上用各自的 context 建渐变，避免依赖 CanvasGradient 跨画布复用。
+      var bg = effectiveBg();
+      var g = c.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, shade(bg, 1.35));
+      g.addColorStop(0.55, bg);
+      g.addColorStop(1, shade(bg, 0.7));
+      c.fillStyle = g;
+      c.fillRect(0, 0, W, H);
     }
 
-    function drawLanes() {
+    function paintLanes(c) {
       // 每列铺一块纯色。舞台负责黑、音符负责亮：任何加在轨道上的高光
       // 都会与音符抢视线，而 osu 的舞台本来就是平的。
-      ctx.fillStyle = laneFill;
+      c.fillStyle = laneFill;
       for (var i = 0; i < keys; i += 1) {
-        ctx.fillRect(stageLeft + i * laneW, 0, laneW, H);
+        c.fillRect(stageLeft + i * laneW, 0, laneW, H);
       }
 
       // 列间 1px 分隔线。轨道底色恒为近黑，分隔线固定用极淡的白（见 LANE_LINE）。
       // 用 fillRect 而不是 stroke：1px 线用 stroke 在 DPR 非整数时特别容易糊成 2px 灰线。
-      ctx.fillStyle = theme.laneLine || LANE_LINE;
+      c.fillStyle = theme.laneLine || LANE_LINE;
       for (var k = 1; k < keys; k += 1) {
-        ctx.fillRect(Math.round(stageLeft + k * laneW) - 0.5, 0, 1, H);
+        c.fillRect(Math.round(stageLeft + k * laneW) - 0.5, 0, 1, H);
       }
+    }
+
+    // 静态层：背景 + 轨道。尺寸跟着画布走，脏了才重画。
+    function ensureStatic() {
+      var pw = Math.max(1, Math.round(W * dpr));
+      var ph = Math.max(1, Math.round(H * dpr));
+      if (!staticLayer) {
+        staticLayer = document.createElement('canvas');
+        staticCtx = staticLayer.getContext('2d');
+        staticDirty = true;
+      }
+      if (staticLayer.width !== pw || staticLayer.height !== ph) {
+        staticLayer.width = pw;
+        staticLayer.height = ph;
+        staticDirty = true;
+      }
+      if (staticDirty) {
+        staticCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        staticCtx.clearRect(0, 0, W, H);
+        paintBackground(staticCtx);
+        paintLanes(staticCtx);
+        staticDirty = false;
+      }
+      return staticLayer;
     }
 
     // 每列的实时平均 |偏差|：now 之前已判定的音符（漏接不算，没有时间偏移可言）
@@ -1142,8 +1173,7 @@
       if (!(W > 0 && H > 0)) return; // 还没布局，画了也是白画
 
       var now = timeMs;
-      drawBackground();
-      drawLanes();
+      ctx.drawImage(ensureStatic(), 0, 0, W, H);
       drawDeviationBars(now);
       drawJudgeLine();
       if (opts.showPresses) {
@@ -1431,7 +1461,9 @@
         lanePreCnt = [];
         noteImgs = [];
         lnBodyImg = null;
-        bgGrad = null;
+        staticLayer = null;
+        staticCtx = null;
+        staticDirty = true;
         zoneGrad = null;
         laneFill = THEME_DEFAULTS.laneBg;
       },
