@@ -1411,14 +1411,15 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
 /* ---------------------------------------------------------------- 随机找图 */
 .finder-form { display: flex; flex-wrap: wrap; gap: 18px 30px; align-items: flex-start; }
 .finder-field { display: flex; flex-direction: column; gap: 8px; }
-.finder-field-cats { flex: 1 1 460px; min-width: 280px; }
 .finder-label { font-size: 12.5px; color: var(--dim); }
-.finder-range { display: flex; align-items: center; gap: 8px; }
-.finder-range .text-input {
-  width: 86px; text-align: center;
-  font-variant-numeric: tabular-nums;
+.finder-select {
+  width: 210px; height: 38px; cursor: pointer;
+  font-size: 13px;
 }
-.finder-tilde, .finder-unit { color: var(--faint); font-size: 13px; }
+.finder-select:disabled { opacity: .45; cursor: not-allowed; }
+/* 展开的选项列表由系统画，不继承页面深色背景：不钉颜色就是白底浅字 */
+.finder-select option { background-color: #ffffff; color: #141a33; }
+#fnMode.finder-select { width: 130px; }
 .finder-actions { display: flex; align-items: center; gap: 10px; margin: 16px 0 14px; flex-wrap: wrap; }
 
 .finder-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
@@ -1452,10 +1453,17 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
   opacity: .6; transition: opacity .16s ease;
 }
 .map-cover:hover .map-cover-tip, .map-cover:focus-visible .map-cover-tip { opacity: 1; }
-.map-star {
+/* 左上角是段位（筛选依据），右上角是星数（参考） */
+.map-dan {
   position: absolute; top: 8px; left: 8px; padding: 2px 8px; border-radius: 999px;
-  font-size: 11.5px; font-weight: 600; color: #fff;
-  background: rgba(10, 12, 24, .72); border: 1px solid rgba(255, 255, 255, .18);
+  font-size: 11.5px; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums;
+  background: rgba(124, 92, 255, .86); border: 1px solid rgba(255, 255, 255, .28);
+}
+.map-star {
+  position: absolute; top: 8px; right: 8px; padding: 2px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; color: rgba(255, 255, 255, .9);
+  background: rgba(10, 12, 24, .6); border: 1px solid rgba(255, 255, 255, .14);
+  font-variant-numeric: tabular-nums;
 }
 .map-info { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 3px; }
 .map-title {
