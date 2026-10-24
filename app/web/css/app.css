@@ -230,6 +230,9 @@ canvas { display: block; }
   transition: color .18s ease, background .18s ease, transform .18s ease;
 }
 .rail-btn .ico { width: 20px; height: 20px; }
+/* 没导入回放时，依赖结果的页签由 JS 打上 hidden。.rail-btn 自己是 display:grid，
+   不加这条，浏览器给 [hidden] 的 display:none 会被网格布局盖掉。 */
+.rail-btn[hidden] { display: none; }
 .rail-btn:hover { color: var(--text); background: var(--raise-2); }
 .rail-btn.is-active { color: #fff; background: linear-gradient(140deg, rgba(124, 92, 255, .85), rgba(34, 211, 238, .55)); box-shadow: 0 8px 22px rgba(124, 92, 255, .35); }
 .rail-btn.is-active::after {
@@ -875,10 +878,60 @@ canvas { display: block; }
 .bm-list li:hover { background: rgba(124, 92, 255, .2); border-color: rgba(124, 92, 255, .4); }
 .bm-list li span { color: var(--faint); font-size: 11px; margin-left: 8px; }
 
-.help-card { width: min(640px, calc(100% - 40px)); }
+/* ---- 帮助弹窗：左边选章节、右边看内容，底部翻页 ---- */
+.help-card { width: min(1040px, calc(100% - 40px)); padding: 20px 24px 16px; gap: 10px; }
 .help-steps, .help-list { display: flex; flex-direction: column; gap: 8px; padding-left: 18px; list-style: disc; }
+.help-steps { list-style: decimal; }
 .help-steps li, .help-list li { font-size: 12.8px; color: var(--ink); line-height: 1.7; }
 .help-card h4 { font-size: 13px; margin-top: 6px; color: var(--dim); }
+
+.tut-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.tut-head h3 { font-size: 17px; }
+.tut-counter { font-size: 12px; color: var(--faint); }
+.tut-body { display: grid; grid-template-columns: 200px 1fr; gap: 18px; min-height: 0; }
+.tut-nav {
+  display: flex; flex-direction: column; gap: 4px;
+  padding-right: 14px; border-right: 1px solid var(--stroke);
+}
+.tut-tab {
+  text-align: left; padding: 9px 11px; border-radius: 10px;
+  border: 1px solid transparent; background: transparent;
+  color: var(--dim); font: inherit; font-size: 12.5px; line-height: 1.45; cursor: pointer;
+  transition: background .16s ease, color .16s ease;
+}
+.tut-tab:hover { background: var(--raise-2); color: var(--text); }
+.tut-tab.is-active {
+  color: #fff;
+  background: linear-gradient(140deg, rgba(124, 92, 255, .85), rgba(34, 211, 238, .45));
+}
+.tut-pages { height: min(58vh, 520px); overflow-y: auto; padding-right: 10px; }
+.tut-page { display: none; }
+.tut-page.is-active { display: block; }
+.tut-page h4 { font-size: 13px; margin: 16px 0 6px; color: var(--dim); }
+.tut-page h4:first-child { margin-top: 0; }
+.tut-page p { font-size: 12.8px; line-height: 1.75; color: var(--ink); }
+.tut-lead { margin-bottom: 10px; color: var(--text); }
+.tut-actions { align-items: center; }
+.tut-spacer { flex: 1; }
+/* 教程翻到头时按钮要看得出来不能再点了（浏览器默认样式被主题色盖掉了） */
+.btn:disabled {
+  opacity: .45; cursor: default; box-shadow: none;
+  background: rgba(255, 255, 255, .06);
+  color: var(--faint);
+  border-color: var(--stroke);
+}
+html[data-theme="sakura"] .tut-tab.is-active {
+  background: linear-gradient(140deg, #ff5fa2, #b06bff);
+}
+@media (max-width: 760px) {
+  .tut-body { grid-template-columns: 1fr; }
+  .tut-nav {
+    flex-direction: row; overflow-x: auto; border-right: 0;
+    border-bottom: 1px solid var(--stroke); padding: 0 0 8px;
+  }
+  .tut-tab { white-space: nowrap; }
+  .tut-pages { height: 50vh; }
+}
 
 /* ---------------------------------------------------------------- 提示 / 加载 */
 .toast {
@@ -1322,4 +1375,113 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
 
 @media (max-width: 860px) {
   .pg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* 曲库扫描进度条：贴在最顶上的一条细线，扫描期间来回跑。
+   索引建完就隐藏，不影响任何布局。 */
+.lib-scan {
+  position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 90;
+  background: rgba(255, 255, 255, .06); overflow: hidden; pointer-events: none;
+}
+.lib-scan i {
+  display: block; width: 30%; height: 100%;
+  background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
+  animation: lib-scan 1.15s cubic-bezier(.45, 0, .55, 1) infinite;
+}
+@keyframes lib-scan {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(430%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .lib-scan i { animation-duration: 2.4s; }
+}
+
+/* 性能面板：只在设置里勾了才显示，右下角小字，不接收鼠标事件。
+   它固定贴在窗口右下角，任何页面都能看到；勾上后立刻出现（不必先放回放）。 */
+.perf-panel {
+  position: fixed; right: 14px; bottom: 14px; z-index: 95;
+  padding: 9px 13px; border-radius: 10px;
+  background: rgba(8, 10, 20, .92);
+  border: 1px solid rgba(124, 92, 255, .45);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .45);
+  font: 11px/1.7 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: var(--text); white-space: pre; pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- 随机找图 */
+.finder-form { display: flex; flex-wrap: wrap; gap: 18px 30px; align-items: flex-start; }
+.finder-field { display: flex; flex-direction: column; gap: 8px; }
+.finder-field-cats { flex: 1 1 460px; min-width: 280px; }
+.finder-label { font-size: 12.5px; color: var(--dim); }
+.finder-range { display: flex; align-items: center; gap: 8px; }
+.finder-range .text-input {
+  width: 86px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.finder-tilde, .finder-unit { color: var(--faint); font-size: 13px; }
+.finder-actions { display: flex; align-items: center; gap: 10px; margin: 16px 0 14px; flex-wrap: wrap; }
+
+.finder-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+/* 一批固定 8 张：4 列刚好两行；窄窗口退到 3 列 / 2 列，别把卡片挤成条 */
+@media (max-width: 1180px) { .finder-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 860px) { .finder-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.map-card {
+  display: flex; flex-direction: column; overflow: hidden;
+  border-radius: 14px; border: 1px solid var(--stroke); background: var(--raise);
+  transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.map-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(124, 92, 255, .5);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .35);
+}
+.map-cover {
+  position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden;
+  background: linear-gradient(135deg, rgba(124, 92, 255, .35), rgba(34, 211, 238, .18));
+}
+.map-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.map-cover.is-blank::after {
+  content: "无封面"; position: absolute; inset: 0;
+  display: grid; place-items: center; font-size: 12px; color: rgba(255, 255, 255, .5);
+}
+.map-cover-tip {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 8px 7px;
+  font-size: 11.5px; color: #fff; text-align: center;
+  background: linear-gradient(transparent, rgba(0, 0, 0, .78));
+  /* 常显但压暗：不压住封面，又能让人看见"这里可以点" */
+  opacity: .6; transition: opacity .16s ease;
+}
+.map-cover:hover .map-cover-tip, .map-cover:focus-visible .map-cover-tip { opacity: 1; }
+.map-star {
+  position: absolute; top: 8px; left: 8px; padding: 2px 8px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 600; color: #fff;
+  background: rgba(10, 12, 24, .72); border: 1px solid rgba(255, 255, 255, .18);
+}
+.map-info { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 3px; }
+.map-title {
+  font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.map-sub, .map-version {
+  font-size: 11.5px; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.map-version { color: var(--faint); }
+.map-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
+.map-chip { padding: 2px 7px; border-radius: 7px; font-size: 11px; color: var(--dim); background: var(--raise-2); }
+.find-empty { grid-column: 1 / -1; padding: 26px; text-align: center; color: var(--dim); font-size: 13px; }
+
+/* ---------------------------------------------------------------- 禁用动画 */
+/* 设置里勾了「禁用动画」时给 <html> 加 data-motion="off"。
+   只关进场动画与过渡（切页的 rise/fade、悬停渐变都算），播放器是 canvas 自绘，不受影响。
+   加载转圈和曲库扫描进度条例外：它们表示"程序还在动"，冻住会被当成卡死。 */
+html[data-motion="off"] *,
+html[data-motion="off"] *::before,
+html[data-motion="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+html[data-motion="off"] .spinner { animation: spin .85s linear infinite !important; }
+html[data-motion="off"] .lib-scan i {
+  animation: lib-scan 1.15s cubic-bezier(.45, 0, .55, 1) infinite !important;
 }
