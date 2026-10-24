@@ -217,6 +217,11 @@
       return jsonFetch("/api/library");
     },
 
+    // 建索引期间轮询，拿"已看过多少个文件"。不触发构建。
+    libraryProgress() {
+      return jsonFetch("/api/library/progress", { cache: "no-store" });
+    },
+
     // 自动探测找不到曲库时，让玩家在页面上手动指定游戏目录
     paths() {
       return jsonFetch("/api/paths");
@@ -338,6 +343,17 @@
       } catch (e) {
         return [];
       }
+    },
+
+    // 随机找图：筛选全在本地索引里做，唯一的外部依赖是卡片上的封面与下载链接。
+    randomCharts(params) {
+      const qs = new URLSearchParams();
+      if (params.starMin != null) qs.set("starMin", params.starMin);
+      if (params.starMax != null) qs.set("starMax", params.starMax);
+      if (params.keys && params.keys.length) qs.set("keys", params.keys.join(","));
+      if (params.exclude && params.exclude.length) qs.set("exclude", params.exclude.join(","));
+      qs.set("n", params.n || 8);
+      return jsonFetch("/api/random-charts?" + qs.toString());
     },
 
     beatmapSearch(query) {
