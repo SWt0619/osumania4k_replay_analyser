@@ -431,6 +431,11 @@ class _Draft:
 
         # 条件放宽到「说得出口就写」，别让这一栏常年只有一条破折号
         notes_total = max(1, _f(bm.get("notes"), 1))
+        # V2 / Classic 的长条头尾各算一次连击，分母也得跟着换，
+        # 否则面图上会写出"占全部物件的 135%"。V1 按物件，分母就是物件数。
+        v2_mode = self.judge_mode in ("v2", "classic")
+        combo_base = max(1, int(_f(s.get("v2Judgements"), 0))) if v2_mode else notes_total
+        combo_unit = "判定" if v2_mode else "物件"
         max_combo = _f(s.get("maxCombo"))
         acc_strength = _acc_strength(self.acc, self.judge_mode)
         if acc_strength:
@@ -445,9 +450,10 @@ class _Draft:
             self.strengths.append("稳定性好（UR %.0f），说明手指控制已经成型。" % self.ur)
         if abs(self.median_delta) < 5 and (self.ur > 0 or self.acc > 0):
             self.strengths.append("拍子咬得准（整局偏移 %+.1fms），节奏骨架没有问题。" % self.median_delta)
-        if max_combo / notes_total >= 0.7:
+        if max_combo / combo_base >= 0.7:
             self.strengths.append(
-                "最长连击 %d（占全部物件的 %.0f%%），中途基本没崩。" % (int(max_combo), max_combo / notes_total * 100)
+                "最长连击 %d（占全部%s的 %.0f%%），中途基本没崩。"
+                % (int(max_combo), combo_unit, min(100.0, max_combo / combo_base * 100))
             )
         fast_bin = _best_fast_bin(self.payload)
         if fast_bin is not None:
@@ -648,7 +654,8 @@ def _badges(acc: float, ur: float, abs_median: float, max_combo, tag: str) -> li
         {"key": "acc", "label": "准确率 (%s)" % tag, "value": "%.2f%%" % acc},
         {"key": "ur", "label": "UR", "value": "%.0f" % ur},
         {"key": "bias", "label": "击打偏差", "value": "%.1fms" % abs_median},
-        {"key": "combo", "label": "最大连击", "value": str(max_combo)},
+        # V1 按物件计，面图上注定低于结算屏（那边头尾都算），标出口径免得被当成算错
+        {"key": "combo", "label": "最大连击" + ("（按物件）" if tag == "v1" else ""), "value": str(max_combo)},
     ]
 
 
