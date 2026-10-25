@@ -231,10 +231,7 @@ def _scan_regular(scan_root: str, cache: dict[str, LibraryEntry],
     hashed: list[bool] = []
     if not scan_root or not os.path.isdir(long_path(scan_root)):
         return found, hashed
-    for i, (full, st) in enumerate(_iter_tree(scan_root)):
-        # 每 64 个文件报一次：调用方的进度条只需要"在动"，逐文件回调反而添开销
-        if on_tick is not None and (i & 63) == 0:
-            on_tick(64)
+    for full, st in _iter_tree(scan_root):
         if not full.lower().endswith(".osu"):
             continue
         entry, did_hash = _entry_for(full, cache, st=st)
@@ -242,6 +239,10 @@ def _scan_regular(scan_root: str, cache: dict[str, LibraryEntry],
             continue
         found.append(entry)
         hashed.append(did_hash)
+        # 只把"认出来的谱面"报给进度条：按走过的文件报的话，一首歌的音频、图片、
+        # 视频都会算进去，两千张图能报出一万多，和最后那个张数对不上。
+        if on_tick is not None:
+            on_tick(1)
     return found, hashed
 
 
@@ -261,9 +262,7 @@ def _scan_lazer_store(store_root: str, cache: dict[str, LibraryEntry],
     hashed: list[bool] = []
     if not store_root or not os.path.isdir(long_path(store_root)):
         return found, hashed
-    for i, (full, st) in enumerate(_iter_tree(store_root)):
-        if on_tick is not None and (i & 63) == 0:
-            on_tick(64)
+    for full, st in _iter_tree(store_root):
         if seen is not None:
             seen.add(full)
         if full.lower().endswith((".osu", ".osk", ".osr")):
@@ -279,6 +278,8 @@ def _scan_lazer_store(store_root: str, cache: dict[str, LibraryEntry],
             continue
         found.append(entry)
         hashed.append(did_hash)
+        if on_tick is not None:
+            on_tick(1)
     return found, hashed
 
 
@@ -427,8 +428,11 @@ class Library:
                 _save_cache_file(cache_path, self)
             LAST_BUILD[0] = self.built_at
 
-    def _tick(self, n: int) -> None:
-        """扫描回调：累加"已看过多少个文件"。
+    def _tick(self, n: int = 1) -> None:
+        """扫描回调：累加"已经认出多少张谱面"。
+
+        注意这个数**不是走过的文件数**：一首歌的音频、背景图、视频都不算，
+        否则两千张图的曲库会报出一万多，和右上角最后的张数对不上（用户会以为漏扫）。
 
         读的一方在 HTTP 线程，这里只做一次 int 自增，靠 GIL 就够安全，
         不必再抢 self._lock（build 期间它已经被占着，再抢会死锁）。
