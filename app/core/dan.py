@@ -94,14 +94,18 @@ def to_label(dan: float | None) -> str:
 
 
 def short_label(dan: float | None) -> str:
-    """角标用的短版本：连续段位，一位小数（4.6 段 / 11.2 段）。
+    """角标用的短版本：Reform 以上给连续段位（4.6 段），INTRO 给名字（Intro 2）。
 
     卡片上的空间只够一行，完整标签（Reform 5 low）放在信息区；
     角标用数字是因为它要用来比较大小，而"5 low 和 5 high 差多少"看不出来。
+    但 0 段以下没有"负几段"这种说法 —— 那里是 INTRO 1~3，直接说名字。
     """
     if dan is None:
         return ""
-    return "%.1f 段" % float(dan)
+    value = float(dan)
+    if value < 0.5:
+        return to_label(value).rsplit(" ", 1)[0]
+    return "%.1f 段" % value
 
 
 # ------------------------------------------------------------------ 面条段位
