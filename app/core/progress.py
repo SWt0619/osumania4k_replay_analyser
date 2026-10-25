@@ -398,10 +398,23 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
 
 def dan_label(value: float) -> str:
     """把连续段位写成玩家看得懂的名字。"""
-    if value <= 0:
-        return "INTRO" if value > -3 else "INTRO 以下"
-    if value < 10:
-        return "%.0f 段" % math.floor(value + 1e-9) if abs(value - round(value)) < 0.05 else "%.1f 段" % value
+    if value < -3:
+        return "INTRO 以下"
+    if value < 0:
+        # -3 / -2 / -1 就是下拉里的 INTRO-1 / INTRO-2 / INTRO-3。
+        # 早先一律叫 "INTRO"，选 INTRO-1 却显示 "INTRO 以下"，自相矛盾。
+        if value < -2:
+            return "INTRO-1"
+        if value < -1:
+            return "INTRO-2"
+        return "INTRO-3"
+    if value < 11:
+        # 10.0 也归这里：REFORM 到 10 段为止，11 才是 Alpha。
+        # 早先用 < 10，10.0 掉进 extra 分支后成了 "10.0 段"，和 9.96 的 "9 段" 对不上。
+        nearest = round(value)
+        if abs(value - nearest) < 0.05:
+            return "%d 段" % nearest
+        return "%.1f 段" % value
     extra = {11: "Alpha", 12: "Beta", 13: "Gamma", 14: "Delta",
              15: "Epsilon", 16: "Zeta", 17: "Eta"}
     for k, name in extra.items():
