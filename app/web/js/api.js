@@ -39,17 +39,38 @@
 
     // 在线补音频：失败是常态（镜像缺图、网络不通、用户关了开关），
     // 所以这里不抛异常，把结果原样交给调用方去决定怎么提示。
+    // 90 秒上限：服务端的镜像预算是 45 秒，加上单次请求 20 秒超时与解包，
+    // 正常不会到 90；真到了说明连接卡住，得让界面停在一个明确的结论上。
     async fetchAudio(session) {
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = ctrl ? setTimeout(() => ctrl.abort(), 90000) : 0;
       try {
         const res = await fetch("/api/audio-fetch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session: session }),
+          signal: ctrl ? ctrl.signal : undefined,
         });
         const data = await res.json();
         return data && typeof data === "object" ? data : { ok: false, error: "返回格式异常" };
       } catch (e) {
-        return { ok: false, error: (e && e.message) || "网络错误" };
+        const timedOut = e && e.name === "AbortError";
+        return { ok: false, error: timedOut ? "等了 90 秒没有回应" : ((e && e.message) || "网络错误") };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+
+    // 补音频的实时进度。轮询失败不抛异常：拿不到进度时界面还有计时在走，
+    // 不能因为一次轮询失败就把提示变成错误。
+    async audioFetchStatus(session) {
+      try {
+        const res = await fetch("/api/audio-fetch/status?session=" + encodeURIComponent(session),
+          { cache: "no-store" });
+        const data = await res.json();
+        return data && data.progress ? data.progress : null;
+      } catch (e) {
+        return null;
       }
     },
 
@@ -218,6 +239,15 @@
     },
 
     // 建索引期间轮询，拿"已看过多少个文件"。不触发构建。
+    // 测一次本机到各镜像站的延迟（设置页按钮触发，点一次发三个 HEAD）
+    testMirrors() {
+      return jsonFetch("/api/mirror-test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    },
+
     libraryProgress() {
       return jsonFetch("/api/library/progress", { cache: "no-store" });
     },
