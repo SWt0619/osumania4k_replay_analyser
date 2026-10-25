@@ -16,7 +16,6 @@
 <body>
 
 <!-- 曲库扫描进度：首次启动要遍历上千个文件，这条细进度条是"程序没卡死"的唯一证据 -->
-<div class="lib-scan" id="libScan" hidden><i></i></div>
 
 <!-- 性能面板：设置里勾上才出现，平时不占资源也不挡视线 -->
 <div class="perf-panel" id="perfPanel" hidden></div>
@@ -86,16 +85,6 @@
         <circle cx="12" cy="12" r="1.4" fill="currentColor"/>
       </svg>
     </button>
-    <button class="rail-btn" data-tab="finder" title="随机找图">
-      <svg viewBox="0 0 24 24" class="ico">
-        <rect x="4.4" y="4.4" width="15.2" height="15.2" rx="4.2" stroke="currentColor" stroke-width="1.5" fill="none"/>
-        <circle cx="9" cy="9" r="1.25" fill="currentColor"/>
-        <circle cx="15" cy="15" r="1.25" fill="currentColor"/>
-        <circle cx="12" cy="12" r="1.25" fill="currentColor"/>
-        <circle cx="15" cy="9" r="1.05" fill="currentColor" opacity=".5"/>
-        <circle cx="9" cy="15" r="1.05" fill="currentColor" opacity=".5"/>
-      </svg>
-    </button>
     <button class="rail-btn" data-tab="details" title="细节数据">
       <svg viewBox="0 0 24 24" class="ico"><path d="M5 6h14M5 12h14M5 18h9" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round"/></svg>
     </button>
@@ -105,6 +94,17 @@
         <path d="M4 19h16" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" opacity=".5"/>
         <path d="M7 15l3.4-4 3 2.6L20 6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
         <circle cx="20" cy="6" r="1.6" fill="currentColor"/>
+      </svg>
+    </button>
+    <!-- 紧挨着「细节数据」时两个图标容易看混，挪到最下面 -->
+    <button class="rail-btn" data-tab="finder" title="随机找图">
+      <svg viewBox="0 0 24 24" class="ico">
+        <rect x="4.4" y="4.4" width="15.2" height="15.2" rx="4.2" stroke="currentColor" stroke-width="1.5" fill="none"/>
+        <circle cx="9" cy="9" r="1.25" fill="currentColor"/>
+        <circle cx="15" cy="15" r="1.25" fill="currentColor"/>
+        <circle cx="12" cy="12" r="1.25" fill="currentColor"/>
+        <circle cx="15" cy="9" r="1.05" fill="currentColor" opacity=".5"/>
+        <circle cx="9" cy="15" r="1.05" fill="currentColor" opacity=".5"/>
       </svg>
     </button>
     <span class="rail-sep"></span>
@@ -253,7 +253,7 @@
             </div>
           </div>
           <div class="card-body">
-            <ul class="similar-list" id="similarList"></ul>
+            <div class="similar-grid" id="similarList"></div>
           </div>
         </article>
 
@@ -722,6 +722,15 @@
             <button class="seg-btn is-active" data-theme="dark">暗色</button>
             <button class="seg-btn" data-theme="sakura">白色毛玻璃 · 浅粉</button>
           </div>
+
+          <hr class="settings-sep">
+
+          <h3>镜像站连接</h3>
+          <p class="muted">本地找不到音频时，程序会从这几个站点下载谱面包。这里可以量一次本机到它们的延迟，判断哪条线路更顺；点一次发三个探测请求，不会下载任何内容。</p>
+          <div class="settings-actions">
+            <button class="btn btn-ghost" id="btnMirrorTest">测试连接</button>
+          </div>
+          <ul class="mirror-list" id="mirrorResult" hidden></ul>
         </div>
       </article>
     </div>
@@ -844,7 +853,7 @@
 <div class="modal" id="bmModal" hidden>
   <div class="modal-card glass">
     <h3>这个回放对应的谱面没在曲库里找到</h3>
-    <p class="muted" id="bmModalHint">回放里的谱面 MD5 是 —。</p>
+    <p class="muted" id="bmModalHint">曲库里没有找到这张谱面。可以手动选 .osu，或按曲名搜索本机曲库。</p>
     <div class="modal-actions">
       <button class="btn btn-primary" id="btnPickOsu">手动选择 .osu 文件</button>
       <button class="btn btn-ghost" id="btnCloseModal">取消</button>
@@ -911,6 +920,8 @@
           </ul>
           <h4>只看谱面</h4>
           <p>把 <code>.osu</code> 拖进来，不读成绩，只算难度和键型构成，适合赛前挑图。</p>
+          <h4>等的时候能看到什么</h4>
+          <p>分析、扫描曲库、在线补音频这类要等的事，都会在窗口右上角列出来：一行一件事，写着在做什么，下面是进度条。同时进行几件就往下排，不会互相盖住。能算出百分比的（比如补音频下到多少 MB）会显示具体数字，算不出的就显示来回走的进度条——只要它在动，就说明程序没卡死。</p>
           <p class="fineprint">入口被浏览器挡住时，还有一条不过浏览器的路：把 .osr 复制到页面给出的 <code>_replays</code> 目录，直接点文件名。</p>
         </section>
 
@@ -956,6 +967,7 @@
             <li><b>下落</b>：音符从画布顶端落到判定线花多少毫秒，越小越快；300 ~ 2600ms 可调。</li>
             <li><b>音画</b>：画面整体提前/延后，±500ms，用来对齐你自己设备的延迟。</li>
             <li><b>打击音</b>：选「正解音」听到的是谱面要求的时间，选「实际击打」听到的是你真正按下的时间。两个交替听，抢拍和拖拍会立刻暴露。打击音量最高 300%，回放音量仍然最多 100%。</li>
+            <li><b>没有声音时</b>：本地找不到这张图的音频，程序会按图集 id 去镜像站补一份（要下整个谱面包，几十 MB）。右上角会出现一条「补音频」进度条，写着下到多少、当前是下载还是校验；补好了自动接上原来的音频，补不到就用虚拟时钟照常播画面。</li>
             <li><b>只看失误</b>：只画失误附近的音符，密集段落也能看清是哪一轨出的问题。</li>
             <li><b>对比</b>：导入同一张图的第二份回放，两路并排、吃同一条时间轴，可以直接比同一段谁的手更稳。</li>
           </ul>
@@ -985,7 +997,7 @@
             <li><b>自动刷新</b>：改任何一项都会立刻重新抽一批，不用再点按钮；「再找一次」是同一条件下换一批没出现过的图。±1 段里凑不够 8 张时会自动放宽，并在下方注明放宽到了多少。</li>
             <li><b>点封面下载</b>：左上角是段位、右上角是星数，底部一行是时长、段位名称、键型占比（面条模式显示长条占比），封面本身就是下载链接（sayobot 镜像）。</li>
           </ul>
-          <p class="fineprint">图库是随程序发布的 4 万张 2020 年后 4K 图，筛选完全离线；封面走 osu! 官方 CDN，断网时只显示底色，不影响下载。</p>
+          <p class="fineprint">图库是随程序发布的 4.8 万张 2018 年后 4K 图，筛选完全离线；封面走 osu! 官方 CDN，断网时只显示底色，不影响下载。</p>
         </section>
 
         <!-- 7 -->
@@ -1015,6 +1027,7 @@
             <li><b>性能面板</b>：勾上后右下角显示渲染帧率、屏幕刷新率、每帧绘制耗时，排查卡顿时用。</li>
             <li><b>禁用动画</b>：勾上后切换页面不再播放过渡动画，界面直接到位；默认关着。</li>
             <li><b>长条计算方式</b>：Lazer（默认）和 Stable 的尾判算法不同，选和自己客户端一致的。</li>
+            <li><b>镜像站连接</b>：点「测试连接」量一次本机到几个镜像站的延迟，数字越小越顺。它只发探测请求，不会下载谱面包；显示「超时」通常说明这条线路走不通，补音频时会自动换下一个站。</li>
           </ul>
           <h4>常见问题</h4>
           <ul class="help-list">
@@ -1038,10 +1051,13 @@
 </div>
 
 <div class="toast" id="toast" hidden></div>
+
+<!-- 统一的任务进度：分析、扫曲库、补音频都往这里塞一行，同时在跑就往下堆 -->
+<div class="task-stack" id="taskStack" hidden></div>
 <div class="loading" id="loading" hidden>
   <div class="loading-card glass">
-    <div class="spinner"></div>
     <p id="loadingText">正在解析回放…</p>
+    <div class="pbar is-indeterminate" id="loadingBar"><i></i></div>
     <button class="btn btn-ghost" id="loadingCancel" onclick="if(window.__cancelLoading){window.__cancelLoading();}else{var b=document.getElementById('loading');if(b)b.hidden=true;}">取消</button>
   </div>
 </div>
