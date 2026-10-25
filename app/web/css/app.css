@@ -3,11 +3,227 @@
    毛玻璃 + 低对比 + 鲜明主题色（violet → cyan），动画克制
    ========================================================================= */
 
+/* =========================================================================
+   主题切换的过渡
+   切主题只改 html[data-theme]，颜色都挂在 CSS 变量上。变量默认是"瞬间替换"，
+   所以这里用 @property 把它们注册成可插值的颜色 —— 注册之后，变量值本身就能被
+   transition 慢慢推过去，页面上所有引用它的地方（文字、卡片、边框、图标）一起变。
+   背景那三层渐变没法直接插值，所以几何写死、颜色走变量（见 body）。
+   ========================================================================= */
+@property --bg-0 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #07080f;
+}
+@property --bg-1 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #0d1022;
+}
+@property --bg-2 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #151a35;
+}
+@property --glow-a {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #1a1f45;
+}
+@property --glow-b {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #10263a;
+}
+@property --blob-a {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #4b2fd6;
+}
+@property --blob-b {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #0e7490;
+}
+@property --blob-c {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #7c3aed;
+}
+@property --glass {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.052);
+}
+@property --glass-2 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.085);
+}
+@property --glass-3 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.115);
+}
+@property --stroke {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.10);
+}
+@property --stroke-2 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.20);
+}
+@property --text {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #eceffd;
+}
+@property --dim {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #a8afcb;
+}
+@property --faint {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #7b82a3;
+}
+@property --accent {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #7c5cff;
+}
+@property --accent-2 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #22d3ee;
+}
+@property --accent-soft {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(124, 92, 255, 0.18);
+}
+@property --good {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #7ef2d0;
+}
+@property --warn {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #ffd479;
+}
+@property --bad {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #ff6b8a;
+}
+@property --j-max {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #7ef2d0;
+}
+@property --j-300 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #ffd479;
+}
+@property --j-200 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #9fe870;
+}
+@property --j-100 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #8fb8ff;
+}
+@property --j-50 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #c9a0ff;
+}
+@property --j-miss {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #ff6b8a;
+}
+@property --cat-ability {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #ff9f6e;
+}
+@property --cat-rhythm {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #6ee7ff;
+}
+@property --cat-distraction {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #c792ff;
+}
+@property --cat-slip {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #8b93b5;
+}
+@property --raise {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.05);
+}
+@property --raise-2 {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.075);
+}
+@property --hair {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.07);
+}
+@property --ink {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #d3d8ee;
+}
+@property --lane-bg {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(0, 0, 0, 0.95);
+}
+@property --lane-line {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: rgba(255, 255, 255, 0.12);
+}
+@property --shadow {
+  syntax: "<shadow>";
+  inherits: true;
+  initial-value: 0 18px 48px rgba(4, 6, 18, 0.55);
+}
+
+html {
+  /* 一项都不能漏：漏掉的变量会瞬间跳变，看着就是"闪一下" */
+  transition:
+    --bg-0 .6s cubic-bezier(.4, 0, .2, 1), --bg-1 .6s cubic-bezier(.4, 0, .2, 1), --bg-2 .6s cubic-bezier(.4, 0, .2, 1), --glow-a .6s cubic-bezier(.4, 0, .2, 1), --glow-b .6s cubic-bezier(.4, 0, .2, 1), --blob-a .6s cubic-bezier(.4, 0, .2, 1), --blob-b .6s cubic-bezier(.4, 0, .2, 1), --blob-c .6s cubic-bezier(.4, 0, .2, 1), --glass .6s cubic-bezier(.4, 0, .2, 1), --glass-2 .6s cubic-bezier(.4, 0, .2, 1), --glass-3 .6s cubic-bezier(.4, 0, .2, 1), --stroke .6s cubic-bezier(.4, 0, .2, 1), --stroke-2 .6s cubic-bezier(.4, 0, .2, 1), --text .6s cubic-bezier(.4, 0, .2, 1), --dim .6s cubic-bezier(.4, 0, .2, 1), --faint .6s cubic-bezier(.4, 0, .2, 1), --accent .6s cubic-bezier(.4, 0, .2, 1), --accent-2 .6s cubic-bezier(.4, 0, .2, 1), --accent-soft .6s cubic-bezier(.4, 0, .2, 1), --good .6s cubic-bezier(.4, 0, .2, 1), --warn .6s cubic-bezier(.4, 0, .2, 1), --bad .6s cubic-bezier(.4, 0, .2, 1), --j-max .6s cubic-bezier(.4, 0, .2, 1), --j-300 .6s cubic-bezier(.4, 0, .2, 1), --j-200 .6s cubic-bezier(.4, 0, .2, 1), --j-100 .6s cubic-bezier(.4, 0, .2, 1), --j-50 .6s cubic-bezier(.4, 0, .2, 1), --j-miss .6s cubic-bezier(.4, 0, .2, 1), --cat-ability .6s cubic-bezier(.4, 0, .2, 1), --cat-rhythm .6s cubic-bezier(.4, 0, .2, 1), --cat-distraction .6s cubic-bezier(.4, 0, .2, 1), --cat-slip .6s cubic-bezier(.4, 0, .2, 1), --raise .6s cubic-bezier(.4, 0, .2, 1), --raise-2 .6s cubic-bezier(.4, 0, .2, 1), --hair .6s cubic-bezier(.4, 0, .2, 1), --ink .6s cubic-bezier(.4, 0, .2, 1), --lane-bg .6s cubic-bezier(.4, 0, .2, 1), --lane-line .6s cubic-bezier(.4, 0, .2, 1),
+    --shadow .6s cubic-bezier(.4, 0, .2, 1);
+}
+
 :root {
   color-scheme: dark;
   --bg-0: #07080f;
   --bg-1: #0d1022;
   --bg-2: #151a35;
+  /* 背景上两团光晕与三颗光斑的颜色，切主题时跟着一起过渡 */
+  --glow-a: #1a1f45;
+  --glow-b: #10263a;
+  --blob-a: #4b2fd6;
+  --blob-b: #0e7490;
+  --blob-c: #7c3aed;
 
   --glass: rgba(255, 255, 255, 0.052);
   --glass-2: rgba(255, 255, 255, 0.085);
@@ -67,9 +283,11 @@ body {
   margin: 0;
   min-height: 100%;
   color: var(--text);
+  /* 三层渐变的几何参数写死、颜色全走变量：切主题时结构不变，只有颜色在插值，
+     整块背景才能跟着一起慢慢变色（渐变本身不能被 transition 插值）。 */
   background:
-    radial-gradient(1200px 700px at 12% -10%, #1a1f45 0%, transparent 60%),
-    radial-gradient(1000px 700px at 92% 0%, #10263a 0%, transparent 55%),
+    radial-gradient(1100px 660px at 10% -10%, var(--glow-a) 0%, transparent 60%),
+    radial-gradient(900px 660px at 94% 0%, var(--glow-b) 0%, transparent 56%),
     linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
   background-attachment: fixed;
   font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", -apple-system, "Segoe UI", system-ui, sans-serif;
@@ -100,7 +318,6 @@ canvas { display: block; }
 
 .muted { color: var(--dim); }
 .fineprint { color: var(--faint); font-size: 12px; line-height: 1.5; }
-
 .local-folder {
   margin-top: 20px; padding: 14px 16px 16px;
   border-radius: 14px;
@@ -117,14 +334,17 @@ canvas { display: block; }
 .local-folder .bm-list { max-height: 180px; }
 
 /* ---------------------------------------------------------------- 背景光斑 */
-.bg-blobs { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+.bg-blobs {
+  position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 0;
+  transition: opacity .6s cubic-bezier(.4, 0, .2, 1);
+}
 .blob {
   position: absolute; border-radius: 50%; filter: blur(90px); opacity: .42;
   animation: float 22s ease-in-out infinite alternate;
 }
-.blob-a { width: 520px; height: 520px; left: -120px; top: -160px; background: #4b2fd6; }
-.blob-b { width: 460px; height: 460px; right: -100px; top: 120px; background: #0e7490; animation-delay: -7s; }
-.blob-c { width: 380px; height: 380px; left: 45%; bottom: -220px; background: #7c3aed; opacity: .25; animation-delay: -14s; }
+.blob-a { width: 520px; height: 520px; left: -120px; top: -160px; background: var(--blob-a); }
+.blob-b { width: 460px; height: 460px; right: -100px; top: 120px; background: var(--blob-b); animation-delay: -7s; }
+.blob-c { width: 380px; height: 380px; left: 45%; bottom: -220px; background: var(--blob-c); opacity: .25; animation-delay: -14s; }
 
 @keyframes float {
   from { transform: translate3d(0, 0, 0) scale(1); }
@@ -251,7 +471,7 @@ canvas { display: block; }
   padding: 46px 28px 40px;
   text-align: center;
   display: flex; flex-direction: column; align-items: center; gap: 14px;
-  animation: rise .5s ease both;
+  animation: rise .6s cubic-bezier(.4, 0, .2, 1) both;
 }
 .empty-art svg { width: 190px; height: 142px; opacity: .95; }
 .empty h2 { font-size: 24px; letter-spacing: .5px; }
@@ -934,6 +1154,70 @@ html[data-theme="sakura"] .tut-tab.is-active {
 }
 
 /* ---------------------------------------------------------------- 提示 / 加载 */
+/* ---------------------------------------------------------------- 任务进度
+   所有"要等一会儿"的事共用这一套：一行一个任务，写着在做什么 + 一条进度条。
+   同时在跑就往下堆（分析时可能正在扫曲库，同时又在补音频），谁也别盖住谁。
+   固定在右上角：顶栏下方、内容之上，不挡播放器，也不和左下角的提示条抢位置。 */
+.task-stack {
+  position: fixed; top: 84px; right: 16px; z-index: 96;
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(320px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.task-row {
+  pointer-events: auto;
+  padding: 10px 12px 11px;
+  border-radius: 12px;
+  background: rgba(10, 12, 24, .9);
+  border: 1px solid var(--stroke-2);
+  box-shadow: 0 14px 32px rgba(0, 0, 0, .36);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+}
+html[data-theme="sakura"] .task-row {
+  background: rgba(255, 255, 255, .93);
+  box-shadow: 0 14px 32px rgba(120, 90, 130, .18);
+}
+.task-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 7px; }
+.task-label {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.task-pct {
+  flex: none; font-size: 11.5px; color: var(--accent-2);
+  font-variant-numeric: tabular-nums;
+}
+.task-detail {
+  display: block; margin-top: 6px; font-size: 11px; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.task-row.is-error { border-color: rgba(255, 107, 138, .55); }
+.task-row.is-error .task-pct { color: var(--bad); }
+
+/* 进度条本体：分析弹窗、曲库扫描、补音频用的都是它 */
+.pbar {
+  position: relative; height: 4px; border-radius: 999px;
+  background: var(--raise-2); overflow: hidden;
+}
+.pbar > i {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .3s ease;
+}
+/* 没有百分比可报时来回跑：只要它在动，就说明没卡死 */
+.pbar.is-indeterminate > i {
+  width: 38%;
+  animation: pbarSlide 1.15s cubic-bezier(.45, 0, .55, 1) infinite;
+}
+@keyframes pbarSlide {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(280%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pbar.is-indeterminate > i { animation-duration: 2.4s; }
+}
+
 .toast {
   position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%) translateY(8px);
   padding: 10px 18px; border-radius: 12px; font-size: 13px;
@@ -965,16 +1249,10 @@ html[data-theme="sakura"] .tut-tab.is-active {
   backdrop-filter: blur(5px);
 }
 .loading-card { padding: 26px 34px; display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.loading-card .pbar { width: min(260px, 60vw); height: 5px; }
 .loading-card #loadingCancel { height: 30px; padding: 0 14px; font-size: 12.5px; color: var(--dim); }
 .loading-card #loadingCancel:hover { color: var(--text); }
 #blockedPath { word-break: break-all; }
-.spinner {
-  width: 34px; height: 34px; border-radius: 50%;
-  border: 2.5px solid var(--raise-2);
-  border-top-color: var(--accent-2);
-  animation: spin .85s linear infinite;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---------------------------------------------------------------- 页脚 */
 .foot {
@@ -1015,26 +1293,17 @@ html[data-theme="sakura"] .tut-tab.is-active {
 
 
 /* ---------------------------------------------------------------- 相似谱面 */
-.similar-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.similar-item {
-  display: flex; align-items: center; gap: 14px;
-  padding: 10px 12px; border-radius: var(--radius-sm);
-  background: var(--glass-2); border: 1px solid var(--stroke);
-  transition: background .18s ease, border-color .18s ease;
-}
-.similar-item:hover { background: var(--glass-3); border-color: var(--stroke-2); }
-.s-main { flex: 1; min-width: 0; }
-.s-title {
-  display: block; color: var(--text); font-weight: 600; text-decoration: none;
+/* 五张一横排，和「随机找图」同一套卡片（.map-card），只是信息项换成本页要的 */
+.similar-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1180px) { .similar-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 820px) { .similar-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* 段位是文字标签（Reform 5 mid），比数字长，角标要收窄字号、换成深底 */
+.map-dan.is-text {
+  font-size: 10px; font-weight: 600; padding: 2px 6px;
+  background: rgba(10, 12, 24, .78); border-color: rgba(255, 255, 255, .2);
+  max-width: calc(100% - 16px);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.s-title:hover { color: var(--accent-2); }
-.s-meta { margin-top: 3px; font-size: 12px; color: var(--dim); }
-.s-dl {
-  flex: none; font-size: 12px; padding: 6px 12px; border-radius: 999px;
-  border: 1px solid var(--stroke-2); color: var(--accent-2); text-decoration: none;
-}
-.s-dl:hover { background: var(--accent-soft); }
 
 
 /* ---------------------------------------------------------------- 关于页 */
@@ -1063,6 +1332,31 @@ html[data-theme="sakura"] .tut-tab.is-active {
 #panel-settings h3 { margin: 4px 0 8px; font-size: 15px; }
 #panel-settings .dir-field { max-width: 560px; }
 #panel-settings .settings-actions { margin-top: 10px; }
+
+/* 镜像站测速结果：一行一个站，延迟按快慢换颜色 */
+.mirror-list {
+  list-style: none; margin: 12px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.mirror-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 11px; border-radius: 9px;
+  font-size: 12px;
+  background: var(--raise);
+  border: 1px solid var(--stroke);
+}
+.mirror-item .m-name { flex: 1; min-width: 0; color: var(--text); }
+.mirror-item .m-ms {
+  flex: none; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.mirror-item.is-fast { border-color: rgba(126, 242, 208, .35); }
+.mirror-item.is-fast .m-ms { color: var(--good); }
+.mirror-item.is-mid .m-ms { color: var(--warn); }
+.mirror-item.is-slow .m-ms,
+.mirror-item.is-fail .m-ms { color: var(--bad); }
+.mirror-item.is-fail { border-color: rgba(255, 107, 138, .35); }
+.mirror-item .m-note { flex: none; font-size: 11px; color: var(--faint); }
 #panel-settings .settings-sep {
   border: 0;
   border-top: 1px solid rgba(127, 127, 127, .18);
@@ -1154,9 +1448,16 @@ html[data-theme="sakura"] .tut-tab.is-active {
    ========================================================================= */
 html[data-theme="sakura"] {
   color-scheme: light;
-  --bg-0: #fff6fa;
-  --bg-1: #ffeff6;
+  /* 语义和暗色一致：bg-0 是"最深的那一端"。浅色主题里最深的是粉色，bg-1 是近白 */
+  --bg-0: #ffe6f0;
+  --bg-1: #fff8fb;
   --bg-2: #ffe4ef;
+  /* 光晕与光斑：底色浅了之后要跟着换成粉色系，否则背景上会留两块深色 */
+  --glow-a: rgba(255, 182, 213, 0.55);
+  --glow-b: rgba(255, 214, 232, 0.60);
+  --blob-a: #ffb6d5;
+  --blob-b: #e0c3ff;
+  --blob-c: #ffd7e6;
 
   --glass: rgba(255, 255, 255, 0.60);
   --glass-2: rgba(255, 255, 255, 0.74);
@@ -1201,17 +1502,9 @@ html[data-theme="sakura"] {
   --lane-line: rgba(255, 255, 255, 0.14);
 }
 
-html[data-theme="sakura"] body {
-  background:
-    radial-gradient(900px 620px at 8% -10%, rgba(255, 182, 213, 0.50) 0%, transparent 60%),
-    radial-gradient(820px 620px at 95% 0%, rgba(255, 214, 232, 0.55) 0%, transparent 55%),
-    linear-gradient(160deg, #fff8fb 0%, #ffeff6 45%, #ffe6f0 100%);
-  background-attachment: fixed;
-}
+/* 背景渐变的颜色已经全部改成变量（--bg-* / --glow-* / --blob-*），
+   这里不再整块覆盖 background —— 覆盖会让渐变结构变化，切主题时反而插不了值。 */
 html[data-theme="sakura"] .bg-blobs { opacity: 0.40; }
-html[data-theme="sakura"] .blob-a { background: #ffb6d5; }
-html[data-theme="sakura"] .blob-b { background: #e0c3ff; }
-html[data-theme="sakura"] .blob-c { background: #ffd7e6; }
 html[data-theme="sakura"] .glass {
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.75);
 }
@@ -1377,27 +1670,10 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
   .pg-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
-/* 曲库扫描进度条：贴在最顶上的一条细线，扫描期间来回跑。
-   索引建完就隐藏，不影响任何布局。 */
-.lib-scan {
-  position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 90;
-  background: rgba(255, 255, 255, .06); overflow: hidden; pointer-events: none;
-}
-.lib-scan i {
-  display: block; width: 30%; height: 100%;
-  background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
-  animation: lib-scan 1.15s cubic-bezier(.45, 0, .55, 1) infinite;
-}
-@keyframes lib-scan {
-  from { transform: translateX(-110%); }
-  to   { transform: translateX(430%); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .lib-scan i { animation-duration: 2.4s; }
-}
-
 /* 性能面板：只在设置里勾了才显示，右下角小字，不接收鼠标事件。
    它固定贴在窗口右下角，任何页面都能看到；勾上后立刻出现（不必先放回放）。 */
+/* 性能面板：调试用的小浮层。底色两套主题各给一套，文字统一用 var(--text) ——
+   早先只写死了深底，靠 var(--text) 取字色，浅色主题下就变成深底深字，整块看不见。 */
 .perf-panel {
   position: fixed; right: 14px; bottom: 14px; z-index: 95;
   padding: 9px 13px; border-radius: 10px;
@@ -1406,6 +1682,11 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
   box-shadow: 0 8px 26px rgba(0, 0, 0, .45);
   font: 11px/1.7 ui-monospace, "Cascadia Mono", Consolas, monospace;
   color: var(--text); white-space: pre; pointer-events: none;
+}
+html[data-theme="sakura"] .perf-panel {
+  background: rgba(255, 255, 255, .94);
+  border-color: rgba(124, 92, 255, .32);
+  box-shadow: 0 8px 26px rgba(120, 90, 130, .18);
 }
 
 /* ---------------------------------------------------------------- 随机找图 */
@@ -1470,11 +1751,29 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
   font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
-.map-sub, .map-version {
+.map-sub {
   font-size: 11.5px; color: var(--dim);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.map-version { color: var(--faint); }
+/* 难度名单独框成一枚小标签：和曲名挤在同一列时，很容易被当成曲名的一部分，
+   下载完发现还有别的难度，就会以为推荐给错了图。 */
+.map-version {
+  align-self: flex-start; max-width: 100%;
+  margin-top: 2px; padding: 1px 7px 1px 0;
+  border-radius: 6px;
+  font-size: 11px; color: var(--ink);
+  background: var(--raise-2);
+  border: 1px solid var(--stroke-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.map-version::before {
+  content: "难度";
+  display: inline-block;
+  margin: 0 6px 0 7px;
+  padding-right: 6px;
+  border-right: 1px solid var(--stroke);
+  color: var(--faint); font-size: 10px;
+}
 .map-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
 .map-chip { padding: 2px 7px; border-radius: 7px; font-size: 11px; color: var(--dim); background: var(--raise-2); }
 .find-empty { grid-column: 1 / -1; padding: 26px; text-align: center; color: var(--dim); font-size: 13px; }
@@ -1482,14 +1781,17 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
 /* ---------------------------------------------------------------- 禁用动画 */
 /* 设置里勾了「禁用动画」时给 <html> 加 data-motion="off"。
    只关进场动画与过渡（切页的 rise/fade、悬停渐变都算），播放器是 canvas 自绘，不受影响。
-   加载转圈和曲库扫描进度条例外：它们表示"程序还在动"，冻住会被当成卡死。 */
+   进度条的不确定滑动例外：它表示"程序还在动"，冻住会被当成卡死。 */
 html[data-motion="off"] *,
 html[data-motion="off"] *::before,
 html[data-motion="off"] *::after {
   animation: none !important;
   transition: none !important;
 }
-html[data-motion="off"] .spinner { animation: spin .85s linear infinite !important; }
-html[data-motion="off"] .lib-scan i {
-  animation: lib-scan 1.15s cubic-bezier(.45, 0, .55, 1) infinite !important;
+html[data-motion="off"] {
+  /* 主题渐变也一起关掉：勾了「禁用动画」的人要的是"立刻就位" */
+  transition: none !important;
+}
+html[data-motion="off"] .pbar.is-indeterminate > i {
+  animation: pbarSlide 1.15s cubic-bezier(.45, 0, .55, 1) infinite !important;
 }
