@@ -413,8 +413,10 @@ def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3,
             continue
         ds = [n.delta for n in seg if n.delta is not None]
         errors = sum(1 for n in seg if n.is_error_for(mode))
-        # 与顶部准确率、报告正文用同一把尺子：切换口径时这里的数字也要跟着变
-        seg_acc = sum(_weight(n, mode) for n in seg) / len(seg) * 100.0
+        # 与顶部准确率、时间轴用同一把尺子：V2/Classic 的长条头尾各算一个判定单位。
+        # 早先这里一件算一份，面图上每段都会被压出几个百分点，凭空多出"这段明显跟不上"。
+        units = [u for n in seg for u in _units_of(n, mode)]
+        seg_acc = sum(units) / len(units) * 100.0 if units else 0.0
         out.append(
             {
                 "index": i,
@@ -432,8 +434,15 @@ def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3,
     return out
 
 
-def _combo_breaks(match: MatchResult, limit: int = 200, mode: str = "v1") -> list[dict]:
+def _combo_breaks(match: MatchResult, limit: int = 200,
+                  mode: str = "v1") -> tuple[list[dict], int]:
+    """断连明细（最多 limit 条）与总次数。
+
+    两个值分开给：明细要控制体积，评语里的"全曲断了 N 次"必须是真实总数。
+    早先直接拿列表长度当次数，整局崩掉时永远显示 200。
+    """
     out = []
+    total = 0
     for n in match.notes:
         reason = ""
         if mode in ("v2", "classic"):
@@ -449,6 +458,9 @@ def _combo_breaks(match: MatchResult, limit: int = 200, mode: str = "v1") -> lis
             reason = "漏接" if n.judgement == "miss" else "长按提前松手"
         if not reason:
             continue
+        total += 1
+        if len(out) >= limit:
+            continue          # 明细收够了，但总数还得数完
         out.append(
             {
                 "t": round(n.note_time),
@@ -457,9 +469,7 @@ def _combo_breaks(match: MatchResult, limit: int = 200, mode: str = "v1") -> lis
                 "delta": round(n.delta, 1) if n.delta is not None else None,
             }
         )
-        if len(out) >= limit:
-            break
-    return out
+    return out, total
 
 
 def _warnings(replay: Replay, beatmap: Beatmap, presses) -> str:
@@ -569,7 +579,7 @@ def _error_payload(atts: list, ctx_by_index: dict[int, patterns.NoteContext],
 
 
 def _summary(match: MatchResult, replay: Replay, atts: list, combo_breaks: list[dict],
-             mode: str = "v1") -> dict:
+             mode: str = "v1", combo_break_count: int | None = None) -> dict:
     """头部数字块。
 
     deltas 只取一次：它在下文被用了七八次，每次都重新扫全表在 5000 物件上要多花几十毫秒。
@@ -598,7 +608,7 @@ def _summary(match: MatchResult, replay: Replay, atts: list, combo_breaks: list[
         "errorRate": round(len(atts) / max(1, len(notes)) * 100, 2),
         "severeRate": round(sum(1 for n in notes if n.is_error_for(mode)) / max(1, len(notes)) * 100, 2),
         "ghosts": len(match.ghosts),
-        "comboBreaks": len(combo_breaks),
+        "comboBreaks": combo_break_count if combo_break_count is not None else len(combo_breaks),
         "scoreV2": score_v2,
         "scoreV2Lazer": score_v2_lazer,
         "gradeV2": grade_v2,
@@ -1277,11 +1287,11 @@ def _build_views(match: MatchResult, replay: Replay, contexts: list,
     for mode in modes:
         atts, cat_summary = attribution.classify_all(match, contexts, blocks, mode)
         atts_by_mode[mode] = atts
-        combo_breaks = _combo_breaks(match, mode=mode)
+        combo_breaks, combo_break_total = _combo_breaks(match, mode=mode)
         cat_by_note = {id(a.note): a.category for a in atts}
         stamina = (cat_summary.get("profile") or {}).get("stamina")
         views[mode] = {
-            "summary": _summary(match, replay, atts, combo_breaks, mode),
+            "summary": _summary(match, replay, atts, combo_breaks, mode, combo_break_total),
             "timeline": _timeline(match, None, cat_by_note, replay.rate, mode),
             "offsetHistogram": _offset_histogram(match, mode=mode),
             "sections": _section_stats(match, replay.rate, 3, mode),
