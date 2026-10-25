@@ -28,6 +28,7 @@ import os
 import threading
 import time
 import zipfile
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from . import config_store
@@ -45,6 +46,7 @@ MIRRORS = [
 UA = "osumania_replay_analyser/%s (+https://github.com/SWt0619/osumania4k_replay_analyser)" % __version__
 TIMEOUT = 20
 BUDGET = 45                        # 三个镜像合计最多花这么久
+LATENCY_TIMEOUT = 4                # 测延迟时单个站点最多等这么久（三个并行，总耗时≈最慢的一个）
 MAX_BYTES = 200 * 1024 * 1024      # 再大就不像谱面包了
 MIN_INTERVAL = 2.0                 # 两次请求之间至少隔这么久
 FAIL_TTL = 7 * 24 * 3600           # 失败条目多久后允许重试
@@ -56,6 +58,76 @@ _last_request = 0.0
 # 同一时刻只允许一个线程去镜像站取。服务端是多线程的（ThreadingHTTPServer），
 # 两个窗口同时打开同一份缺音频的回放时，没有这把锁就会各下一遍。
 _fetch_lock = threading.Lock()
+
+# ------------------------------------------------------------------ 进度
+# 补音频对前端是一次同步 POST，而它要下整个谱面包（几十 MB、最长 45 秒）。
+# 中间不给任何反馈时，界面上只能写一句"正在尝试补一份…"，用户会当成卡死。
+# 这里在内存里记一条当前进度，服务端另外开一个只读接口让页面轮询。
+_PROGRESS: dict[str, dict] = {}
+_PROGRESS_LOCK = threading.Lock()
+_PROGRESS_MAX = 32          # 最多留几条，长时间运行不会越攒越多
+_PROGRESS_TTL = 300         # 结束的记录保留多久（留出时间让最后一次轮询读到结果）
+
+
+def _progress_own(key: str, stage: str = "准备补音频") -> None:
+    """把这张图的进度记录交给当前线程，并保留最初开始等的时间。"""
+    now = time.time()
+    with _PROGRESS_LOCK:
+        prev = _PROGRESS.get(key) or {}
+        started = float(prev.get("started") or now)
+        _PROGRESS[key] = {
+            "stage": stage, "started": started, "at": now, "owner": threading.get_ident(),
+            "done": 0, "total": 0, "mirror": "", "attempt": 0,
+            "finished": False, "ok": None, "error": "",
+        }
+        _progress_trim_locked(now)
+
+
+def _progress_mark(key: str, **fields) -> None:
+    """更新进度。字段只是展示用，写失败也不该影响下载。"""
+    now = time.time()
+    with _PROGRESS_LOCK:
+        rec = _PROGRESS.get(key)
+        if rec is not None:
+            rec.update(fields)
+            rec["at"] = now
+
+
+def _progress_waiting(key: str) -> None:
+    """在等全局锁：只有这张图还没有在跑的任务时才写，别盖掉别人的真实进度。"""
+    now = time.time()
+    with _PROGRESS_LOCK:
+        rec = _PROGRESS.get(key)
+        if rec and not rec.get("finished") and rec.get("owner"):
+            return
+        _PROGRESS[key] = {
+            "stage": "排队等待（同一时间只补一份）", "started": now, "at": now,
+            "owner": None, "done": 0, "total": 0, "mirror": "", "attempt": 0,
+            "finished": False, "ok": None, "error": "",
+        }
+        _progress_trim_locked(now)
+
+
+def _progress_trim_locked(now: float) -> None:
+    if len(_PROGRESS) <= _PROGRESS_MAX:
+        return
+    for k in [k for k, v in _PROGRESS.items() if now - float(v.get("at") or 0) > _PROGRESS_TTL]:
+        _PROGRESS.pop(k, None)
+
+
+def progress(md5: str) -> dict:
+    """给页面轮询的进度快照；没有任务时返回空 dict。"""
+    key = (md5 or "").lower()
+    if not key:
+        return {}
+    with _PROGRESS_LOCK:
+        rec = _PROGRESS.get(key)
+        out = dict(rec) if rec else {}
+    if not out:
+        return {}
+    out.pop("owner", None)
+    out["elapsed"] = round(max(0.0, time.time() - float(out.get("started") or time.time())), 1)
+    return out
 
 
 def _throttle() -> None:
@@ -135,8 +207,12 @@ def cached_audio(cache_dir: str, md5: str) -> str:
 
 
 # --------------------------------------------------------------------- 网络
-def _get(url: str, extra_headers: dict | None = None, sink: str = "") -> bytes:
-    """GET 一个地址。sink 非空时直接流到文件（谱面包可能几十 MB）。"""
+def _get(url: str, extra_headers: dict | None = None, sink: str = "",
+         on_bytes=None) -> bytes:
+    """GET 一个地址。sink 非空时直接流到文件（谱面包可能几十 MB）。
+
+    on_bytes(已下载, 总大小) 每读一块回调一次，给界面报进度；总大小拿不到时是 0。
+    """
     _throttle()
     headers = {"User-Agent": _user_agent(), "Accept": "*/*"}
     if extra_headers:
@@ -145,7 +221,13 @@ def _get(url: str, extra_headers: dict | None = None, sink: str = "") -> bytes:
     with urlopen(req, timeout=TIMEOUT) as resp:
         if not sink:
             return resp.read()
+        try:
+            total = int(resp.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            total = 0
         written = 0
+        if on_bytes:
+            on_bytes(0, total)
         with open(sink, "wb") as f:
             while True:
                 chunk = resp.read(256 * 1024)
@@ -155,6 +237,8 @@ def _get(url: str, extra_headers: dict | None = None, sink: str = "") -> bytes:
                 if written > MAX_BYTES:
                     raise ValueError("包体超过 %d MB，放弃" % (MAX_BYTES // 1024 // 1024))
                 f.write(chunk)
+                if on_bytes:
+                    on_bytes(written, total)
         return b""
 
 
@@ -243,10 +327,12 @@ def fetch_audio(beatmap_path: str, md5: str, cache_dir: str, force: bool = False
     # 同一张图只让一个线程去取。两个窗口同时拖进同一份缺音频的回放时，
     # 以前两边会各开一遍下载、往同一个 .part 文件里写，互相把包写坏之后
     # 各自换下一个镜像重试——实测一次补全会打出 3~5 个请求，公共镜像很容易被限流。
+    _progress_waiting(key)
     with _fetch_lock:
         # 等锁的这段时间里，先拿到锁的线程可能已经把音频下好写进缓存了
         hit = cached_audio(cache_dir, key)
         if hit:
+            _progress_mark(key, stage="完成（缓存里已经有了）", finished=True, ok=True)
             return {"ok": True, "path": hit, "source": "cache", "error": "", "cached": True}
         return _fetch_locked(beatmap_path, key, cache_dir, force)
 
@@ -276,12 +362,21 @@ def _download_from_mirrors(key: str, set_id: str, audio_name: str,
     tmp_osz = os.path.join(audio_dir, key + "." + tag + ".osz.part")
     last_err = ""
     started = time.time()
-    for name, tpl, headers in MIRRORS:
+    for attempt, (name, tpl, headers) in enumerate(MIRRORS, 1):
         # 总预算：三个镜像全挂时别让用户对着"正在补音频"等一分半
         if time.time() - started > BUDGET:
             return "", "", last_err or "镜像都没能在 %d 秒内给回应" % BUDGET
+        # 先把"正在连 sayobot（第 1 个镜像）"写出去：DNS + TLS 握手 + 等响应
+        # 可能有一两秒完全没有字节，那一段最容易让人以为卡死。
+        _progress_mark(key, stage="正在从 %s 下载" % name, mirror=name,
+                       attempt=attempt, done=0, total=0)
+
+        def _on_bytes(written, total, _name=name):
+            _progress_mark(key, done=written, total=total, stage="正在从 %s 下载" % _name)
+
         try:
-            _get(tpl.format(sid=set_id), headers, sink=tmp_osz)
+            _get(tpl.format(sid=set_id), headers, sink=tmp_osz, on_bytes=_on_bytes)
+            _progress_mark(key, stage="正在校验 %s 给的包" % name)
             # 低于这个尺寸的只可能是错误页或空响应；真正的有效性靠下面的 _verify_osz
             if not os.path.isfile(tmp_osz) or os.path.getsize(tmp_osz) < 128:
                 last_err = "%s 返回的是空包" % name
@@ -289,6 +384,7 @@ def _download_from_mirrors(key: str, set_id: str, audio_name: str,
             if not _verify_osz(tmp_osz, key):
                 last_err = "%s 给的包里没有这张谱面" % name
                 continue
+            _progress_mark(key, stage="正在抽取音频")
             out = extract_audio(tmp_osz, audio_name, os.path.join(audio_dir, key))
             if not out:
                 last_err = "%s 的包里没有音频" % name
@@ -307,11 +403,14 @@ def _download_from_mirrors(key: str, set_id: str, audio_name: str,
 
 def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> dict:
     """真正的下载流程。调用方必须已经持有 `_fetch_lock`。"""
+    _progress_own(key)
     items = load_index(cache_dir)
     prev = items.get(key) or {}
     stale = prev.get("v") != FETCH_VERSION
     if not force and not stale and prev.get("failed") and (time.time() - float(prev.get("at") or 0)) < FAIL_TTL:
-        return {"ok": False, "path": "", "source": "", "error": prev.get("error") or "上次没取到", "cached": False}
+        err = prev.get("error") or "上次没取到"
+        _progress_mark(key, stage="上次没取到，短期内不再重试", finished=True, ok=False, error=err)
+        return {"ok": False, "path": "", "source": "", "error": err, "cached": False}
 
     audio_name, set_id = _target_of(beatmap_path)
 
@@ -323,6 +422,7 @@ def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> d
         err = "这张谱面没记录图集 id（自制图或还没上传到官网），无法在线补音频"
         items[key] = {"v": FETCH_VERSION, "failed": True, "at": time.time(), "error": err}
         save_index(cache_dir, items)
+        _progress_mark(key, stage="无法在线补音频", finished=True, ok=False, error=err)
         return {"ok": False, "path": "", "source": "", "error": err, "cached": False}
 
     audio_dir = os.path.join(cache_dir, "audio")
@@ -338,11 +438,70 @@ def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> d
             "size": os.path.getsize(out),
         }
         save_index(cache_dir, items)
+        _progress_mark(key, stage="完成", finished=True, ok=True)
         return {"ok": True, "path": out, "source": source, "error": "", "cached": False}
 
     items[key] = {"v": FETCH_VERSION, "failed": True, "at": time.time(), "error": last_err}
     save_index(cache_dir, items)
+    _progress_mark(key, stage="没补到", finished=True, ok=False, error=last_err)
     return {"ok": False, "path": "", "source": "", "error": last_err, "cached": False}
+
+
+def test_mirrors() -> list[dict]:
+    """量一次本机到各镜像站的响应时间（毫秒），给设置页的「测试连接」用。
+
+    对同一个下载地址发 HEAD：要的是"连得上、回话多快"，不是把整包拉下来。
+    服务器回 4xx / 5xx 也算连通 —— DNS、TLS、HTTP 这一路是通的，
+    真正能不能下到包由补音频自己的校验决定。
+    三个站并行问，总耗时约等于最慢的那个。
+    """
+    results: list[dict] = []
+    lock = threading.Lock()
+    started_all = time.perf_counter()
+
+    def probe(name: str, tpl: str, extra: dict) -> None:
+        started = time.perf_counter()
+        ok, error, status = False, "", 0
+        headers = {"User-Agent": _user_agent(), "Accept": "*/*"}
+        if extra:
+            headers.update(extra)
+        try:
+            req = Request(tpl.format(sid="1"), headers=headers, method="HEAD")
+            with urlopen(req, timeout=LATENCY_TIMEOUT) as resp:
+                status = int(getattr(resp, "status", 0) or 200)
+            ok = True
+        except HTTPError as e:
+            status = int(e.code or 0)
+            ok = True
+        except Exception as e:  # noqa: BLE001 - 测速失败只是结果之一，不该抛给调用方
+            error = str(e) or type(e).__name__
+        ms = int(round((time.perf_counter() - started) * 1000))
+        with lock:
+            results.append({"name": name, "ms": ms, "ok": ok, "status": status, "error": error})
+
+    threads = [
+        threading.Thread(target=probe, args=(name, tpl, headers), daemon=True)
+        for name, tpl, headers in MIRRORS
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(LATENCY_TIMEOUT + 1)
+    # 有站点可能卡在 DNS 上，join 都回来了还没结果：补一行"没回应"，
+    # 否则结果表会少一个站，用户会以为漏测了。
+    with lock:
+        known = {r["name"] for r in results}
+        waited = int(round((time.perf_counter() - started_all) * 1000))
+        for name, _, _ in MIRRORS:
+            if name not in known:
+                results.append({
+                    "name": name, "ms": waited, "ok": False, "status": 0,
+                    "error": "等待回应超时（DNS 解析或握手没能完成）",
+                })
+    # 按 MIRRORS 的顺序返回：谁先回来不该影响结果表的顺序
+    order = {name: i for i, (name, _, _) in enumerate(MIRRORS)}
+    results.sort(key=lambda item: order.get(item["name"], 99))
+    return results
 
 
 def stats(cache_dir: str) -> dict:
