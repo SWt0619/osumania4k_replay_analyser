@@ -559,7 +559,9 @@
       if (v1 !== null) rows.push(["Score V1", fmtInt(v1)]);
     }
     rows.push(
-      ["最大连击（重算）", String(sm.maxCombo)],
+      // V1 一件物件只算一次连击，面图上这个数会明显低于游戏结算屏（那边长条头尾都算），
+      // 标一下口径，免得玩家以为算漏了。
+      [data.judgeMode === "v1" ? "最大连击（重算，按物件）" : "最大连击（重算）", String(sm.maxCombo)],
       ["空按", String(sm.ghosts || 0)],
       ["分析耗时", (data.elapsedMs || 0) + " ms"]
     );
@@ -586,57 +588,88 @@
   // 段位是前端算出来的，所以这里是「拿到 items 再画」，不自己发请求。
   function renderSimilar(items) {
     const card = $("similarCard");
-    const ul = $("similarList");
-    if (!card || !ul) return;
+    const grid = $("similarList");
+    if (!card || !grid) return;
     const list = Array.isArray(items) ? items : [];
-    clearNode(ul);
+    clearNode(grid);
     if (!list.length) {
       card.hidden = true;
       return;
     }
 
     list.forEach((it) => {
-      const li = el("li", "similar-item");
-      const main = el("div", "s-main");
-      const title = el("a", "s-title",
-        (it.artist || "") + " - " + (it.title || "") + " [" + (it.version || "") + "]");
-      title.href = it.pageUrl || "#";
-      title.target = "_blank";
-      title.rel = "noreferrer noopener";
-      main.appendChild(title);
+      const node = document.createElement("article");
+      node.className = "map-card";
 
+      // 下载绑在封面上：和「随机找图」一致，只有封面是链接，其余不抢点击
+      const cover = document.createElement("a");
+      cover.className = "map-cover";
+      cover.href = it.downloadUrl || "#";
+      cover.target = "_blank";
+      cover.rel = "noopener noreferrer";
+      cover.title = "点击封面下载 " + (it.title || "") + "（.osz）";
+
+      const img = document.createElement("img");
+      // 封面按图集 id 拼，和随机找图同一个 CDN；断网时退成渐变底色
+      img.src = "https://assets.ppy.sh/beatmaps/" + it.sid + "/covers/cover.jpg";
+      img.alt = "";
+      img.loading = "lazy";
+      img.referrerPolicy = "no-referrer";
+      img.addEventListener("error", () => { img.remove(); cover.classList.add("is-blank"); });
+      cover.appendChild(img);
+
+      const tip = document.createElement("span");
+      tip.className = "map-cover-tip";
+      tip.textContent = "点击下载 .osz";
+      cover.appendChild(tip);
+
+      // 段位放左上角：它比 BPM 更能说明"这张和你现在打的差多少"
+      const danBadge = document.createElement("span");
+      danBadge.className = "map-dan is-text";
+      danBadge.textContent = it.dan || "";
+      const gap = Number(it.danGap);
+      danBadge.title = gap > 0 ? "比你这一局高 " + gap + " 档" : gap < 0 ? "比你这一局低 " + -gap + " 档" : "和你这一局同一档";
+      cover.appendChild(danBadge);
+
+      const info = document.createElement("div");
+      info.className = "map-info";
+
+      const title = document.createElement("div");
+      title.className = "map-title";
+      title.textContent = it.artist ? it.artist + " - " + it.title : (it.title || "（无标题）");
+
+      const ver = document.createElement("div");
+      ver.className = "map-version";
+      ver.textContent = it.version || "";
+
+      const foot = document.createElement("div");
+      foot.className = "map-foot";
       // 键型中文名由后端给（和「键型构成」卡片同一张表），前端不再维护第二份
       const cat = it.label || it.dominant || "";
-      const bits = [];
-      if (cat) bits.push(cat + (it.dominantShare ? " " + Math.round(it.dominantShare * 100) + "%" : ""));
-      if (it.dan) {
-        const gap = Number(it.danGap);
-        bits.push(it.dan + (gap > 0 ? "（差 " + gap + " 档）" : "（同档）"));
-      }
-      // BPM 差：同一首曲子的倍速版 dan 可能完全对上，但手感差很远，这里直接摊开
-      if (it.bpm && Number(it.bpm) > 0) {
-        const bg = it.bpmGap;
-        bits.push("BPM " + Math.round(it.bpm) + (bg === null || bg === undefined ? "" : "（" + (bg > 0 ? "+" : "") + bg + "%）"));
-      }
-      if (it.similarity) bits.push("相似度 " + Math.round(it.similarity * 100) + "%");
-      const line = el("div", "s-meta", bits.join(" · "));
-      // MSD 只作参考、不参与排序，放悬浮说明里，不占正文
-      line.title = [
-        it.msd ? "这张图 MSD " + Number(it.msd).toFixed(1) : "",
+      const share = Number(it.dominantShare);
+      const bits = [
+        cat ? cat + (share > 0 ? " " + Math.round(share * 100) + "%" : "") : "",
+        it.bpm ? "BPM " + Math.round(it.bpm) : "",
+        it.similarity ? "相似度 " + Math.round(it.similarity * 100) + "%" : "",
+      ].filter(Boolean);
+      bits.forEach((text) => {
+        const chip = document.createElement("span");
+        chip.className = "map-chip";
+        chip.textContent = text;
+        foot.appendChild(chip);
+      });
+
+      // 悬浮说明里补上不占正文的细节（MSD、BPM 差、是否放宽）
+      node.title = [
+        it.msd ? "MSD " + Number(it.msd).toFixed(1) : "",
+        it.bpmGap !== null && it.bpmGap !== undefined ? "BPM 相差 " + (it.bpmGap > 0 ? "+" : "") + it.bpmGap + "%" : "",
         it.shareLabel ? "键型构成 " + it.shareLabel : "",
         it.relaxed ? "候选不够，已放宽段位门槛" : "",
-        it.bpmTerm !== null && it.bpmTerm !== undefined ? "BPM 接近度 " + Math.round(it.bpmTerm * 100) + "%（计入排序）" : "",
       ].filter(Boolean).join("\n");
-      main.appendChild(line);
-      li.appendChild(main);
 
-      const dl = el("a", "s-dl", "下载 .osz");
-      dl.href = it.downloadUrl || "#";
-      dl.target = "_blank";
-      dl.rel = "noreferrer noopener";
-      dl.title = "从 sayobot 下载这套谱面（含全部难度）";
-      li.appendChild(dl);
-      ul.appendChild(li);
+      info.append(title, ver, foot);
+      node.append(cover, info);
+      grid.appendChild(node);
     });
     card.hidden = false;
   }
@@ -842,6 +875,108 @@
     box.hidden = !on;
   }
 
+  // ---------------------------------------------------------------- 任务进度
+  // 所有"要等一会儿"的事都走这里：一行一个任务，左边写清在做什么，下面是进度条。
+  // 做成可堆叠，是因为它们真的会同时发生（分析时可能正在重建曲库索引，
+  // 同时又在补音频）。以前各弹各的：顶上一条细线、中间一个转圈、旁边一行小字，
+  // 既看不出谁是谁，也说不清哪件事卡住了。
+  const taskRows = new Map();
+  const taskDone = new Set();
+
+  function taskRow(id) {
+    let row = taskRows.get(id);
+    if (row) return row;
+    const box = $("taskStack");
+    if (!box) return null;
+    const node = document.createElement("div");
+    node.className = "task-row";
+    node.innerHTML = '<div class="task-head"><span class="task-label"></span>'
+      + '<span class="task-pct"></span></div>'
+      + '<div class="pbar"><i></i></div><span class="task-detail"></span>';
+    box.appendChild(node);
+    box.hidden = false;
+    row = {
+      node,
+      label: node.querySelector(".task-label"),
+      pct: node.querySelector(".task-pct"),
+      bar: node.querySelector(".pbar"),
+      fill: node.querySelector(".pbar > i"),
+      detail: node.querySelector(".task-detail"),
+    };
+    taskRows.set(id, row);
+    return row;
+  }
+
+  // label 是给人看的事件名（"补音频 · sayobot"），同 id 再调一次就复用它
+  function taskStart(id, label) {
+    taskDone.delete(id);
+    const row = taskRow(id);
+    if (!row) return null;
+    row.node.classList.remove("is-error");
+    row.label.textContent = label || "处理中";
+    row.detail.textContent = "";
+    row.detail.hidden = true;
+    row.pct.textContent = "";
+    row.bar.classList.add("is-indeterminate");
+    row.fill.style.width = "";
+    return row;
+  }
+
+  // percent 传数字（0~1）就变成确定进度，传 null 退回"来回跑"；
+  // 只传 label / detail 时保持原来的进度形态
+  function taskUpdate(id, patch) {
+    if (taskDone.has(id)) return;
+    const data = patch || {};
+    const row = taskRow(id);
+    if (!row) return;
+    if (data.label) row.label.textContent = data.label;
+    if (Object.prototype.hasOwnProperty.call(data, "detail")) {
+      row.detail.textContent = data.detail || "";
+      row.detail.hidden = !data.detail;
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "percent")) {
+      const pct = data.percent;
+      if (typeof pct === "number" && isFinite(pct)) {
+        const v = Math.max(0, Math.min(1, pct));
+        row.bar.classList.remove("is-indeterminate");
+        row.fill.style.width = (v * 100).toFixed(1) + "%";
+        row.pct.textContent = Math.round(v * 100) + "%";
+      } else {
+        row.bar.classList.add("is-indeterminate");
+        row.fill.style.width = "";
+        row.pct.textContent = "";
+      }
+    }
+  }
+
+  // 结束时先填满再收走；失败时留成红边、写上原因，多看几秒
+  function taskEnd(id, opts) {
+    const row = taskRows.get(id);
+    if (!row) return;
+    taskRows.delete(id);
+    taskDone.add(id);
+    const data = opts || {};
+    const wait = data.after || (data.error ? 4000 : 500);
+    row.bar.classList.remove("is-indeterminate");
+    if (data.error) {
+      row.node.classList.add("is-error");
+      row.pct.textContent = "失败";
+      if (data.label) row.label.textContent = data.label;
+      if (data.message) {
+        row.detail.textContent = data.message;
+        row.detail.hidden = false;
+      }
+    } else {
+      row.fill.style.width = "100%";
+      if (row.pct.textContent) row.pct.textContent = "100%";
+    }
+    setTimeout(() => {
+      row.node.remove();
+      const box = $("taskStack");
+      if (box && !box.children.length) box.hidden = true;
+    }, wait);
+  }
+
   window.UI = {
     $,
     el,
@@ -872,5 +1007,6 @@
     flashError,
     toast,
     loading,
+    tasks: { start: taskStart, update: taskUpdate, end: taskEnd },
   };
 })();
