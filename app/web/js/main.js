@@ -1895,8 +1895,9 @@
     }
     state.audioBroken = false;
     if (!data.session || !data.media || !data.media.audio) {
-      note.hidden = false;
-      note.textContent = "本地没找到音频，正在尝试在线补一份…";
+      // 进行中的进度统一放在右上角的任务条（一行一件事 + 进度条），
+      // 这一行只负责写结果：补不到时说明会没有声音。
+      note.hidden = true;
       fetchAudioOnline(data);
       return;
     }
@@ -1921,32 +1922,129 @@
 
   // 本地没有音频时补一份：服务端按谱面 MD5 去镜像站取 .osz，只把音频留下。
   // 不阻塞界面——补到了就把播放器接上，补不到就退回虚拟时钟。
-  let audioFetching = false;
+  //
+  // 补的过程中每 0.5 秒读一次进度。这一步以前只有一句不动的"正在尝试补一份…"，
+  // 而它其实要下整个谱面包（几十 MB、服务端预算 45 秒）：没有任何数字在动，
+  // 用户的判断就是"程序卡死了"。现在至少能看到下到多少、等到第几秒。
+  let audioFetchSession = "";
+  let audioProgressTimer = 0;
+
+  function stopAudioProgress() {
+    if (audioProgressTimer) {
+      clearInterval(audioProgressTimer);
+      audioProgressTimer = 0;
+    }
+  }
+
+  function isCurrentSession(session) {
+    return !!(state.data && state.data.session && state.data.session === session);
+  }
+
+  function sizeText(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    return Math.max(1, Math.round(n / 1024)) + " KB";
+  }
+
+  // 一行字说清现在在做什么：阶段 · 下到多少 · 等了多久。
+  // 阶段是服务端给的（正在从 sayobot 下载 / 正在校验 / 正在抽取），这里只负责拼。
+  function audioDetail(p, sec) {
+    const bits = [];
+    if (p && p.stage) bits.push(p.stage);
+    const done = Number(p && p.done) || 0;
+    const total = Number(p && p.total) || 0;
+    if (done > 0) bits.push(sizeText(done) + (total > 0 ? " / " + sizeText(total) : ""));
+    if (p && Number(p.attempt) > 1) bits.push("第 " + p.attempt + " 个镜像");
+    bits.push("已等 " + sec + " 秒");
+    return bits.join(" · ");
+  }
+
+  function startAudioProgress(session) {
+    const startedAt = Date.now();
+    let latest = null;
+    const paint = () => {
+      const sec = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+      const done = Number(latest && latest.done) || 0;
+      const total = Number(latest && latest.total) || 0;
+      window.UI.tasks.update("audio", {
+        label: "补音频" + (latest && latest.mirror ? " · " + latest.mirror : ""),
+        percent: total > 0 ? done / total : null,
+        detail: audioDetail(latest, sec),
+      });
+    };
+    window.UI.tasks.start("audio", "补音频");
+    paint();
+    audioProgressTimer = setInterval(async () => {
+      // 轮询失败（切了页签、服务端忙）不影响计时：沿用上一次的数字，秒数继续走
+      const p = await window.API.audioFetchStatus(session);
+      if (p) latest = p;
+      paint();
+    }, 500);
+  }
+
   async function fetchAudioOnline(data) {
     const note = $("audioNote");
-    if (!data || !data.session || audioFetching) return;
-    audioFetching = true;
-    const res = await window.API.fetchAudio(data.session);
-    audioFetching = false;
+    if (!data || !data.session) return;
+    if (audioFetchSession) {
+      // 已经有一份在补：同一张图就把提示接回来，换成别的图则等它结束（结果会进缓存）
+      if (audioFetchSession === data.session) startAudioProgress(data.session);
+      return;
+    }
+    audioFetchSession = data.session;
+    startAudioProgress(data.session);
+
+    let res = null;
+    try {
+      res = await window.API.fetchAudio(data.session);
+    } finally {
+      audioFetchSession = "";
+      stopAudioProgress();
+    }
+
+    // 下载期间可能已经换了一份回放：结果照样进了缓存，但别拿旧结论去改新页面
+    const current = isCurrentSession(data.session);
     if (res && res.ok) {
+      window.UI.tasks.end("audio");
       data.media = data.media || {};
       data.media.audio = true;
       const from = res.source === "cache" ? "本地缓存"
         : res.source === "local" ? "本地曲库"
         : (res.source || "镜像站");
       window.UI.toast("已补上音频（来源：" + from + "）");
-      setupAudio(data);
+      if (current) setupAudio(data);
+      else fetchAudioForCurrent(data);
       return;
     }
-    if (!note) return;
-    note.hidden = false;
-    if (res && res.disabled) {
-      note.textContent = "本地没找到音频，在线补音频已关闭；回放会用虚拟时钟播放（没有声音）。";
-    } else {
-      note.textContent = "本地没找到音频，在线补也没成功"
-        + (res && res.error ? "（" + res.error + "）" : "")
-        + "，回放会用虚拟时钟播放（没有声音）。";
+
+    const why = (res && res.error) || "";
+    if (current && note) {
+      note.hidden = false;
+      if (res && res.disabled) {
+        note.textContent = "本地没找到音频，在线补音频已关闭；回放会用虚拟时钟播放（没有声音）。";
+      } else {
+        note.textContent = "本地没找到音频，在线补也没成功"
+          + (why ? "（" + why + "）" : "")
+          + "，回放会用虚拟时钟播放（没有声音）。";
+      }
     }
+    // 结果直接写在任务条上（不管当前在哪个页签都看得见），不再另外弹一条浮条：
+    // 同一件事说两遍，反而会盖住下面正在看的内容。回放页那行字保留着，
+    // 因为过一会儿它会消失，而"这份回放没有声音"需要一直写着。
+    if (res && res.disabled) {
+      window.UI.tasks.end("audio");
+    } else {
+      window.UI.tasks.end("audio", { error: true, label: "补音频失败", message: why || "镜像站没有回应" });
+    }
+    if (!current) fetchAudioForCurrent(data);
+  }
+
+  // 下载期间换了回放：新的这份也缺音频的话，接着补它。
+  // 不接这一步的话，它那行提示会永远停在"正在尝试在线补一份…"。
+  function fetchAudioForCurrent(done) {
+    const now = state.data;
+    if (!now || !now.session || now.session === done.session) return;
+    if (now.media && now.media.audio) return;
+    fetchAudioOnline(now);
   }
 
   // ---------------------------------------------------------------- 导入流程
@@ -2325,7 +2423,11 @@
 
   function openBeatmapModal(payload) {
     const hint = $("bmModalHint");
-    hint.textContent = "回放里的谱面 MD5 是 " + ((payload && payload.error) || "未知") + "。可以手动选 .osu，或按曲名搜索本机曲库。";
+    // payload.error 本身就是一句完整的话（自带句号，也带了"请手动选择 .osu"），
+    // 早先被塞进「MD5 是 …」后面，读起来不通顺、还出现过两个句号。
+    // 现在有就原样显示，没有才用默认提示 —— 再补一句引导会和它重复。
+    hint.textContent = String((payload && payload.error)
+      || "曲库里没有找到这张谱面。可以手动选 .osu，或按曲名搜索本机曲库。").trim();
     $("bmModal").hidden = false;
     $("bmQuery").focus();
   }
@@ -2563,6 +2665,7 @@
       });
     }
     on("btnSaveHotkey", "click", saveHotkeySettings);
+    on("btnMirrorTest", "click", testMirrors);
     $("btnAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = false; });
     $("btnCloseAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = true; });
     document.querySelectorAll(".modal").forEach((m) => {
@@ -3492,6 +3595,17 @@
     return card;
   }
 
+  // 区间怎么写给人看：Reform 以上用"5.0~7.0 段"，INTRO 与面条用档位名
+  // （0 段以下说"负几段"是错的，那里是 Intro 1~3；LN 段位本来就只有名字）。
+  function finderRangeText(used) {
+    const labels = [used.danMinLabel, used.danMaxLabel].filter(Boolean).join(" ~ ");
+    const lo = Number(used.danMin || 0);
+    const hi = Number(used.danMax || 0);
+    if (used.mode === "ln" || lo < 0.5) return labels || (lo.toFixed(1) + "~" + hi.toFixed(1));
+    const numbers = lo.toFixed(1) + "~" + hi.toFixed(1) + " 段";
+    return labels ? numbers + "（" + labels + "）" : numbers;
+  }
+
   function renderFinder(data) {
     const grid = $("fnGrid");
     if (!grid) return;
@@ -3517,12 +3631,7 @@
       const used = (data && data.used) || {};
       const parts = [];
       if (data && data.relaxed) {
-        const unit = used.mode === "ln" ? "" : " 段";
-        let relax = "±1 段里没凑够，已放宽到 "
-          + Number(used.danMin || 0).toFixed(1) + "~" + Number(used.danMax || 0).toFixed(1) + unit;
-        if (used.danMinLabel || used.danMaxLabel) {
-          relax += "（" + [used.danMinLabel, used.danMaxLabel].filter(Boolean).join(" ~ ") + "）";
-        }
+        let relax = "±1 段里没凑够，已放宽到 " + finderRangeText(used);
         if (used.cat) relax += "、" + used.cat + " ≥ " + used.share + "%";
         parts.push(relax);
       }
@@ -3652,6 +3761,61 @@
     }
   }
 
+  // ---------------------------------------------------------------- 镜像站测速
+  // 只测"连得上、回话多快"：点一次发三个 HEAD，不下载任何内容。
+  // 结果按快慢标色，方便判断补音频该走哪条线路。
+  const MIRROR_LABEL = { sayobot: "sayobot（国内）", nerinyan: "nerinyan", mino: "catboy / mino" };
+
+  function mirrorLevel(ms) {
+    // 阈值按"能不能顺畅下几十 MB"定：500ms 左右握手仍然算可用，
+    // 一秒往上就明显拖慢补音频了。
+    if (ms < 300) return "is-fast";
+    if (ms < 1000) return "is-mid";
+    return "is-slow";
+  }
+
+  function renderMirrorResults(res) {
+    const box = $("mirrorResult");
+    if (!box) return;
+    window.UI.clearNode(box);
+    const rows = (res && res.results) || [];
+    rows.forEach((it) => {
+      const li = document.createElement("li");
+      li.className = "mirror-item " + (it.ok ? mirrorLevel(Number(it.ms) || 0) : "is-fail");
+      // 连不上时错误原文可能很长（DNS、证书、超时各不相同），放悬浮提示里，正文只写结论
+      li.title = it.ok ? ("HTTP " + it.status + " · " + it.ms + " 毫秒") : (it.error || "没有回应");
+      const name = document.createElement("span");
+      name.className = "m-name";
+      name.textContent = MIRROR_LABEL[it.name] || it.name;
+      const ms = document.createElement("span");
+      ms.className = "m-ms";
+      // 超时和"直接连不上"分开写：前者多半是线路被墙，后者可能是 DNS 挂了。
+      // 错误原文有中文也有英文（timed out / timeout），两种都认。
+      const timedOut = /timed out|timeout|超时/i.test(String(it.error || ""));
+      ms.textContent = it.ok ? (it.ms + " ms") : (timedOut ? "超时" : "连接失败");
+      li.append(name, ms);
+      box.appendChild(li);
+    });
+    box.hidden = !rows.length;
+  }
+
+  async function testMirrors() {
+    const btn = $("btnMirrorTest");
+    if (btn) btn.disabled = true;
+    window.UI.tasks.start("mirror", "测试镜像站");
+    try {
+      const res = await window.API.testMirrors();
+      renderMirrorResults(res);
+      window.UI.tasks.end("mirror");
+    } catch (e) {
+      window.UI.tasks.end("mirror", {
+        error: true, label: "测试镜像站失败", message: (e && e.message) || "网络错误",
+      });
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
   function bindProgress() {
     on("pgType", "change", () => fillDanOptions($("pgType").value, null));
     on("btnSaveProfile", "click", saveProfile);
@@ -3661,19 +3825,28 @@
   }
 
   // ---------------------------------------------------------------- 启动
-  // 建索引期间轮询进度：顶上那条细线负责"在动"，右上角曲库标签负责"到哪儿了"。
-  // 索引建好后曲库标签换成张数，细线收起来。
+  // 建索引期间轮询进度：右上角任务条显示"扫描曲库 + 已扫多少"，
+  // 曲库标签同时写张数。索引建完任务条收走，标签换成总张数。
   async function loadLibraryWithProgress() {
-    const bar = $("libScan");
     const chipText = $("libChipText");
     let polling = true;
+    let started = false;
     const tick = async () => {
       if (!polling) return;
       try {
         const p = await window.API.libraryProgress();
         if (p && p.building) {
-          if (bar) bar.hidden = false;
+          if (!started) {
+            // 已经建好索引时不会进这里，也就不会闪一下空任务条
+            started = true;
+            window.UI.tasks.start("library", "扫描曲库");
+          }
           if (chipText) chipText.textContent = "扫描中 " + (p.scanned || 0).toLocaleString() + "…";
+          window.UI.tasks.update("library", {
+            // 服务端只知道"扫到第几个"，给不出总数，所以用不确定态
+            percent: null,
+            detail: "已扫描 " + (p.scanned || 0).toLocaleString() + " 张谱面",
+          });
         }
       } catch (e) {
         /* 轮询失败不影响主流程：索引建完总会走到下面的 renderLibrary */
@@ -3689,7 +3862,7 @@
     } finally {
       polling = false;
       clearInterval(timer);
-      if (bar) bar.hidden = true;
+      window.UI.tasks.end("library");
     }
   }
 
