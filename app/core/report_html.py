@@ -51,10 +51,11 @@ def build_report_html(data: dict) -> str:
     page = re.sub(r'<script\b[^>]*\bsrc="[^"]*"[^>]*>\s*</script>\s*', "", page)
 
     # 报告里不需要的东西：空状态、导入按钮、曲库状态条。
-    # 只按元素起始标签做替换，避免动到别处的同名文字。
-    page = page.replace('<div class="empty glass" id="emptyState">', '<div class="empty glass" id="emptyState" hidden>')
-    page = page.replace('<button class="icon-btn" id="btnImport"', '<button class="icon-btn" id="btnImport" hidden')
-    page = page.replace('<div class="chip" id="libChip"', '<div class="chip" id="libChip" hidden')
+    # 按 id 匹配、只给起始标签补一个 hidden，不去比对 class —— 页面以后多挂一个 class，
+    # 精确字符串就失配了（曲库状态条就这样残留过一次）。
+    for element_id in ("emptyState", "btnImport", "libChip"):
+        page = re.sub(r'(<[a-z]+\b[^>]*\bid="%s")' % element_id,
+                      r'\1 hidden', page, count=1)
 
     payload = (
         json_safe.dumps(data, separators=(",", ":"))
