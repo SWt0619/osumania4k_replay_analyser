@@ -73,6 +73,10 @@ PID_FILE = paths.PID_FILE
 # 上传体积上限：正常回放几百 KB，给到 32MB 已经很宽松
 MAX_BODY_BYTES = 32 * 1024 * 1024
 
+# 页面关掉/刷新/拖进度条时连接会被对端掐断，写响应就会抛这几个异常。
+# 它们不是服务端故障，不该写 crashreport，也不该在日志里标成"失败"。
+CLIENT_GONE = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
+
 # 进程启动时刻。Python 只在 import 时读一次模块，改完 .py 不重启的话跑的还是旧代码：
 # 表现是"前端新、后端旧"，新字段悄悄消失（例如时间轴缺了 UR 那条带），却不报任何错。
 # 这里拿启动时刻和磁盘上 .py 的 mtime 比一比，让页面能明确提示"去重启"，而不是让人猜。
@@ -425,6 +429,10 @@ def _range_bounds(header: str | None, size: int) -> tuple[int, int, bool] | None
     if not first and last:
         # 后缀 Range：bytes=-N 表示"最后 N 个字节"。
         # 早先按 0..N 处理，下载器或播放器拖到末尾时会拿到开头的内容。
+        # N 为 0（bytes=-0）是空区间，按 RFC 9110 要回 416 —— 直接返回的话
+        # 会算出 start=size、end=size-1，发一个 Content-Range 起止颠倒的 206。
+        if int(last) <= 0:
+            return None
         return size - min(int(last), size), size - 1, True
     start = int(first) if first else 0
     if last:
@@ -1068,7 +1076,8 @@ class _AnalyzeApiMixin(_SessionView):
     def _random_charts(self, qs):
         """按段位与键型随机抽几张图。全部读随附索引，不联网。"""
         def one(key, default=""):
-            return ((qs.get(key) or [default])[0] or default).strip()
+            # 默认值可能传的是数字（num() 就是这么用的），不转字符串会在 .strip() 上炸
+            return str((qs.get(key) or [default])[0] or default).strip()
 
         def num(key, default):
             try:
@@ -1129,6 +1138,21 @@ class _AudioApiMixin(_SessionView):
     本地永远配不上音频。这里按会话里记的谱面路径去镜像站取一次 .osz，只把音频留下。
     """
 
+    def _audio_fetch_status(self, qs):
+        """补音频的实时进度，给页面轮询用。
+
+        补音频本身是一个同步 POST，要下整包、最长 45 秒；页面靠这个只读接口
+        把"正在下 3.2 / 12.4 MB"写出来，否则那 45 秒里界面一动不动。
+        只读内存里的记录，不碰网络也不拿下载锁 —— 拿到锁的话会和正在下载的
+        那个线程排在一起，轮询就成了第二个卡住的东西。
+        """
+        sid = ((qs.get("session") or [""])[0] or "").strip()
+        sess = self._session(sid)
+        if not sess:
+            return self._json({"ok": False, "error": "会话已过期"})
+        md5 = (sess.get("beatmapMd5") or "").strip()
+        return self._json({"ok": True, "progress": audio_fetch.progress(md5)})
+
     def _audio_fetch(self):
         req = _parse_json(self._read_body())
         if req is None:
@@ -1159,6 +1183,22 @@ class _AudioApiMixin(_SessionView):
         else:
             log("[audio] 没补到：%s" % result.get("error"))
         return self._json(result)
+
+    def _mirror_test(self):
+        """测一次本机到各镜像站的延迟（设置页的「测试连接」）。
+
+        每次点击真的发三个 HEAD：结果只代表"此刻这条线路"，
+        不做缓存，也不在后台偷偷定期跑 —— 那是往公共镜像站白送请求。
+        """
+        try:
+            results = audio_fetch.test_mirrors()
+        except Exception as e:  # noqa: BLE001 - 测速本身不该把页面带崩
+            log("[mirror] 测速失败：%r" % (e,))
+            return self._error("测试镜像站连接失败：%s" % (e,), 500)
+        log("[mirror] 延迟：" + "，".join(
+            "%s %s" % (r["name"], ("%d ms" % r["ms"]) if r.get("ok") else "失败")
+            for r in results))
+        return self._json({"ok": True, "results": results})
 
     def _audio_pref(self):
         req = _parse_json(self._read_body()) or {}
@@ -1327,7 +1367,12 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
         self._json({"ok": False, "error": msg, **extra}, code)
 
     def _read_body(self, limit: int = MAX_BODY_BYTES) -> bytes:
-        length = int(self.headers.get("Content-Length") or 0)
+        # 浏览器不会发非数字的 Content-Length，但代理、脚本、写到一半的连接会。
+        # 直接 int() 会抛 ValueError，冒到兜底就变成"服务器内部错误 + 一份崩溃报告"。
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = 0
         if length > limit:
             raise BodyTooLarge(
                 "上传内容太大（%d 字节，上限 %d）——回放文件一般只有几百 KB，确认一下选的是 .osr"
@@ -1360,6 +1405,11 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
             return
         try:
             return self._route_get(path, qs)
+        except CLIENT_GONE as e:
+            # 页面在响应发完前就断了（关标签页、刷新、音频拖到末尾）：
+            # 这是正常操作，不是请求处理失败。
+            log("[req] 页面提前断开（GET %s）：%s" % (path, type(e).__name__))
+            return
         except Exception as e:  # noqa: BLE001
             report = _report_crash("请求处理失败（GET）", e, self._crash_context())
             return self._error(self._internal_error(e, report), 500)
@@ -1411,6 +1461,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
             return self._hotkey_info()
         if path == "/api/random-charts":
             return self._random_charts(qs)
+        if path == "/api/audio-fetch/status":
+            return self._audio_fetch_status(qs)
         if path == "/api/progress":
             return self._progress_info()
         if path == "/api/check-update":
@@ -1471,12 +1523,18 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
         if not self._guard():
             return
         # 一到达就记一行：这样"请求有没有跑到后端"一眼能看出来
         declared = self.headers.get("Content-Length")
         log("[req] POST %s  Content-Length=%s" % (path, declared))
         try:
+            if path == "/api/bye":
+                # 页面关闭时用 sendBeacon 告别，而 sendBeacon 固定走 POST。
+                # 只处理 GET 的话这里会 404，进程只能等 75 秒心跳过期才退出。
+                WATCHDOG.bye((qs.get("c") or [""])[0][:64])
+                return self._json({"ok": True})
             if path == "/api/analyze":
                 return self._analyze()
             if path == "/api/upload-chunk":
@@ -1507,6 +1565,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 return self._audio_fetch()
             if path == "/api/audio-pref":
                 return self._audio_pref()
+            if path == "/api/mirror-test":
+                return self._mirror_test()
             if path == "/api/echo":
                 body = self._read_body()
                 return self._json({"ok": True, "received": len(body), "echo": body[:64].decode("utf-8", "replace")})
@@ -1520,6 +1580,9 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
             return self._error(str(e), 200, needsInput=True)
         except OsrError as e:
             return self._error("回放文件解析失败：%s" % e, 200)
+        except CLIENT_GONE as e:
+            log("[req] 页面提前断开（POST %s）：%s" % (path, type(e).__name__))
+            return
         except Exception as e:  # noqa: BLE001
             report = _report_crash("请求处理失败（POST）", e, self._crash_context())
             return self._error(self._internal_error(e, report), 500)
