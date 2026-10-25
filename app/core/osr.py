@@ -675,7 +675,9 @@ def extract_events(frames: list[RawFrame]) -> tuple[list[PressEvent], list[Relea
     releases: list[ReleaseEvent] = []
     prev = 0
     for f in frames:
-        changed = f.mask ^ prev
+        # 掩码只用到低 20 位（mania 最多 18 键）。这里必须先把高位切掉：
+        # 损坏/半截回放解出负掩码时，算术右移 -1 >> 1 仍是 -1，循环永远退不出来。
+        changed = (f.mask ^ prev) & 0xFFFFF
         if changed:
             col = 0
             bits = changed
