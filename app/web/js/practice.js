@@ -198,5 +198,12 @@
     }
   }
 
-  window.Practice = { generate: generate, syncAdvice: syncAdvice };
+  // 与服务端 practice.rate_label 同一套规则：加速版 Rate、降速版 Slice
+  function rateLabel(rate) {
+    var value = Number(rate) || 0;
+    return (value > 1 ? "Rate" : "Slice") + String(Number(value.toFixed(2)));
+  }
+
+  window.Practice = {
+    rateLabel: rateLabel, generate: generate, syncAdvice: syncAdvice };
 })();
