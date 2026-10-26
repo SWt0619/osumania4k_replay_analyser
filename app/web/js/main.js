@@ -2626,6 +2626,7 @@
     $("btnPickFile").addEventListener("click", () => $("fileOsr").click());
     $("btnPickChart").addEventListener("click", () => $("fileChartOsu").click());
     $("btnCheckUpdate").addEventListener("click", () => checkUpdate(true));
+
     $("fileOsr").addEventListener("change", (e) => {
       const f = e.target.files && e.target.files[0];
       e.target.value = "";   // 清空才能连续选同一个文件
@@ -3762,8 +3763,8 @@
   }
 
   // ---------------------------------------------------------------- 镜像站测速
-  // 只测"连得上、回话多快"：点一次发三个 HEAD，不下载任何内容。
-  // 结果按快慢标色，方便判断补音频该走哪条线路。
+  // 走一次真实下载链路（GET + Range 读 1KB），既能测延迟也能确认对方真给数据。
+  // 只被拒绝（403/405）的站标黄，别让它看起来跟正常站一样快。
   const MIRROR_LABEL = { sayobot: "sayobot（国内）", nerinyan: "nerinyan", mino: "catboy / mino" };
 
   function mirrorLevel(ms) {
@@ -3781,9 +3782,14 @@
     const rows = (res && res.results) || [];
     rows.forEach((it) => {
       const li = document.createElement("li");
-      li.className = "mirror-item " + (it.ok ? mirrorLevel(Number(it.ms) || 0) : "is-fail");
+      const ok = !!it.ok;
+      // 连得上但被拒绝（403 / 405 这类）跟完全连不上要分开：前者不是线路问题，
+      // 但补音频同样下不动，不能显示成一个正常延迟。
+      const denied = !ok && it.reachable !== false;
+      li.className = "mirror-item "
+        + (ok ? mirrorLevel(Number(it.ms) || 0) : (denied ? "is-denied" : "is-fail"));
       // 连不上时错误原文可能很长（DNS、证书、超时各不相同），放悬浮提示里，正文只写结论
-      li.title = it.ok ? ("HTTP " + it.status + " · " + it.ms + " 毫秒") : (it.error || "没有回应");
+      li.title = ok ? ("HTTP " + it.status + " · " + it.ms + " 毫秒") : (it.error || "没有回应");
       const name = document.createElement("span");
       name.className = "m-name";
       name.textContent = MIRROR_LABEL[it.name] || it.name;
@@ -3792,7 +3798,8 @@
       // 超时和"直接连不上"分开写：前者多半是线路被墙，后者可能是 DNS 挂了。
       // 错误原文有中文也有英文（timed out / timeout），两种都认。
       const timedOut = /timed out|timeout|超时/i.test(String(it.error || ""));
-      ms.textContent = it.ok ? (it.ms + " ms") : (timedOut ? "超时" : "连接失败");
+      ms.textContent = ok ? (it.ms + " ms")
+        : (denied && it.status ? ("HTTP " + it.status) : (timedOut ? "超时" : "连接失败"));
       li.append(name, ms);
       box.appendChild(li);
     });
