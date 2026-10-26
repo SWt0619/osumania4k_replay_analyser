@@ -12,7 +12,9 @@ lazer 把谱面和音频**各自**按内容哈希存进 `osu\\files\\`，同一�
 
 几条自我约束（都是被踩过的）
 --------------------------
-1. **串行 + 最小间隔**：镜像站是公共资源，并发和连发都很容易被限流甚至拉黑。
+1. **同一时刻只下一个包**：镜像站是公共资源，连发容易被限流。单包内部会拆成 8 片
+   Range 并发（实测单连接 0.4MB/s、8 路 2.1MB/s），但包与包之间仍然串行，
+   下下来的总字节数不变，只是把一条慢连接换成几条。
 2. **失败也记账**：网络波动、镜像临时缺图都很常见，但如果不记，用户每打开一次
    回放就会重试一次。失败条目 7 天后才允许重试。
 3. **只信任本地能验证的东西**：下下来的包必须真的含这张谱面 MD5 的 .osu 才接受，
@@ -29,9 +31,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -246,18 +250,59 @@ def cached_audio(cache_dir: str, md5: str) -> str:
 
 
 # --------------------------------------------------------------------- 网络
-def _get(url: str, extra_headers: dict | None = None, sink: str = "",
-         on_bytes=None) -> bytes:
-    """GET 一个地址。sink 非空时直接流到文件（谱面包可能几十 MB）。
+# 单连接实测只有 0.35~0.45 MB/s（20MB 要 45 秒以上），而镜像支持 Range：
+# 8 路并发能到 2.1 MB/s，16 路反而回落到 1.8。所以按 8 片拆。
+# 几条自我约束：
+#  - 只拆 ≥4MB 的包：小包握手比省下的时间还贵；
+#  - 片与片错开 80ms 起跑，不在同一瞬间打出 8 个连接；
+#  - 单请求间隔 MIN_INTERVAL 仍然只对"开始下载"生效，不逐片等；
+#  - 任一片重试两次仍失败（或镜像回 403/416）就整体退回单连接，宁可慢也要拿到包；
+#  - 全局仍由 _fetch_lock 串行，用户连点也只会有这 8 个连接。
+PARALLEL = 8
+PARALLEL_MIN_BYTES = 4 * 1024 * 1024
+PART_STAGGER = 0.08
+PROBE_TIMEOUT = 8
 
-    on_bytes(已下载, 总大小) 每读一块回调一次，给界面报进度；总大小拿不到时是 0。
-    """
-    _throttle()
+
+def _headers(extra: dict | None = None) -> dict:
     headers = {"User-Agent": _user_agent(), "Accept": "*/*"}
-    if extra_headers:
-        headers.update(extra_headers)
-    req = Request(url, headers=headers)
-    with urlopen(req, timeout=TIMEOUT) as resp:
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _content_range_total(value: str | None) -> int:
+    """从 `bytes 0-0/4328410` 里取总长度。拿不到就返回 0。"""
+    if not value:
+        return 0
+    _, _, tail = str(value).partition("/")
+    return int(tail) if tail.isdigit() else 0
+
+
+def _probe_total(url: str, headers: dict) -> int:
+    """问一下这个包有多大、支不支持分段。返回总字节数，0 表示别拆。
+
+    用 Range: bytes=0-0 而不是 HEAD：有的镜像对 HEAD 回 405，但对分段是支持的。
+    """
+    probe = dict(headers)
+    probe["Range"] = "bytes=0-0"
+    try:
+        with urlopen(Request(url, headers=probe), timeout=PROBE_TIMEOUT) as resp:
+            if getattr(resp, "status", 200) != 206:
+                return 0
+            total = _content_range_total(resp.headers.get("Content-Range"))
+            resp.read(1)
+            return total
+    except Exception:  # noqa: BLE001 - 探不到就当不支持，交给单连接
+        return 0
+
+
+def _single(url: str, headers: dict, sink: str, on_bytes=None,
+            throttle: bool = True) -> bytes:
+    """单连接下载。sink 为空时读进内存。"""
+    if throttle:
+        _throttle()
+    with urlopen(Request(url, headers=headers), timeout=TIMEOUT) as resp:
         if not sink:
             return resp.read()
         try:
@@ -279,6 +324,121 @@ def _get(url: str, extra_headers: dict | None = None, sink: str = "",
                 if on_bytes:
                     on_bytes(written, total)
         return b""
+
+
+def _parts(url: str, headers: dict, sink: str, total: int, on_bytes=None) -> None:
+    """把 total 字节拆成 PARALLEL 片并发取回，按顺序拼到 sink。
+
+    进度按累计字节上报，语义和单连接一致（已下载, 总大小），前端不用改。
+    """
+    # 每片至少 1MB：4MB 的包拆 4 片，20MB 以上封顶 8 片
+    count = int(min(PARALLEL, max(2, total // (1024 * 1024))))
+    step = total // count
+    spans = []
+    start = 0
+    for i in range(count):
+        end = total - 1 if i == count - 1 else start + step - 1
+        spans.append((start, end))
+        start = end + 1
+
+    parts = ["%s.p%d" % (sink, i) for i in range(count)]
+    got = [0] * count
+    lock = threading.Lock()
+    if on_bytes:
+        on_bytes(0, total)
+
+    def worker(idx: int, a: int, b: int) -> None:
+        time.sleep(idx * PART_STAGGER)
+        want = b - a + 1
+        headers_i = dict(headers)
+        headers_i["Range"] = "bytes=%d-%d" % (a, b)
+        last: Exception | None = None
+        for attempt in range(3):
+            got[idx] = 0
+            try:
+                with urlopen(Request(url, headers=headers_i), timeout=TIMEOUT) as resp:
+                    if getattr(resp, "status", 200) != 206:
+                        # 镜像不理 Range 时别硬拼：整包会被当成这一片写进去
+                        raise ValueError("镜像不支持分段（%s）" % getattr(resp, "status", "?"))
+                    size = 0
+                    with open(parts[idx], "wb") as f:
+                        while True:
+                            chunk = resp.read(256 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            size += len(chunk)
+                            with lock:
+                                got[idx] += len(chunk)
+                                done = sum(got)
+                            if on_bytes:
+                                on_bytes(min(done, total), total)
+                if size != want:
+                    raise ValueError("分段长度不符（%d / %d）" % (size, want))
+                return
+            except HTTPError as e:
+                last = e
+                if e.code in (403, 416, 429):
+                    # 明确拒绝或范围不合法，重试没有意义，交给单连接
+                    raise
+                time.sleep(0.6 * (attempt + 1))
+            except Exception as e:  # noqa: BLE001
+                last = e
+                time.sleep(0.6 * (attempt + 1))
+        raise last or RuntimeError("分段下载失败")
+
+    try:
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            futures = [pool.submit(worker, i, a, b) for i, (a, b) in enumerate(spans)]
+            for fut in futures:
+                fut.result()
+        with open(sink, "wb") as out:
+            for path in parts:
+                with open(path, "rb") as f:
+                    shutil.copyfileobj(f, out, 256 * 1024)
+        if os.path.getsize(sink) != total:
+            raise ValueError("拼包后大小不对")
+    finally:
+        for path in parts:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _get(url: str, extra_headers: dict | None = None, sink: str = "",
+         on_bytes=None) -> bytes:
+    """GET 一个地址。sink 非空时直接流到文件（谱面包可能几十 MB）。
+
+    on_bytes(已下载, 总大小) 每读一块回调一次，给界面报进度；总大小拿不到时是 0。
+    走文件时优先分段并发，任何异常都退回单连接——补音频失败比慢更难受。
+    """
+    headers = _headers(extra_headers)
+    if not sink:
+        return _single(url, headers, sink, on_bytes)
+
+    _throttle()
+    total = _probe_total(url, headers)
+    if total > MAX_BYTES:
+        raise ValueError("包体超过 %d MB，放弃" % (MAX_BYTES // 1024 // 1024))
+    if total >= PARALLEL_MIN_BYTES:
+        try:
+            _parts(url, headers, sink, total, on_bytes)
+            return b""
+        except Exception:  # noqa: BLE001
+            # 已经下到的分片会被清掉，重下一遍；只发生在镜像抽风时
+            pass
+    return _single(url, headers, sink, on_bytes, throttle=False)
+
+
+def download_file(url: str, sink: str, on_bytes=None,
+                  extra_headers: dict | None = None) -> None:
+    """下载一整个文件到 sink（给「点封面下载谱面包」用）。
+
+    和补音频共用同一条链路：优先分段并发，镜像不支持就退回单连接。
+    on_bytes(已下载, 总大小) 的语义与补音频一致，前端进度条不用区分来源。
+    """
+    _get(url, extra_headers=extra_headers, sink=sink, on_bytes=on_bytes)
 
 
 # --------------------------------------------------------------------- 抽取
