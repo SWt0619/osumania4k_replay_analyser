@@ -46,7 +46,7 @@
 
 ### 使用便携版 zip（推荐）
 
-1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.8.1-win64.zip`。
+1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.8.2-win64.zip`。
 2. 解压到任意位置。
 3. 双击 `启动分析器.exe`。它会静默起服务，不弹任何窗口。
 4. 浏览器会打开 `http://127.0.0.1:8806/`。端口被占用时程序会自动往后找一个空的。
@@ -172,7 +172,7 @@
 4. **启发式归因**：四类的边界在真实数据里会重叠（尤其「能力 + 节奏」双重），所以每条结论都带可信度，可信度低时请当成「两种都有可能」。
 5. **谱面版本对不上**（比如谱面后来被更新过）时 MD5 会查不到，程序会在「本次数据」里如实标注。
 6. **提示「数据不完整 / 解压失败」**：多半是游戏还在往 `.osr` 里写就把文件拖进来了。等游戏完全退出再拖一次即可。
-7. **音频不在本地时会联网补一份**：只在 lazer 里下载过的谱面，本地配不上音频。程序会读谱面里记的图集 id，去 **[sayobot](https://www.sayobot.cn)** 取一次 `.osz`；国内优先 sayobot，取不到再依次试 nerinyan、catboy。取回后只把 `AudioFilename` 指向的文件存进 `app\_cache\audio\`，其余丢弃。请求串行、间隔至少 2 秒，失败会记账并在 7 天后才重试。**这需要联网，并且会把图集 id 发给镜像站**；不希望联网的话，在 `app\_cache\config.json` 里写 `{"autoFetchAudio": false}`，但会导致 lazer 端导出的回放没有音乐。
+7. **音频不在本地时会联网补一份**：只在 lazer 里下载过的谱面，本地配不上音频。程序会读谱面里记的图集 id，去 **[sayobot](https://osu.sayobot.cn)** 取一次 `.osz`；国内优先 sayobot，取不到再依次试 nerinyan、catboy。取回后只把 `AudioFilename` 指向的文件存进 `app\_cache\audio\`，其余丢弃。请求串行、间隔至少 2 秒，失败会记账并在 7 天后才重试。**这需要联网，并且会把图集 id 发给镜像站**；不希望联网的话，在 `app\_cache\config.json` 里写 `{"autoFetchAudio": false}`，但会导致 lazer 端导出的回放没有音乐。
 8. **找不到曲库时**：点右上角的曲库标签，可以手动指定目录。稳定版填到**有 `osu!.exe` 的那一级**（不是里面的 Songs），lazer 填到**同时有 `Songs` 和 `files` 的那一级**，填错会当场提示是哪一栏不对；保存后立即重新扫描。
 9. **只支持 osu!mania 4K**：试图导入其他键数 / 其他模式的谱面都会被拒绝。
 10. **同一时间只会跑一个实例**：再点一次 `启动分析器.exe`，如果已经有一个在跑，会直接打开它的页面然后退出。要停就点 `停止分析器.exe`。
@@ -245,7 +245,7 @@ _replays/              备用通道：把回放放这里，页面里点文件名
 
 - [ppy/osu](https://github.com/ppy/osu)：判定窗口口径、测试回放与 ScoreV1 计分公式的依据。
 - [Etterna](https://github.com/etternagame/etterna)：使用其 MinaCalc 计算 MSD 难度。
-- [sayobot](https://www.sayobot.cn)：谱面镜像站。本地没有音频时，程序从这里下载谱面包并只保留音频（见「注意事项」第 7 条）。备用镜像：[nerinyan](https://nerinyan.moe)、[catboy](https://catboy.best)。
+- [sayobot](https://osu.sayobot.cn)：谱面镜像站。本地没有音频时，程序从这里下载谱面包并只保留音频（见「注意事项」第 7 条）。备用镜像：[nerinyan](https://nerinyan.moe)、[catboy](https://catboy.best)。
 - [osumania_map_analyser](https://github.com/LeoBlackMT/osumania_map_analyser)：段位估算的实现来源。Roxy 与 Azusa 两套算法、RC / LN 段位标尺都原样放在 `app\web\vendor\mma\` 下（未做改动，说明见该目录的 README）。Roxy 是 4K RC 的元结构估算器，用 Ridge 元模型融合 Azusa / Daniel 的预测；Azusa 则融合 Daniel 与 Sunny 的结果。算法细节见 [Roxy 文档](https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/roxy_algorithm.md)、[Azusa 文档](https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/azusa_algorithm.md)。
 - [Sunny Rework](https://github.com/sunnyxxy/Star-Rating-Rebirth)：Sunny 星级与长条（LN）星级。Roxy / Azusa 只做 4K RC，长条占比高的谱面只用 Sunny 估段位。
 - [Daniel](https://thebagelofman.github.io/Daniel/)：Daniel 难度算法，作为 Azusa 与 Roxy 的输入之一。
