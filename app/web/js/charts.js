@@ -1225,6 +1225,122 @@
 
   // ==================== 4) 各列表现 ====================
 
+  // 同一张图的多次成绩走势：准确率（左轴）与 UR（右轴）两条线。
+  //
+  // 准确率轴沿用 ACC_FLOOR 的思路：从「本次最低点再低一点」起画，
+  // 否则 96% 与 97% 在 0~100 的轴上是同一条直线，看不出任何变化。
+  // UR 永远单独一根轴：它和准确率不同量纲，共用一根轴等于编造相关性。
+  function drawTrend(canvas, points, opts) {
+    if (!canvas) return null;
+    detachAll(canvas);
+    var env = begin(canvas, opts);
+    if (!env) return null;
+    var ctx = env.ctx, w = env.w, h = env.h, th = env.theme;
+
+    var pts = [];
+    if (Array.isArray(points)) {
+      for (var i = 0; i < points.length; i++) {
+        var p = points[i];
+        if (p && isFinite(num(p.acc, NaN))) {
+          pts.push({ acc: num(p.acc, 0), ur: num(p.ur, 0) });
+        }
+      }
+    }
+    if (pts.length < 2) {
+      drawEmpty(ctx, w, h, th, pts.length ? "只有一次记录，再打一次就能看走势" : "还没有历史记录");
+      return null;
+    }
+
+    var padL = 34, padR = 40, padT = 24, padB = 20;
+    var pw = Math.max(1, w - padL - padR);
+    var ph = Math.max(1, h - padT - padB);
+
+    var accs = pts.map(function (q) { return q.acc; });
+    var urs = pts.map(function (q) { return q.ur; });
+    var aMin = Math.min.apply(null, accs), aMax = Math.max.apply(null, accs);
+    var uMin = Math.min.apply(null, urs), uMax = Math.max.apply(null, urs);
+
+    var aLo = aMin >= ACC_FLOOR ? Math.max(ACC_FLOOR, aMin - 1) : aMin - 1;
+    var aHi = Math.max(aLo + 1, aMax + 0.6);
+    var uLo = uMin - Math.max(4, (uMax - uMin) * 0.25);
+    var uHi = uMax + Math.max(4, (uMax - uMin) * 0.25);
+
+    function xAt(i) { return padL + (pw * i) / (pts.length - 1); }
+    function yAcc(v) { return padT + ph - ((v - aLo) / (aHi - aLo)) * ph; }
+    function yUr(v) { return padT + ph - ((v - uLo) / (uHi - uLo)) * ph; }
+
+    ctx.save();
+
+    // 三条横向参考线（按准确率轴分），够看出高低又不抢线条
+    ctx.strokeStyle = th.grid;
+    ctx.lineWidth = 1;
+    for (var g = 0; g <= 2; g++) {
+      var yy = Math.round(padT + (ph * g) / 2) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(padL, yy);
+      ctx.lineTo(padL + pw, yy);
+      ctx.stroke();
+    }
+
+    // 准确率：主色实线
+    ctx.strokeStyle = th.accent;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    for (var i = 0; i < pts.length; i++) {
+      var x = xAt(i), y = yAcc(pts[i].acc);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // UR：青色虚线。UR 越低越好，所以这条线往下走才是进步
+    ctx.strokeStyle = th.accent2;
+    ctx.lineWidth = 1.6;
+    if (typeof ctx.setLineDash === "function") ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    for (var j = 0; j < pts.length; j++) {
+      var x2 = xAt(j), y2 = yUr(pts[j].ur);
+      if (j === 0) ctx.moveTo(x2, y2); else ctx.lineTo(x2, y2);
+    }
+    ctx.stroke();
+    if (typeof ctx.setLineDash === "function") ctx.setLineDash([]);
+
+    // 数据点：最后一个点放大，一眼看出「这次」在哪
+    for (var k = 0; k < pts.length; k++) {
+      var last = k === pts.length - 1;
+      ctx.beginPath();
+      ctx.arc(xAt(k), yAcc(pts[k].acc), last ? 4.5 : 3, 0, Math.PI * 2);
+      ctx.fillStyle = last ? th.accent : th.text;
+      ctx.globalAlpha = last ? 1 : 0.55;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // 只标最后一个点的两个数：点多了全标会糊成一片。
+    // 文字放在点的左侧——最后一个点本来就贴着右边缘，往右写会被画布裁掉。
+    var lastX = xAt(pts.length - 1), lastY = yAcc(accs[accs.length - 1]);
+    setFont(ctx, 11);
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = th.accent;
+    ctx.fillText(accs[accs.length - 1].toFixed(2) + "%", lastX - 9, lastY - 9);
+    ctx.fillStyle = th.accent2;
+    ctx.fillText("UR " + urs[urs.length - 1].toFixed(0), lastX - 9, lastY + 11);
+
+    // 图例与轴下限，放左上，避免和右边标注打架
+    setFont(ctx, 10);
+    ctx.textAlign = "left";
+    ctx.fillStyle = th.dim;
+    ctx.fillText("准确率", padL + 12, padT - 8);
+    ctx.fillStyle = th.accent2;
+    ctx.fillText("UR（虚线，越低越好）", padL + 62, padT - 8);
+    ctx.fillStyle = th.dim;
+    ctx.fillText(aLo.toFixed(0) + "%", 2, padT + ph);
+
+    ctx.restore();
+    return { points: pts.length, from: aLo, to: aHi };
+  }
+
   function drawColumns(canvas, columnStats, opts) {
     if (!canvas) return null;
     var o = opts || {};
@@ -1451,6 +1567,7 @@
     updateTimelineMark: updateTimelineMark,
     drawDensity: drawDensity,
     drawColumns: drawColumns,
+    drawTrend: drawTrend,
     // 返回解析后的主题色（opts 可省略）
     colors: function (opts) {
       return resolveTheme(opts);
