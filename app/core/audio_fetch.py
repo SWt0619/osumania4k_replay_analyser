@@ -17,7 +17,11 @@ lazer 把谱面和音频**各自**按内容哈希存进 `osu\\files\\`，同一�
    回放就会重试一次。失败条目 7 天后才允许重试。
 3. **只信任本地能验证的东西**：下下来的包必须真的含这张谱面 MD5 的 .osu 才接受，
    镜像站返回 200 但内容不对（换图、重传版本）时不写入缓存。
-4. **不碰用户目录**：只往 `_cache\\audio\\` 写，不往曲库或游戏目录放任何文件。
+4. **一次整包服务整个图集**：同一个图包里每个难度都是独立的 .osu、独立的 MD5。
+   只按当前 MD5 存一份的话，换个难度就要把同一个几十 MB 的包再下一次
+   （实测一个三难度的包被完整下了三次）。所以校验通过后顺手把包内每份 .osu
+   指向的音频都抽出来，按音频内容去重，同包换难度直接命中。
+5. **不碰用户目录**：只往 `_cache\\audio\\` 写，不往曲库或游戏目录放任何文件。
 """
 
 from __future__ import annotations
@@ -32,13 +36,15 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from . import config_store
-from .beatmap import AUDIO_EXTS, parse_osu_file
+from .beatmap import AUDIO_EXTS, _decode, parse_osu_file, parse_osu_text
 from ..version import __version__
 
-# 镜像按"国内可达性 + 稳定性"排序：sayobot 优先，其次两个国际站
+# 镜像按"国内可达性 + 稳定性"排序：sayobot 优先，其次两个国际站。
+# Referer 用 osu.sayobot.cn：www 与裸域名都不是镜像站本体（前者挂的是别人的证书，
+# 后者只是 nginx 默认页）。实测下载并不校验它，写上只是别把来源标错。
 MIRRORS = [
     ("sayobot", "https://dl.sayobot.cn/beatmaps/download/novideo/{sid}",
-     {"Referer": "https://sayobot.cn/"}),
+     {"Referer": "https://osu.sayobot.cn/"}),
     ("nerinyan", "https://api.nerinyan.moe/d/{sid}?nv=1", {}),
     ("mino", "https://catboy.best/d/{sid}", {}),
 ]
@@ -52,7 +58,13 @@ MIN_INTERVAL = 2.0                 # 两次请求之间至少隔这么久
 FAIL_TTL = 7 * 24 * 3600           # 失败条目多久后允许重试
 # 取音频的逻辑一旦改动就 +1：旧的失败记录自动失效，
 # 不然修好了 bug 用户还得等满 7 天（或者手动删索引）
-FETCH_VERSION = 2
+# v3：索引新增 sets（图集 → 各难度用哪份音频），同包换难度不再重下整包
+FETCH_VERSION = 3
+
+# 抽整个图的音频时给自己划的线：正常图集就一两首（多难度共用或分 cut 版），
+# 遇到塞了几十首的怪包就只留当前难度那份，别把用户磁盘吃满。
+MAX_HARVEST_FILES = 24
+MAX_HARVEST_BYTES = 300 * 1024 * 1024
 
 _last_request = 0.0
 # 同一时刻只允许一个线程去镜像站取。服务端是多线程的（ThreadingHTTPServer），
@@ -171,35 +183,62 @@ def _index_path(cache_dir: str) -> str:
     return os.path.join(cache_dir, "audio", "_index.json")
 
 
-def load_index(cache_dir: str) -> dict:
+def _read_index(cache_dir: str) -> dict:
+    """读完整索引。
+
+    items：谱面 MD5 → 这份难度用的音频（老结构，仍按它优先命中）
+    sets ：图集 id → {"at": 时间, "maps": {谱面 MD5: 音频文件}}，
+           一次下载后把包里所有难度都记下来，同包换难度不必再下一遍
+    """
     try:
         with open(_index_path(cache_dir), "r", encoding="utf-8") as f:
             data = json.load(f)
-        items = data.get("items")
-        return items if isinstance(items, dict) else {}
     except (OSError, ValueError):
-        return {}
+        return {"items": {}, "sets": {}}
+    items = data.get("items")
+    sets = data.get("sets")
+    return {
+        "items": items if isinstance(items, dict) else {},
+        "sets": sets if isinstance(sets, dict) else {},
+    }
 
 
-def save_index(cache_dir: str, items: dict) -> None:
+def load_index(cache_dir: str) -> dict:
+    return _read_index(cache_dir)["items"]
+
+
+def save_index(cache_dir: str, items: dict, sets: dict | None = None) -> None:
+    """写索引。sets 传 None 表示沿用文件里已有的那份，不覆盖。"""
     path = _index_path(cache_dir)
+    payload_sets = _read_index(cache_dir)["sets"] if sets is None else sets
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "items": items}, f, ensure_ascii=False)
+            json.dump({"version": 2, "items": items, "sets": payload_sets},
+                      f, ensure_ascii=False)
         os.replace(tmp, path)
     except OSError:
         pass
 
 
 def cached_audio(cache_dir: str, md5: str) -> str:
-    """缓存里已有的音频（顺手校验文件还在，用户可能清过缓存目录）。"""
+    """缓存里已有的音频（顺手校验文件还在，用户可能清过缓存目录）。
+
+    先看这份难度自己有没有记录，没有再翻图集表 —— 同一图包里别的难度下过整包时，
+    这份难度的音频其实已经在磁盘上了。
+    """
     key = (md5 or "").lower()
     if not key:
         return ""
-    item = load_index(cache_dir).get(key) or {}
-    name = item.get("file") or ""
+    data = _read_index(cache_dir)
+    name = (data["items"].get(key) or {}).get("file") or ""
+    if not name:
+        for rec in data["sets"].values():
+            maps = rec.get("maps") if isinstance(rec, dict) else None
+            if isinstance(maps, dict) and maps.get(key):
+                name = maps[key]
+                break
     if not name:
         return ""
     path = os.path.join(cache_dir, "audio", name)
@@ -284,11 +323,21 @@ def extract_audio(osz_path: str, wanted: str, out_base: str) -> str:
         return ""
 
 
-def _verify_osz(osz_path: str, md5: str) -> bool:
-    """包里的 .osu 里必须有一份能和这张回放的 MD5 对上，否则说明镜像给错了图。
+def _md5_variants(data: bytes) -> list[str]:
+    """一份 .osu 的几种 MD5 口径：原样、LF 归一、CRLF 归一。
 
-    osu! 的谱面 MD5 有两种口径（原样 / 换行归一），这里都算一遍再比。
+    回放里记的 MD5 可能来自 stable（原样）也可能来自 lazer（换行被归一过），
+    只比对一种会把同一张谱面判成两张。
     """
+    out = [hashlib.md5(data).hexdigest()]
+    lf = data.replace(b"\r\n", b"\n")
+    out.append(hashlib.md5(lf).hexdigest())
+    out.append(hashlib.md5(lf.replace(b"\n", b"\r\n")).hexdigest())
+    return out
+
+
+def _verify_osz(osz_path: str, md5: str) -> bool:
+    """包里的 .osu 里必须有一份能和这张回放的 MD5 对上，否则说明镜像给错了图。"""
     want = (md5 or "").lower()
     if not want:
         return True
@@ -297,17 +346,94 @@ def _verify_osz(osz_path: str, md5: str) -> bool:
             for name in z.namelist():
                 if not name.lower().endswith(".osu"):
                     continue
-                data = z.read(name)
-                if hashlib.md5(data).hexdigest() == want:
-                    return True
-                lf = data.replace(b"\r\n", b"\n")
-                if hashlib.md5(lf).hexdigest() == want:
-                    return True
-                if hashlib.md5(lf.replace(b"\n", b"\r\n")).hexdigest() == want:
+                if want in _md5_variants(z.read(name)):
                     return True
     except (OSError, zipfile.BadZipFile, KeyError):
         return False
     return False
+
+
+def _audio_filename_of(data: bytes) -> str:
+    """从 .osu 原文里读出 AudioFilename。解析不了的（坏文件、残缺包）给空串。"""
+    try:
+        return parse_osu_text(_decode(data)).audio_filename or ""
+    except Exception:  # noqa: BLE001 - 包里混进坏文件是常事，跳过即可
+        return ""
+
+
+def _extract_by_content(z: zipfile.ZipFile, name: str, audio_dir: str) -> tuple[str, int]:
+    """抽一个音频到缓存，按内容 MD5 命名（同一首被多个难度引用时只留一份）。
+
+    返回（文件名, 字节数）；失败返回（""，0）。
+    """
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in AUDIO_EXTS:
+        ext = ".mp3"
+    tmp = os.path.join(audio_dir, ".harvest.%d.%d.part" % (os.getpid(), threading.get_ident()))
+    digest = hashlib.md5()
+    size = 0
+    try:
+        with z.open(name) as src, open(tmp, "wb") as dst:
+            while True:
+                chunk = src.read(256 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                size += len(chunk)
+                dst.write(chunk)
+        out = os.path.join(audio_dir, digest.hexdigest() + ext)
+        if os.path.isfile(out):
+            os.remove(tmp)
+        else:
+            os.replace(tmp, out)
+        return os.path.basename(out), size
+    except (OSError, KeyError, zipfile.BadZipFile):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return "", 0
+
+
+def _harvest_audio(osz_path: str, audio_dir: str, want_md5: str) -> tuple[bool, dict]:
+    """把包里每份 .osu 指向的音频都抽出来，顺便校验这是不是我们要的图。
+
+    返回（包里有这张谱面, {谱面 MD5: 音频文件名}）。一次整包几十 MB 只服务一个
+    难度太亏，同包换难度时直接查这张表就能命中。
+    """
+    want = (want_md5 or "").lower()
+    maps: dict[str, str] = {}
+    picked: dict[str, str] = {}      # zip 内音频条目名 → 缓存文件名
+    total_bytes = 0
+    try:
+        with zipfile.ZipFile(osz_path) as z:
+            names = z.namelist()
+            for name in names:
+                if not name.lower().endswith(".osu"):
+                    continue
+                try:
+                    data = z.read(name)
+                except (OSError, KeyError, zipfile.BadZipFile):
+                    continue
+                audio_name = _audio_filename_of(data)
+                if not audio_name:
+                    continue
+                entry = _pick_audio(names, audio_name)
+                if not entry:
+                    continue
+                if entry not in picked:
+                    if len(picked) >= MAX_HARVEST_FILES or total_bytes >= MAX_HARVEST_BYTES:
+                        continue
+                    picked[entry], size = _extract_by_content(z, entry, audio_dir)
+                    total_bytes += size
+                file_name = picked.get(entry) or ""
+                if not file_name:
+                    continue
+                for digest in _md5_variants(data):
+                    maps[digest] = file_name
+    except (OSError, zipfile.BadZipFile):
+        return False, {}
+    return (not want) or (want in maps), maps
 
 
 # --------------------------------------------------------------------- 主流程
@@ -350,12 +476,12 @@ def _target_of(beatmap_path: str) -> tuple[str, str]:
     return audio_name, ("" if set_id in ("0", "-1") else set_id)
 
 
-def _download_from_mirrors(key: str, set_id: str, audio_name: str,
-                           audio_dir: str) -> tuple[str, str, str]:
-    """依次问每个镜像要一次包，成功返回（音频路径, 镜像名, ""），全失败返回（"", "", 错误）。
+def _download_from_mirrors(key: str, set_id: str,
+                           audio_dir: str) -> tuple[dict, str, str]:
+    """依次问每个镜像要一次包，成功返回（各难度音频表, 镜像名, ""），全失败返回（{}, "", 错误）。
 
-    每个镜像都走同一条验收：体积像样 → 包里真有这张谱面 → 真能抽出音频。
-    校验顺序不能反：先抽音频再校验的话，会给错图写进一份"看起来正常"的缓存。
+    每个镜像都走同一条验收：体积像样 → 包里真有这张谱面 → 音频真能抽出来。
+    验收和抽取是同一次遍历（`_harvest_audio`），顺便把同包其它难度的音频也留下。
     """
     # 临时文件名带 pid 与线程号：多开一个程序实例时也不会写到同一个文件里
     tag = "%d.%d" % (os.getpid(), threading.get_ident())
@@ -365,7 +491,7 @@ def _download_from_mirrors(key: str, set_id: str, audio_name: str,
     for attempt, (name, tpl, headers) in enumerate(MIRRORS, 1):
         # 总预算：三个镜像全挂时别让用户对着"正在补音频"等一分半
         if time.time() - started > BUDGET:
-            return "", "", last_err or "镜像都没能在 %d 秒内给回应" % BUDGET
+            return {}, "", last_err or "镜像都没能在 %d 秒内给回应" % BUDGET
         # 先把"正在连 sayobot（第 1 个镜像）"写出去：DNS + TLS 握手 + 等响应
         # 可能有一两秒完全没有字节，那一段最容易让人以为卡死。
         _progress_mark(key, stage="正在从 %s 下载" % name, mirror=name,
@@ -377,19 +503,19 @@ def _download_from_mirrors(key: str, set_id: str, audio_name: str,
         try:
             _get(tpl.format(sid=set_id), headers, sink=tmp_osz, on_bytes=_on_bytes)
             _progress_mark(key, stage="正在校验 %s 给的包" % name)
-            # 低于这个尺寸的只可能是错误页或空响应；真正的有效性靠下面的 _verify_osz
+            # 低于这个尺寸的只可能是错误页或空响应；真正的有效性靠下面的 _harvest_audio
             if not os.path.isfile(tmp_osz) or os.path.getsize(tmp_osz) < 128:
                 last_err = "%s 返回的是空包" % name
                 continue
-            if not _verify_osz(tmp_osz, key):
+            _progress_mark(key, stage="正在整理包里的音频")
+            ok, maps = _harvest_audio(tmp_osz, audio_dir, key)
+            if not ok:
                 last_err = "%s 给的包里没有这张谱面" % name
                 continue
-            _progress_mark(key, stage="正在抽取音频")
-            out = extract_audio(tmp_osz, audio_name, os.path.join(audio_dir, key))
-            if not out:
-                last_err = "%s 的包里没有音频" % name
+            if not maps.get(key):
+                last_err = "%s 的包里没有这张谱面的音频" % name
                 continue
-            return out, name, ""
+            return maps, name, ""
         except Exception as e:  # noqa: BLE001
             last_err = "%s：%s" % (name, e)
         finally:
@@ -398,7 +524,7 @@ def _download_from_mirrors(key: str, set_id: str, audio_name: str,
                     os.remove(tmp_osz)
             except OSError:
                 pass
-    return "", "", last_err or "所有镜像都失败了"
+    return {}, "", last_err or "所有镜像都失败了"
 
 
 def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> dict:
@@ -412,7 +538,7 @@ def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> d
         _progress_mark(key, stage="上次没取到，短期内不再重试", finished=True, ok=False, error=err)
         return {"ok": False, "path": "", "source": "", "error": err, "cached": False}
 
-    audio_name, set_id = _target_of(beatmap_path)
+    _audio_name, set_id = _target_of(beatmap_path)
 
     # 没有图集 id 就到此为止，不做「按 MD5 猜图集」。
     # 曾经试过 sayobot 的 ?K=<md5>，实测它根本不按 MD5 查：随便编一个 md5 都会返回
@@ -427,19 +553,28 @@ def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> d
 
     audio_dir = os.path.join(cache_dir, "audio")
     os.makedirs(audio_dir, exist_ok=True)
-    out, source, last_err = _download_from_mirrors(key, set_id, audio_name, audio_dir)
-    if out:
+    maps, source, last_err = _download_from_mirrors(key, set_id, audio_dir)
+    file_name = (maps or {}).get(key) or ""
+    if file_name:
+        path = os.path.join(audio_dir, file_name)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
         items[key] = {
             "v": FETCH_VERSION,
-            "file": os.path.basename(out),
+            "file": file_name,
             "source": source,
             "at": time.time(),
             "setId": set_id,
-            "size": os.path.getsize(out),
+            "size": size,
         }
-        save_index(cache_dir, items)
+        # 同一张表按图集存一份：之后换这个包里别的难度，直接命中，不再下整包
+        sets = _read_index(cache_dir)["sets"]
+        sets[set_id] = {"at": time.time(), "maps": maps}
+        save_index(cache_dir, items, sets)
         _progress_mark(key, stage="完成", finished=True, ok=True)
-        return {"ok": True, "path": out, "source": source, "error": "", "cached": False}
+        return {"ok": True, "path": path, "source": source, "error": "", "cached": False}
 
     items[key] = {"v": FETCH_VERSION, "failed": True, "at": time.time(), "error": last_err}
     save_index(cache_dir, items)
@@ -448,11 +583,14 @@ def _fetch_locked(beatmap_path: str, key: str, cache_dir: str, force: bool) -> d
 
 
 def test_mirrors() -> list[dict]:
-    """量一次本机到各镜像站的响应时间（毫秒），给设置页的「测试连接」用。
+    """量一次本机到各镜像站的可用性与响应时间（毫秒），给设置页的「测试连接」用。
 
-    对同一个下载地址发 HEAD：要的是"连得上、回话多快"，不是把整包拉下来。
-    服务器回 4xx / 5xx 也算连通 —— DNS、TLS、HTTP 这一路是通的，
-    真正能不能下到包由补音频自己的校验决定。
+    以前发的是 HEAD：有的站不支持（405），有的站在风控直接 403，全被当成"连通"，
+    界面上就显示成一个正常延迟，实际补音频根本下不了。现在按真实下载走一遍
+    GET + `Range: bytes=0-1023`，只读 1KB 就断开 —— 路径和补音频完全一致，
+    下不动的站会如实标出来。
+
+    返回每项：ok（真能下）、reachable（连得上但也许被拒）、status、ms、error。
     三个站并行问，总耗时约等于最慢的那个。
     """
     results: list[dict] = []
@@ -461,23 +599,32 @@ def test_mirrors() -> list[dict]:
 
     def probe(name: str, tpl: str, extra: dict) -> None:
         started = time.perf_counter()
-        ok, error, status = False, "", 0
-        headers = {"User-Agent": _user_agent(), "Accept": "*/*"}
+        ok, reachable, error, status = False, False, "", 0
+        headers = {"User-Agent": _user_agent(), "Accept": "*/*", "Range": "bytes=0-1023"}
         if extra:
             headers.update(extra)
         try:
-            req = Request(tpl.format(sid="1"), headers=headers, method="HEAD")
+            req = Request(tpl.format(sid="1"), headers=headers)
             with urlopen(req, timeout=LATENCY_TIMEOUT) as resp:
                 status = int(getattr(resp, "status", 0) or 200)
-            ok = True
+                reachable = True
+                ok = 200 <= status < 300
+                if ok:
+                    # 读了才算真给数据：只回一个空壳（Content-Length: 0）同样下不了
+                    if not resp.read(1024):
+                        ok, error = False, "有回应但没有数据"
+                else:
+                    error = "拒绝访问（HTTP %d）" % status
         except HTTPError as e:
             status = int(e.code or 0)
-            ok = True
+            reachable = True
+            error = "拒绝访问（HTTP %d）" % status if status else "请求被拒绝"
         except Exception as e:  # noqa: BLE001 - 测速失败只是结果之一，不该抛给调用方
             error = str(e) or type(e).__name__
         ms = int(round((time.perf_counter() - started) * 1000))
         with lock:
-            results.append({"name": name, "ms": ms, "ok": ok, "status": status, "error": error})
+            results.append({"name": name, "ms": ms, "ok": ok, "reachable": reachable,
+                            "status": status, "error": error})
 
     threads = [
         threading.Thread(target=probe, args=(name, tpl, headers), daemon=True)
@@ -495,7 +642,7 @@ def test_mirrors() -> list[dict]:
         for name, _, _ in MIRRORS:
             if name not in known:
                 results.append({
-                    "name": name, "ms": waited, "ok": False, "status": 0,
+                    "name": name, "ms": waited, "ok": False, "reachable": False, "status": 0,
                     "error": "等待回应超时（DNS 解析或握手没能完成）",
                 })
     # 按 MIRRORS 的顺序返回：谁先回来不该影响结果表的顺序
@@ -505,11 +652,28 @@ def test_mirrors() -> list[dict]:
 
 
 def stats(cache_dir: str) -> dict:
-    items = load_index(cache_dir)
-    files = [v for v in items.values() if v.get("file")]
+    """缓存占用。同一份音频会被同包的多个难度共用，按文件名去重后再加总。"""
+    data = _read_index(cache_dir)
+    audio_dir = os.path.join(cache_dir, "audio")
+    names: set[str] = set()
+    for item in data["items"].values():
+        if item.get("file"):
+            names.add(item["file"])
+    for rec in data["sets"].values():
+        maps = rec.get("maps") if isinstance(rec, dict) else None
+        if isinstance(maps, dict):
+            names.update(v for v in maps.values() if v)
+    total = 0
+    alive = 0
+    for name in names:
+        try:
+            total += os.path.getsize(os.path.join(audio_dir, name))
+            alive += 1
+        except OSError:
+            continue
     return {
-        "count": len(files),
-        "bytes": sum(int(v.get("size") or 0) for v in files),
-        "failed": len([v for v in items.values() if v.get("failed")]),
+        "count": alive,
+        "bytes": total,
+        "failed": len([v for v in data["items"].values() if v.get("failed")]),
         "enabled": is_enabled(cache_dir),
     }
