@@ -494,25 +494,28 @@
         li.appendChild(btn);
       }
 
-      // 同一段还能直接做成练习谱面：裁到整八拍、速度与音频一起降速、前面补 3 秒空白。
+      // 同一段还能直接做成练习谱面：裁到整八拍、速度与音频一起改、前面补 3 秒空白。
       // 倍率跟着建议走：Reform 10 及以下只有 0.9，Alpha 以上是两档（0.95/0.9 或 0.96/0.92），
-      // 每档一个按钮，按哪个就是哪张谱面。
+      // 每档一个按钮，按哪个就是哪张谱面。降速版叫 Slice、提速版叫 Rate（难度名前缀）。
       const rates = a.rates || (a.rate ? [a.rate] : []);
       // 全曲提速建议没有 timeRange，靠 fullMap 标记
       if ((a.timeRange || a.fullMap) && rates.length && data.session && window.Practice) {
         rates.forEach((r) => {
           const rate = Number(r) || 0.9;
+          const up = rate > 1;
+          const label = window.Practice.rateLabel ? window.Practice.rateLabel(rate) : "Slice" + rate;
           const cut = el("button", "adv-cut",
-            "生成 Slice" + rate + "（" + rate.toFixed(2) + "×）");
+            "生成 " + label + "（" + rate.toFixed(2) + "×）");
           cut.type = "button";
-          cut.title = "裁到整八拍、连音频一起降到 " + rate.toFixed(2) +
-            "×，生成可直接并进原图包的 .osz";
+          cut.title = up
+            ? "整曲提到 " + rate.toFixed(2) + "×（不裁段），生成可直接并进原图包的 .osz"
+            : "裁到整八拍、连音频一起降到 " + rate.toFixed(2) + "×，生成可直接并进原图包的 .osz";
           cut.addEventListener("click", () => window.Practice.generate(data, a, cut, rate));
           li.appendChild(cut);
         });
       }
 
-      // 需要降速的建议：每一档都算一次段位，让用户自己挑要哪个速度
+      // 需要改倍速的建议：每一档都算一次段位，让用户自己挑要哪个速度
       rates.forEach((r) => {
         const line = rateLine(r, data);
         if (line) li.appendChild(line);
@@ -542,11 +545,14 @@
     ]).then(([slow, cur]) => {
       if (!slow || !slow.ok) { line.remove(); return; }
       let text;
+      // 提速建议显示「提到」，降速建议显示「降到」，别让同一句话在两种场景下自相矛盾
+      const verb = target > now + 1e-9 ? "提到" : "降到";
       if (cur && cur.ok && cur.label === slow.label) {
-        // 段位没变说明这张图「降速也不会简单多少」，练它不如换张图——这本身是信息
-        text = target.toFixed(2) + "× 与当前都是 " + slow.label + "，降速不会让它明显变简单";
+        // 段位没变说明这一档改写对难度评价没影响，练它不如换张图——这本身是信息
+        text = target.toFixed(2) + "× 与当前都是 " + slow.label +
+          (target > now + 1e-9 ? "，提速不会让它明显变难" : "，降速不会让它明显变简单");
       } else {
-        text = "降到 " + target.toFixed(2) + "× 大约是 " + slow.label;
+        text = verb + " " + target.toFixed(2) + "× 大约是 " + slow.label;
         if (cur && cur.ok) text += "（当前 " + now.toFixed(2) + "× 是 " + cur.label + "）";
       }
       line.textContent = text;
@@ -765,6 +771,8 @@
       cover.target = "_blank";
       cover.rel = "noopener noreferrer";
       cover.title = "点击封面下载 " + (it.title || "") + "（.osz）";
+      // 和随机找图同一套下载器：分段并发，失败退回直链
+      if (window.MapDownload) window.MapDownload.attach(cover, it.downloadUrl, it);
 
       const img = document.createElement("img");
       // 封面按图集 id 拼，和随机找图同一个 CDN；断网时退成渐变底色
