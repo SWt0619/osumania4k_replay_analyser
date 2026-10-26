@@ -560,6 +560,7 @@ canvas { display: block; }
 #catCard { grid-column: span 5; }
 #histCard { grid-column: span 7; }
 #adviceCard { grid-column: span 5; }
+#progressCard { grid-column: span 12; }
 #metaCard { grid-column: span 12; }
 #similarCard { grid-column: span 12; }
 
@@ -746,6 +747,44 @@ canvas { display: block; }
 .advice-list p { font-size: 12.6px; color: var(--ink); line-height: 1.7; }
 .advice-list .adv-tag {
   font-size: 10.5px; color: var(--faint); margin-left: 6px; font-weight: 400;
+}
+/* 第一条标「先做这个」：建议只留三条，得让人一眼知道从哪条开始 */
+.advice-list .adv-rank {
+  display: inline-block; margin-left: 8px; padding: 1px 6px; border-radius: 5px;
+  font-size: 10px; font-weight: 700; letter-spacing: .02em;
+  color: #0b0d19; background: linear-gradient(135deg, var(--accent-2), #8ff0ff);
+}
+.advice-list li.is-first { border-color: rgba(124, 92, 255, .5); }
+/* 同类里被合并掉的那几条，降级成子项 */
+.advice-list .adv-subs {
+  margin: 6px 0 0; padding-left: 16px; list-style: disc;
+  font-size: 12px; color: var(--dim); line-height: 1.7;
+}
+.advice-list .adv-subs li { padding: 0; background: none; border: 0; }
+.advice-list .adv-subs li:hover { transform: none; background: none; }
+.advice-list .adv-subs li::before { content: none; }
+/* 「跳到 1:12 看这段」：建议里的时间点应该能直接跳过去 */
+.adv-jump {
+  margin-top: 8px; padding: 4px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid rgba(124, 92, 255, .38);
+  background: rgba(124, 92, 255, .12);
+  color: var(--accent-2); font-size: 11.5px; font-weight: 600;
+  transition: background .16s ease, border-color .16s ease;
+}
+.adv-jump:hover { background: rgba(124, 92, 255, .22); border-color: rgba(124, 92, 255, .6); }
+/* 同一段直接生成练习谱面：动作比「跳过去看」重，用另一个颜色分开 */
+.adv-cut {
+  margin-top: 8px; margin-left: 8px; padding: 4px 10px; border-radius: 8px; cursor: pointer;
+  border: 1px solid rgba(52, 211, 153, .38);
+  background: rgba(52, 211, 153, .12);
+  color: #34d399; font-size: 11.5px; font-weight: 600;
+  transition: background .16s ease, border-color .16s ease, opacity .16s ease;
+}
+.adv-cut:hover { background: rgba(52, 211, 153, .22); border-color: rgba(52, 211, 153, .6); }
+.adv-cut:disabled { opacity: .45; cursor: default; }
+/* 降速建议附带的 0.9× 段位估算 */
+.adv-rate {
+  margin-top: 6px; font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums;
 }
 
 /* ---------------------------------------------------------------- KV 表 */
@@ -1812,6 +1851,10 @@ html[data-motion="off"] .pbar.is-indeterminate > i {
 .anchor-stat { font-size: 12.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
 .anchor-note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--faint); }
 .anchor-empty { font-size: 12.5px; margin: 0; }
+
+/* ---------------------------------------------------------------- 本图走势 */
+#progressCard .chart { margin-top: 6px; }
+#progressCard #progressLine { margin: 0 0 2px; font-size: 12.5px; }
 
 .anchor-vibro {
   margin: 10px 0 0; padding: 7px 10px; border-radius: 9px; font-size: 11.5px;
