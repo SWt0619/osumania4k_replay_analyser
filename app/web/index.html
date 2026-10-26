@@ -441,12 +441,15 @@
         </div>
         <canvas id="chartRadar" height="380"></canvas>
       </article>
-      <article class="card glass" id="msdScaleCard">
+      <article class="card glass" id="anchorCard">
         <div class="card-head">
-          <h2>段位标尺</h2>
-          <p class="muted">Reform段位MSD对照表，仅供参考</p>
+          <h2>锚度</h2>
+          <p class="muted">仅反映同轨连续结构的密度，不代表难度，也不严格等同于卡手程度</p>
         </div>
-        <div class="msd-scale" id="msdScale"></div>
+        <div class="card-body">
+          <div class="anchor-current" id="anchorCurrent" hidden></div>
+          <p class="anchor-vibro" id="anchorVibro" hidden>vibro 图的锚度没有参考价值</p>
+        </div>
       </article>
     </div>
 
@@ -798,7 +801,7 @@
               <span>MinaCalc：MSD 难度分与七维雷达图</span>
             </li>
             <li>
-              <a href="https://www.sayobot.cn" target="_blank" rel="noreferrer noopener">sayobot</a>
+              <a href="https://osu.sayobot.cn" target="_blank" rel="noreferrer noopener">sayobot</a>
               <span>谱面镜像站。本地没有音频时从这里补一份，取不到再试 nerinyan、catboy；只在缺音频且开关打开时联网</span>
             </li>
             <li>
@@ -816,6 +819,14 @@
             <li>
               <a href="https://thebagelofman.github.io/Daniel/" target="_blank" rel="noreferrer noopener">Daniel</a>
               <span>Daniel 难度算法，作为 Azusa 与 Roxy 的输入之一</span>
+            </li>
+            <li>
+              <a href="https://github.com/AkutaZehy/osumania_estimator" target="_blank" rel="noreferrer noopener">osumania_estimator</a>
+              <span>借鉴了部分公开算法优化长条判定逻辑</span>
+            </li>
+            <li>
+              <a href="https://guanjingscene.xyz/" target="_blank" rel="noreferrer noopener">魔女的观景台</a>
+              <span>锚度的灵感来源</span>
             </li>
           </ul>
         </div>
