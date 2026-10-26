@@ -243,6 +243,19 @@
           </div>
         </article>
 
+        <article class="card glass" id="progressCard" hidden>
+          <div class="card-head">
+            <h2>本图走势</h2>
+            <div class="card-tools">
+              <span class="tag" id="progressMeta">—</span>
+            </div>
+          </div>
+          <div class="card-body">
+            <p class="muted" id="progressLine"></p>
+            <canvas id="chartProgress" class="chart" height="180"></canvas>
+          </div>
+        </article>
+
         <article class="card glass" id="similarCard" hidden>
           <div class="card-head">
             <h2>相似谱面</h2>
@@ -1102,6 +1115,7 @@
 <script src="/static/js/player.js?v=__ASSET_V__"></script>
 <script src="/static/js/api.js?v=__ASSET_V__"></script>
 <script src="/static/js/ui.js?v=__ASSET_V__"></script>
+<script src="/static/js/practice.js?v=__ASSET_V__"></script>
 <script src="/static/js/main.js?v=__ASSET_V__"></script>
 <!-- 段位估算器：ES 模块，内部 import vendor/mma 下的 Sunny 实现。
      放在最后且异步加载——它只影响难度页那一行文字，缺了也不影响其他功能。 -->
