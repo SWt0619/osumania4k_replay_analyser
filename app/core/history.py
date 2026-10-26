@@ -503,6 +503,56 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return out
 
 
+def same_beatmap(md5: str, rate: float | None = None, limit: int = 10,
+                 path: str | None = None, only_me: bool = True,
+                 owner: str | None = None) -> list[dict]:
+    """同一张谱面的历史对局，按游玩时间正序（最老的在前），给报告的走势图用。
+
+    只取同一倍率的记录：1.0× 和 1.2× 的准确率放到一条线上比没有意义，
+    UR 更没法比。倍率传 None 时不过滤（调用方自己保证口径一致）。
+
+    也只取**自己的**记录：别人发来的回放同样会入库，混进来就成了「上次 100%，
+    这次 97%」这种根本不是你打的对照。判定按 player 列比名字（.osr 里只有名字，
+    没有账号 id）；player 为空的行是回放里没写名字的旧记录，判断不了就留着，
+    真正要挡的是明确写了别人名字的那些。owner 没给时取设置里的玩家名，
+    两者都没有就不过滤——没名字时任何过滤都只是瞎猜。
+    """
+    key = (md5 or "").strip().lower()
+    if not key:
+        return []
+    me = (configured_player() if owner is None else owner) or ""
+    me = me.strip()
+    sql = ("SELECT id, played_at, accuracy, ur, max_combo, counts, rate, score, "
+           "pattern_label, categories FROM sessions WHERE lower(beatmap_md5) = ?")
+    args: list = [key]
+    if rate is not None:
+        sql += " AND abs(COALESCE(rate, 1.0) - ?) < 0.001"
+        args.append(float(rate))
+    if only_me and me:
+        sql += " AND (player IS NULL OR TRIM(player) = '' OR LOWER(TRIM(player)) = LOWER(?))"
+        args.append(me)
+    sql += " ORDER BY played_at DESC, id DESC LIMIT ?"
+    args.append(max(1, int(limit)))
+    try:
+        with _db(path) as conn:
+            rows = conn.execute(sql, args).fetchall()
+    except sqlite3.Error:
+        return []
+    out = []
+    for row in reversed(rows):          # 反转让最老的排前面，折线图左→右是时间顺序
+        d = _row_to_dict(row)
+        out.append({
+            "at": d.get("played_at"),
+            "acc": round(float(d.get("accuracy") or 0), 2),
+            "ur": round(float(d.get("ur") or 0), 1),
+            "maxCombo": int(d.get("max_combo") or 0),
+            "score": int(d.get("score") or 0),
+            "counts": d.get("counts") or {},
+            "categories": d.get("categories") or {},
+        })
+    return out
+
+
 def recent(limit: int = 50, path: str | None = None) -> list[dict]:
     """最近几局，按游玩时间倒序。只给后续功能用，当前没有页面入口。"""
     try:
