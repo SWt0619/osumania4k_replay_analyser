@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import mimetypes
 import os
@@ -20,7 +21,9 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
+import uuid
 import webbrowser
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,14 +35,17 @@ from app.core import (  # noqa: E402
     audio_fetch,
     config_store,
     crashreport,
+    dan,
     finder,
     history,
     hotkey,
     json_safe,
     osu_dirs,
+    practice,
     progress,
     quick_import,
     recommend,
+    report,
 )
 from app.core.analyze import (  # noqa: E402
     SUPPORTED_KEYS,
@@ -49,7 +55,7 @@ from app.core.analyze import (  # noqa: E402
     set_msd_cache_path,
     unsupported_keys_message,
 )
-from app.core.beatmap import parse_osu_file  # noqa: E402
+from app.core.beatmap import parse_osu_file, parse_osu_text  # noqa: E402
 from app.core import library as library_mod  # noqa: E402
 from app.core.library import default_songs_roots, get_library, reset_library, set_cache_path  # noqa: E402
 from app.core.osr import OsrError  # noqa: E402
@@ -1209,6 +1215,154 @@ class _AudioApiMixin(_SessionView):
                            "stats": audio_fetch.stats(CACHE_DIR)})
 
 
+# ---------------------------------------------------------------- 练习谱面
+# 一次「练这一段」的中间结果：算好的 .osu 文本 + 音频路径，等浏览器把变速后的 WAV
+# 送回来再打包。它是临时票据不是缓存，所以只活一小时、最多留 20 条。
+_CUTS: dict[str, dict] = {}
+_CUT_TTL = 3600
+_CUT_MAX = 20
+
+
+def _prune_cuts() -> None:
+    now = time.time()
+    for key in [k for k, v in _CUTS.items() if now - v["at"] > _CUT_TTL]:
+        _CUTS.pop(key, None)
+    while len(_CUTS) > _CUT_MAX:
+        oldest = min(_CUTS.items(), key=lambda kv: kv[1]["at"])[0]
+        _CUTS.pop(oldest, None)
+
+
+class _PracticeMixin(_SessionView):
+    """练习谱面：谱面在服务端裁，音频变速在浏览器里做。
+
+    为什么音频不在这里做：本项目没有解码 mp3 / ogg 的能力（纯标准库、不带 ffmpeg），
+    而浏览器天生能解。服务端只负责算好谱面与取音区间、收 WAV、打成 .osz。
+    """
+
+    def report_advice(self):
+        """按页面上那个段位重算建议。
+
+        分析接口返回时估算还没跑（估算器是前端 JS），建议里的练习倍率只能先按
+        MSD 兜底；前端算完 Sunny → Azusa → Roxy 把标签传回来，这里只重算 advice，
+        不动报告其余部分。
+        """
+        req = _parse_json(self._read_body()) or {}
+        sess = self._session(str(req.get("session") or ""))
+        if not sess:
+            return self._error("会话已过期，请重新分析", 404)
+        payload = sess.get("analysis") or {}
+        if not payload:
+            return self._error("这份会话没有分析结果", 409)
+        label = str(req.get("label") or "").strip()
+        value = dan.from_label(label) if label else None
+        acc_v1 = payload.get("accuracyV1")
+        try:
+            ev = report.build_evaluation(payload, value)
+        except Exception as e:  # noqa: BLE001 - 重算失败就保持首屏那份
+            return self._error("重算建议失败：%s" % e, 500)
+        return self._json({
+            "ok": True,
+            "label": label,
+            "dan": value,
+            "rates": report._practice_rates(payload, value, acc_v1),
+            "advice": ev.get("advice") or [],
+        })
+
+    def practice_cut(self):
+        req = _parse_json(self._read_body()) or {}
+        sess = self._session(str(req.get("session") or ""))
+        if not sess:
+            return self._error("会话已过期，请重新分析", 404)
+        path = sess.get("beatmapPath") or ""
+        if not path or not os.path.isfile(path):
+            return self._error("找不到这张谱面的文件", 404)
+        try:
+            t0 = float(req.get("t0"))
+            t1 = float(req.get("t1"))
+        except (TypeError, ValueError):
+            return self._error("缺少要裁切的时间段", 400)
+        # 固定 0.9× 一档：之前按「降 1 / 2 个半音」做的两档，0.94× 听感上几乎和原速
+        # 没差，练起来没意义，所以只留这一档，前端也只有一个按钮。
+        try:
+            rate = float(req.get("rate") or 0.9)
+        except (TypeError, ValueError):
+            rate = 0.9
+        if not 0.5 <= rate <= 2.0:
+            return self._error("倍率超出范围（0.5~2.0）", 400)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as e:
+            return self._error("读取谱面失败：%s" % e, 500)
+        try:
+            out = practice.cut(text, t0, t1, rate=rate, full=bool(req.get("full")))
+        except ValueError as e:
+            return self._error(str(e), 400)
+
+        # 音频优先取同目录同捆的那份；lazer 的 files 存储会把它拆走，
+        # 这时退到补音频缓存（同一图包下过整包的音频也在那里）。
+        audio = ""
+        md5 = ""
+        try:
+            bm = parse_osu_text(text, path)
+            md5 = bm.md5 or ""
+            audio = bm.audio_path
+        except Exception:
+            audio = ""
+        if not audio:
+            try:
+                audio = audio_fetch.cached_audio(CACHE_DIR, md5)
+            except Exception:
+                audio = ""
+        if not audio or not os.path.isfile(audio):
+            return self._error("这张谱面的音频不在本地，无法变速；先在设置里补一次音频再试", 409)
+
+        cid = uuid.uuid4().hex[:16]
+        _CUTS[cid] = {"text": out["text"], "audio": audio, "meta": out, "at": time.time()}
+        _prune_cuts()
+        payload = {k: v for k, v in out.items() if k != "text"}
+        payload.update({
+            "ok": True,
+            "cutId": cid,
+            "osuText": out["text"],
+            "audioUrl": "/api/practice/audio?cut=" + cid,
+            "packUrl": "/api/practice/pack?cut=" + cid,
+        })
+        log("[practice] 裁切 %s → %d 个物件，%s–%s" % (
+            os.path.basename(path), out["objects"], int(t0), int(t1)))
+        return self._json(payload)
+
+    def practice_audio(self, qs):
+        cid = (qs.get("cut") or [""])[0]
+        item = _CUTS.get(cid)
+        if not item:
+            return self._error("这次生成的练习谱面已过期，请重新生成", 404)
+        try:
+            with open(item["audio"], "rb") as f:
+                body = f.read()
+        except OSError as e:
+            return self._error("读取音频失败：%s" % e, 500)
+        ctype = mimetypes.guess_type(item["audio"])[0] or "application/octet-stream"
+        self._send(200, body, ctype)
+
+    def practice_pack(self, qs):
+        cid = (qs.get("cut") or [""])[0]
+        item = _CUTS.get(cid)
+        if not item:
+            return self._error("这次生成的练习谱面已过期，请重新生成", 404)
+        wav = self._read_body(limit=64 * 1024 * 1024)
+        if len(wav) < 44 or wav[:4] != b"RIFF":
+            return self._error("音频数据无效（不是 WAV）", 400)
+        meta = item["meta"]
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+            z.writestr(meta["fileName"][:-4] + ".osu", item["text"].encode("utf-8"))
+            z.writestr(meta["audioName"], wav)
+        body = buf.getvalue()
+        log("[practice] 打包 %s（%.1f MB）" % (meta["fileName"], len(body) / 1048576.0))
+        self._send(200, body, "application/octet-stream")
+
+
 class _ChunkUploadMixin:
     """分片上传（兜底通道）：把回放切成小片逐个发。
 
@@ -1292,8 +1446,8 @@ class _ChunkUploadMixin:
                 pass
 
 
-class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _AssetMixin,
-              BaseHTTPRequestHandler):
+class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _PracticeMixin,
+              _AssetMixin, BaseHTTPRequestHandler):
     """HTTP 传输层：路由、响应头、错误码、日志。
 
     业务分在四个 mixin 里，这个类只负责"怎么收发"与"往哪儿转"：
@@ -1444,6 +1598,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                                "stale": stale_code(),
                                # 快捷导入的热键状态：没注册上时页面要能说清原因
                                "hotkey": hotkey.status()})
+        if path == "/api/practice/audio":
+            return self.practice_audio(qs)
         if path == "/api/beatmap-text":
             return self._beatmap_text(qs)
         if path == "/api/paths":
@@ -1549,6 +1705,12 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _A
                 return self._history_dan(_parse_json(self._read_body()) or {})
             if path == "/api/beatmap-meta":
                 return self._beatmap_meta()
+            if path == "/api/report/advice":
+                return self.report_advice()
+            if path == "/api/practice/cut":
+                return self.practice_cut()
+            if path == "/api/practice/pack":
+                return self.practice_pack(qs)
             if path == "/api/chart":
                 return self._chart_only()
             if path == "/api/recommend":
