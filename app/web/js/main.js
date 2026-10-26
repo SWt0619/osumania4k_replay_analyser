@@ -378,6 +378,8 @@
       draw("chartHist", (c) =>
         Charts.drawHistogram(c, d.offsetHistogram, { theme, width: c.clientWidth, height: 200, median: d.summary.medianDelta })
       );
+      // 本图走势：数据在 ui.js 里，切页/改窗口时按当前宽度重画
+      if (window.UI.drawProgressChart) window.UI.drawProgressChart();
     }
     if (tab === "timeline") {
       draw("chartTimeline", (c) =>
@@ -3888,6 +3890,11 @@
     bindFolds();
     bindEvents();
     bindProgress();
+    // 建议里的「跳到 1:12 看这一段」：切到回放页并跳过去，自动开始播
+    window.UI.setSeek((ms) => {
+      switchTab("replay");
+      seekTo(ms, true);
+    });
     setPlayIcon(false);
     loadPrefs();
     applyTheme(state.theme);
