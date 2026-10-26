@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from types import SimpleNamespace
 
-from . import attribution, dan, msd, patterns, report
+from . import anchor, attribution, dan, msd, patterns, report
 from .beatmap import JUDGEMENT_LABEL, Beatmap, long_path, parse_osu_file
 from .library import get_library
 from .match import (
@@ -1159,14 +1159,16 @@ def _pair(beatmap: Beatmap, presses, releases, algo: str = "C") -> MatchResult:
 
 
 def _build_contexts(beatmap: Beatmap):
-    """每音符上下文 + 分块粗分类。
+    """每音符上下文 + 分块粗分类 + 段落级细分键型。
 
     必须先分块再 classify：先分块定大方向（叠 / 乱 / 切 / tech），
-    再让每个音符在所属大类内挑细分键型，单个音符的抖动就改不了结论。
+    再让每个音符在所属大类内挑细分，最后用块内众数把细分抬到段落级——
+    玩家的键型说法是「这段是 jumpstream」，不是「这个音符是 jump」。
     """
     contexts = patterns.build_context(beatmap)
     blocks = patterns.build_blocks(contexts, beatmap.keys, [o.is_hold for o in beatmap.objects])
     patterns.assign_coarse(contexts, blocks)
+    patterns.assign_subpattern(contexts, blocks)
     return contexts, blocks
 
 
@@ -1222,6 +1224,7 @@ def analyze_chart(osu_path: str) -> dict:
         ],
         "patternDetail": detail,
         "mapClass": _map_class(detail, bm["holds"], bm["notes"]),
+        "anchor": anchor.compute(contexts, anchor.kind_of(detail)),
         "blocks": [
             {
                 "start": round(b.start_time),
@@ -1237,7 +1240,7 @@ def analyze_chart(osu_path: str) -> dict:
 
 
 def _beatmap_facts(beatmap: Beatmap, blocks, pattern_detail: list[dict],
-                   beatmap_payload: dict, replay: Replay) -> dict:
+                   beatmap_payload: dict, replay: Replay, contexts=None) -> dict:
     """与判定口径无关的谱面侧内容：分段、键型构成、整图大类、MSD。
 
     单独一段是因为这些字段只依赖谱面，两套判定视图共用同一份；
@@ -1271,6 +1274,8 @@ def _beatmap_facts(beatmap: Beatmap, blocks, pattern_detail: list[dict],
         "mapClass": _map_class(pattern_detail, beatmap_payload["holds"], beatmap_payload["notes"]),
         # 谱面难度（MinaCalc MSD）：与回放无关，纯看谱面；页面上画成雷达图
         "msd": msd_for(replay.beatmap_md5, beatmap),
+        # 锚度只在叠 / 切两个大类下有意义，其它键型给 None
+        "anchor": anchor.compute(contexts, anchor.kind_of(pattern_detail)) if contexts else None,
     }
 
 
@@ -1345,7 +1350,7 @@ def analyze(
         "warnings": [w for w in [warn] if w],
         "replay": _replay_block(replay, verify, column_order),
         "beatmap": beatmap_payload,
-        **_beatmap_facts(beatmap, blocks, pattern_detail, beatmap_payload, replay),
+        **_beatmap_facts(beatmap, blocks, pattern_detail, beatmap_payload, replay, contexts),
     }
 
     judge_default = detect_judge_mode(replay.version, replay.mods, replay.score_info)
