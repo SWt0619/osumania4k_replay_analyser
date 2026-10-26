@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from . import dan
 from .labels import CATEGORY_LABEL
 
 
@@ -18,6 +19,55 @@ def _f(v, default=0.0) -> float:
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+# 段位 → 练习倍率。高段位 0.9 太慢（读图靠速度记忆，慢到 0.9 反而对不上），
+# 但 0.95 又几乎没降，所以 Alpha 以上给两档让用户自己挑：先用慢的过顺、再上快的收速度。
+# Delta（14）及以上再把两档往上抬一点。
+RATE_TIERS = (
+    (14.0, (0.96, 0.92)),   # Delta 及以上
+    (11.0, (0.95, 0.9)),    # Alpha ~ Gamma
+)
+DEFAULT_RATES = (0.9,)
+
+# 成绩撑不住就降速、撑得住就提速。98.5% 是「这套已经打穿」的线：再降速只是重复劳动，
+# 不如把余量用掉——注意这条线看的是 **v1 口径**，切到 v2 / classic 也不能跟着动。
+FAST_ACC = 98.5
+FAST_TIERS = (
+    (14.0, (1.05,)),        # Delta 及以上只留 1.05，1.1 已经超出能练的范围
+    (11.0, (1.05, 1.1)),    # Alpha ~ Gamma
+)
+FAST_DEFAULT = (1.1,)
+
+
+def _practice_rates(payload: dict, dan_value: float | None = None,
+                    acc_v1: float | None = None) -> list[float]:
+    """练习谱面用哪几个倍率，从慢到快。
+
+    `dan_value` 由前端把混合估算链（Sunny → Azusa → Roxy）的结果传上来——那才是
+    页面上显示的段位。只有拿不到时才退回 MSD 换算：两套口径在个别图上能差半档到
+    两段，用 MSD 顶替会在边界图上给出和页面不一致的倍率。
+    """
+    if dan_value is None:
+        msd = payload.get("msd") or {}
+        info = msd.get("dan")
+        if not isinstance(info, dict):
+            overall = _f(msd.get("overall"))
+            info = dan.estimate(overall) if overall > 0 else {}
+        raw = info.get("dan")
+        dan_value = float(raw) if raw is not None else None
+    fast = acc_v1 is not None and float(acc_v1) >= FAST_ACC
+    if dan_value is None:
+        return list(FAST_DEFAULT if fast else DEFAULT_RATES)
+    for floor, rates in (FAST_TIERS if fast else RATE_TIERS):
+        if float(dan_value) >= floor:
+            return list(rates)
+    return list(FAST_DEFAULT if fast else DEFAULT_RATES)
+
+
+def _rates_text(rates: list[float]) -> str:
+    """0.9 → "0.9"，[0.95, 0.9] → "0.9 / 0.95"（给正文用，从慢到快）。"""
+    return " / ".join("%g" % r for r in sorted(rates))
 
 
 def _grade(acc: float, ur: float, error_rate: float) -> tuple[str, str]:
@@ -161,27 +211,125 @@ def _pattern_sentence(payload: dict) -> tuple[str, str]:
 
 
 def _density_ceiling(payload: dict) -> str:
-    """密度与失误的关系（只说这张图，"最密那段"具体在哪由调用方另说）。
+    """密度与失误的关系。
 
-    这里刻意不说「你的稳定上限是 X NPS」：同样的 NPS、键型不同难度可以差一大截，
-    拿 NPS 当尺子等于用错尺子（用户明确要求不按 NPS 给建议）。所以只描述
-    这张图自己的密度分布，并把落点指向「最密的那一段」这种具体的东西。
+    限定语必须写「本图内」：同一张图上「22 NPS 开始掉」不代表他的能力上限就是
+    22 NPS——键型、段位、当天状态都会变，说成绝对上限会误导。这里只描述
+    这张图自己的密度分布，并把落点指向「最密的那几段」这种具体的东西。
     """
-    worst = _worst_density_bin(payload)
-    usable = [b for b in _density_bins(payload) if b.get("count", 0) >= 10]
-    if not worst or len(usable) < 2:
+    split = _density_split(payload)
+    if not split:
         return ""
-    calm = min(usable, key=lambda b: _f(b.get("high")))
-    w_rate = _f(worst.get("errorRate"))
-    c_rate = _f(calm.get("errorRate"))
-    if w_rate - c_rate < 0.05:
-        # 各档失误率差不多 —— 说明这张图不是"越密越崩"，这句话就没信息量，别硬写
-        return ""
-    return (
-        "失误跟着密度走：这张图最密的段落失误率 %.0f%%，最缓的段落只有 %.0f%%。"
-        "把最密的那段单独抽出来降速练（0.85 倍起，连过 3 遍不掉再回原速），比整图重复更省时间。"
-        % (w_rate * 100, c_rate * 100)
+    segs = split["segments"]
+    text = (
+        "本图内 %g NPS 是你开始掉准的分界：以下失误率 %.1f%%，以上 %.1f%%。"
+        % (split["threshold"], split["lowRate"] * 100, split["highRate"] * 100)
     )
+    if segs:
+        text += "超过它的段落有 %d 处（%s）。" % (
+            split["segmentCount"],
+            # 展示按时间顺序，「先练哪段」由建议里那句负责说
+            "、".join("%s–%s" % (_fmt_mmss(a), _fmt_mmss(b)) for a, b in sorted(segs)),
+        )
+    return text
+
+
+def _density_split(payload: dict) -> dict | None:
+    """本图内的「掉准分界」：从低密度档往上找第一个失误率明显上升的档。
+
+    要求低档至少 80 个音符：样本太小时最低档的失误率本身就在抖，
+    拿它当基准会把整条曲线读歪。
+    """
+    bins = [b for b in _density_bins(payload) if _f(b.get("count")) >= 80]
+    if len(bins) < 2:
+        return None
+    bins.sort(key=lambda b: _f(b.get("low")))
+    low = bins[0]
+    low_rate = _f(low.get("errorRate")) or 0.005   # 0 会让后面的倍数判据永远不成立
+    cut = None
+    for b in bins[1:]:
+        rate = _f(b.get("errorRate"))
+        if rate >= max(low_rate * 1.6, low_rate + 0.02):
+            cut = b
+            break
+    if cut is None:
+        return None
+    threshold = _f(cut.get("low"))
+    high = [b for b in bins if _f(b.get("low")) >= threshold - 0.01]
+    notes = sum(int(_f(b.get("count"))) for b in high)
+    errs = sum(int(_f(b.get("errors"))) for b in high)
+    high_rate = (errs / notes) if notes else _f(cut.get("errorRate"))
+    segs = _dense_segments(payload.get("densityTimeline") or [], threshold)
+    return {
+        "threshold": threshold,
+        "lowRate": low_rate,
+        "highRate": high_rate,
+        "segments": segs[:3],
+        "segmentCount": len(segs),
+    }
+
+
+def _dense_segments(timeline: list[dict], threshold: float,
+                    limit: int = 8) -> list[tuple]:
+    """时间线里密度 ≥ 阈值的连续窗口，返回 [(起, 止)]，按长度降序。
+
+    空一个窗口就断开：中间那段掉到阈值以下，说明是两处独立的难点，
+    合成一段会让用户去练中间其实没问题的部分。
+    """
+    if not timeline:
+        return []
+    runs: list[list[float]] = []
+    cur: list[float] | None = None
+    for w in timeline:
+        dense = _f(w.get("density")) >= threshold
+        if not dense:
+            if cur:
+                runs.append(cur)
+                cur = None
+            continue
+        t0, t1 = _f(w.get("t0")), _f(w.get("t1"))
+        span = max(1.0, t1 - t0)
+        if cur is not None and t0 - cur[1] <= span * 1.5:
+            cur[1] = t1
+        else:
+            if cur:
+                runs.append(cur)
+            cur = [t0, t1]
+    if cur:
+        runs.append(cur)
+    runs.sort(key=lambda r: -(r[1] - r[0]))
+    return [(round(a), round(b)) for a, b in runs[:limit]]
+
+
+def _density_advice(payload: dict, rates: list[float] | None = None) -> dict | None:
+    """按本图的密度分界给一条「只练这几段」的建议。没有明显分界就不给。"""
+    rates = list(rates or DEFAULT_RATES)
+    split = _density_split(payload)
+    if not split or not split["segments"]:
+        return None
+    segs = split["segments"]
+    first = segs[0]
+    more = "" if split["segmentCount"] <= len(segs) else "等 %d 处" % split["segmentCount"]
+    return {
+        "tag": "ability",
+        "title": "先单独练 %s–%s %s" % (
+            _fmt_mmss(first[0]), _fmt_mmss(first[1]),
+            "这一段" if split["segmentCount"] <= 1 else "这几段",
+        ),
+        "body": (
+            "本图内 %g NPS 以上失误率 %.1f%%，以下只有 %.1f%%。"
+            "超过这个密度的段落有 %d 处（%s%s），按 %s× 只循环这几段："
+            "每段连着 3 次失误不超过 3 个再回原速；整图暂时不用刷。"
+            % (split["threshold"], split["highRate"] * 100, split["lowRate"] * 100,
+               split["segmentCount"],
+               "、".join("%s–%s" % (_fmt_mmss(a), _fmt_mmss(b)) for a, b in sorted(segs)), more,
+               _rates_text(rates))
+        ),
+        "rates": rates,
+        "timeRange": [first[0], first[1]],
+        # 同类里优先当主建议：它带分界、带段落、还能给出降速后的段位
+        "weight": 2,
+    }
 
 
 def _fmt_mmss(t: float) -> str:
@@ -193,14 +341,6 @@ def _density_bins(payload: dict) -> list[dict]:
     """读密度—失误分档（键名由 attribution 的画像决定，是下划线风格）。"""
     prof = payload.get("categories", {}).get("profile", {})
     return [b for b in (prof.get("density_profile") or []) if isinstance(b, dict)]
-
-
-def _worst_density_bin(payload: dict) -> dict | None:
-    """失误率最高的密度档（要求样本够）。没有足够数据返回 None。"""
-    usable = [b for b in _density_bins(payload) if b.get("count", 0) >= 10 and b.get("errorRate", 0) > 0]
-    if not usable:
-        return None
-    return max(usable, key=lambda b: b["errorRate"])
 
 
 def _best_fast_bin(payload: dict) -> dict | None:
@@ -262,15 +402,33 @@ def _acc_strength(acc: float, tag: str = "v1") -> str:
     return ""
 
 
-def _advice_ability(share: float) -> dict | None:
+def _advice_ability(share: float, rates: list[float] | None = None) -> dict | None:
     """能力类建议。阈值 25%：低于它时样本里的噪声比信号大，给专项建议等于瞎指方向。"""
     if share < 0.25:
         return None
+    rates = list(rates or DEFAULT_RATES)
     return {
         "tag": "ability",
         "title": "降速练，先把手感稳下来",
-        "body": "用 0.85~0.9 倍速把这张图过顺，能稳定到 99% 再回原速。目标是先把「稳」抬上去，"
-        "而不是硬冲——硬冲只会把随机误差练成肌肉记忆。",
+        "body": "用 %s 倍速把这张图过顺，能稳定到 99%% 再回原速。目标是先把「稳」抬上去，"
+        "而不是硬冲——硬冲只会把随机误差练成肌肉记忆。"
+        % _rates_text(rates),
+        # 前端逐档估算这张图降速后是什么段位，别让用户自己去算
+        "rates": rates,
+    }
+
+
+def _advice_faster(rates: list[float], acc_v1: float) -> dict:
+    """成绩够好时反过来提速练：再降速只是把已经会的东西重复一遍。"""
+    return {
+        "tag": "ability",
+        "title": "提速练，把余量用掉",
+        "body": "这一局 v1 准确率 %.2f%%，降速练已经没有意义了：用 %s 倍速把全曲过一遍，"
+        "能稳定在 98%% 以上再回原速。" % (acc_v1, _rates_text(rates)),
+        "rates": rates,
+        # 全曲加速：不裁段，整张图重新打包
+        "fullMap": True,
+        "weight": 2,
     }
 
 
@@ -329,6 +487,7 @@ def _advice_distraction(payload: dict, share: float) -> dict | None:
             cluster[0],
             _fmt_mmss(cluster[1]),
         ),
+        "timeRange": [round(cluster[1]), round(cluster[2])],
     }
 
 
@@ -345,7 +504,8 @@ def _advice_slip(share: float) -> dict | None:
     }
 
 
-def _category_narrative(payload: dict) -> tuple[str, str, list[dict]]:
+def _category_narrative(payload: dict, dan_value: float | None = None,
+                        acc_v1: float | None = None) -> tuple[str, str, list[dict]]:
     cats = payload.get("categories", {})
     counts = cats.get("counts", {})
     total = max(1, cats.get("total", 0))
@@ -374,6 +534,10 @@ def _category_narrative(payload: dict) -> tuple[str, str, list[dict]]:
                 "不是能力不够，也不是拍子没咬住，更像是手感/注意力的一次短暂抖动。",
     }[main]
 
+    if acc_v1 is not None and float(acc_v1) >= FAST_ACC:
+        # 98.5% 以上不再谈降速：给提速建议，不再按失误类别拆
+        return (text, detail, [_advice_faster(_practice_rates(payload, dan_value, acc_v1), float(acc_v1))])
+
     if total < 10:
         # 失误个位数时给「专项建议」等于瞎指方向：样本太小，占比一两条就跳到 25%
         return (text, detail, [])
@@ -384,7 +548,7 @@ def _category_narrative(payload: dict) -> tuple[str, str, list[dict]]:
     advice = [
         a
         for a in (
-            _advice_ability(counts.get("ability", 0) / total),
+            _advice_ability(counts.get("ability", 0) / total, _practice_rates(payload, dan_value)),
             _advice_rhythm(payload, counts.get("rhythm", 0) / total),
             _advice_distraction(payload, counts.get("distraction", 0) / total),
             _advice_slip(counts.get("slip", 0) / total),
@@ -410,10 +574,22 @@ class _Draft:
     median_delta: float
     has_bias: bool
     judge_mode: str = "v1"
+    dan_value: float | None = None
+    acc_v1: float | None = None
     paragraphs: list[str] = field(default_factory=list)
     strengths: list[str] = field(default_factory=list)
     weaknesses: list[str] = field(default_factory=list)
     advice: list[dict] = field(default_factory=list)
+
+    @property
+    def fast_mode(self) -> bool:
+        """v1 准确率够高时改提速练，降速类建议整块不出现。"""
+        return self.acc_v1 is not None and float(self.acc_v1) >= FAST_ACC
+
+    @property
+    def rates(self) -> list[float]:
+        """这张图的练习倍率，从慢到快；提速模式下是 1.05 / 1.1。"""
+        return _practice_rates(self.payload, self.dan_value, self.acc_v1)
 
     # 1) 准度与稳定性
     #    「准确率」标明 v1 口径（旁边还有 ScoreV2 的准确率，不标容易被当成同一个数）
@@ -466,7 +642,8 @@ class _Draft:
 
     # 2) 失误结构
     def add_categories(self) -> None:
-        cat_text, cat_detail, cat_advice = _category_narrative(self.payload)
+        cat_text, cat_detail, cat_advice = _category_narrative(
+            self.payload, self.dan_value, self.acc_v1)
         self.paragraphs.append(cat_text)
         if cat_detail:
             self.paragraphs.append(cat_detail)
@@ -478,7 +655,7 @@ class _Draft:
         sec_text, worst_sec = _section_sentence(sections)
         if sec_text:
             self.paragraphs.append(sec_text)
-        if worst_sec and worst_sec["acc"] < self.acc - 1.5:
+        if worst_sec and worst_sec["acc"] < self.acc - 1.5 and not self.fast_mode:
             self.weaknesses.append(
                 "第 %d 段（%s–%s）明显跟不上，掉了（%.1f%%），这一段值得单独复练。"
                 % (worst_sec["index"] + 1, _fmt_mmss(worst_sec["start"]), _fmt_mmss(worst_sec["end"]), worst_sec["acc"])
@@ -487,8 +664,12 @@ class _Draft:
                 {
                     "tag": "ability",
                     "title": "单独复练 %s–%s 这一段" % (_fmt_mmss(worst_sec["start"]), _fmt_mmss(worst_sec["end"])),
-                    "body": "这一段准确率只有 %.1f%%（全曲 %.1f%%）。把它单独循环：先 0.9 倍速过 3 遍找准手感，"
-                    "再回原速；连续 3 次原速不掉连再往下走。" % (worst_sec["acc"], self.acc),
+                    "body": "这一段准确率只有 %.1f%%（全曲 %.1f%%）。把它单独循环：先 %g 倍速过 3 遍找准手感，"
+                    "再回原速；连续 3 次原速不掉连再往下走。"
+                    % (worst_sec["acc"], self.acc, min(self.rates)),
+                    "rates": self.rates,
+                    "timeRange": [round(_f(worst_sec["start"])), round(_f(worst_sec["end"]))],
+                    "weight": 1,
                 }
             )
         if len(sections) >= 2:
@@ -587,9 +768,14 @@ class _Draft:
 
     # 6) 稳定区间
     def add_density(self) -> None:
+        if self.fast_mode:
+            return                      # 提速练习不裁段，密度分段建议没有落点
         density_text = _density_ceiling(self.payload)
         if density_text:
             self.paragraphs.append(density_text)
+        drain = _density_advice(self.payload, self.rates)
+        if drain:
+            self.advice.append(drain)
 
     # 7) 组合断点
     def add_combo(self) -> None:
@@ -659,9 +845,91 @@ def _badges(acc: float, ur: float, abs_median: float, max_combo, tag: str) -> li
     ]
 
 
-def build_evaluation(payload: dict) -> dict:
+def _ranges_overlap(a, b, ratio: float = 0.35) -> bool:
+    """两段时间是否明显重叠（重叠部分占较短那段的三分之一以上）。
+
+    阈值压到 0.35 而不是 0.5：分段建议会横跨好几个密度段，和主建议重叠
+    三成多时读起来就已经是「同一片地方」，留着只会让人以为要练两处。
+    """
+    try:
+        a0, a1 = float(a[0]), float(a[1])
+        b0, b1 = float(b[0]), float(b[1])
+    except (TypeError, ValueError, IndexError):
+        return False
+    lo, hi = max(a0, b0), min(a1, b1)
+    if hi <= lo:
+        return False
+    shorter = min(a1 - a0, b1 - b0)
+    return shorter > 0 and (hi - lo) / shorter >= ratio
+
+
+_ADVICE_WEIGHT = {"ability": 100.0, "rhythm": 80.0, "distraction": 70.0, "slip": 60.0}
+
+
+def _advice_priority(item: dict, share: dict) -> float:
+    """一条建议「先做」的程度：所属类别的失误占比 + 是否给了具体位置。"""
+    tag = str(item.get("tag") or "ability")
+    p = _ADVICE_WEIGHT.get(tag, 50.0) + 100.0 * _f(share.get(tag))
+    if item.get("timeRange"):
+        p += 8.0
+    if item.get("rates"):
+        p += 4.0
+    # 校 offset 永远排第一：不改手感、只改判定对齐，而且失误是整局统一偏移，
+    # 校准之后其他建议的效果才看得出来。用 "universal offset" 精确匹配——
+    # 「跟拍子练，别动 offset」也含 offset，但那条明确说了别动，不能置顶。
+    text = (str(item.get("title") or "") + str(item.get("body") or "")).lower()
+    if "universal offset" in text:
+        return 999.0
+    return round(p, 2)
+
+
+def _finalize_advice(items: list[dict], share: dict, limit: int = 3) -> list[dict]:
+    """合并同类、按「能挽回多少失误」排序、最多留三条。
+
+    ability 组会同时产出整图降速、复练某段、专项键型、补弱侧四条，说的
+    其实是同一件事（手跟不上）。并列摆着只会让人不知道先做哪个，所以合成
+    一条主建议，其余降级成子项——用户照着第一条做就行。
+    """
+    if not items:
+        return []
+    groups: dict[str, list[dict]] = {}
+    for a in items:
+        groups.setdefault(str(a.get("tag") or "ability"), []).append(a)
+
+    out: list[dict] = []
+    for _tag, group in groups.items():
+        # 主建议优先级：校 offset > 带具体时间 > 带倍率 > 生成顺序
+        group.sort(key=lambda a: (
+            0 if "universal offset" in (str(a.get("title") or "") + str(a.get("body") or "")).lower() else 1,
+            -int(a.get("weight") or 0),
+            0 if a.get("timeRange") else 1,
+            0 if a.get("rates") else 1,
+        ))
+        main = dict(group[0])
+        main_range = main.get("timeRange")
+        subs: list[str] = []
+        for extra in group[1:]:
+            # 和主建议指同一段的子项直接丢掉，否则会出现「主练 1:20，子项又让练 0:20」
+            if _ranges_overlap(main_range, extra.get("timeRange")):
+                continue
+            text = str(extra.get("title") or "").strip()
+            if text and text not in subs:
+                subs.append(text)
+        if subs:
+            main["subs"] = subs[:3]
+        main["priority"] = _advice_priority(main, share)
+        out.append(main)
+
+    out.sort(key=lambda a: -_f(a.get("priority")))
+    return out[:limit]
+
+
+def build_evaluation(payload: dict, dan_value: float | None = None) -> dict:
     s = payload.get("summary", {})
     acc = _f(s.get("accuracy"))
+    # 提速与否一律看 v1 口径：切到 v2 / classic 时 acc 会变，但「这套已经打穿」的判断不该变
+    acc_v1_raw = payload.get("accuracyV1")
+    acc_v1 = _f(acc_v1_raw) if acc_v1_raw is not None else None
     ur = _f(s.get("ur"))
     median_delta = _f(s.get("medianDelta"))
 
@@ -672,6 +940,8 @@ def build_evaluation(payload: dict) -> dict:
         median_delta=median_delta,
         has_bias=_bias_sentence(median_delta)[1],
         judge_mode=str(payload.get("judgeMode") or "v1"),
+        dan_value=dan_value,
+        acc_v1=acc_v1,
     )
     # 顺序即版面顺序，改顺序会改变报告读起来的高低起伏
     draft.add_accuracy()
@@ -696,6 +966,8 @@ def build_evaluation(payload: dict) -> dict:
 
     grade, grade_desc = _grade(acc, ur, _f(s.get("errorRate")))
     cats = payload.get("categories", {}).get("counts", {})
+    share = payload.get("categories", {}).get("share", {})
+    advice = _finalize_advice(advice, share)
 
     return {
         "grade": grade,
@@ -704,6 +976,6 @@ def build_evaluation(payload: dict) -> dict:
         "paragraphs": [p for p in draft.paragraphs if p],
         "strengths": draft.strengths[:5],
         "weaknesses": draft.weaknesses[:4],
-        "advice": advice[:5],
+        "advice": advice,
         "badges": _badges(acc, ur, _f(s.get("absMedian")), s.get("maxCombo", 0), draft.judge_mode),
     }
