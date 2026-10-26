@@ -216,6 +216,11 @@
       "本次按键占比 " + (res.lnRatio * 100).toFixed(1) + "%，倍率 " + speed + "。\n" +
       "Sunny 给的是星级，Azusa/Roxy 给的是 RC 数值难度，两者不是同一量纲；" +
       "左边的 MSD 来自 MinaCalc，只看谱面本身，不随倍率变化。";
+    // 段位算完了：让报告按这个段位重算练习倍率（11 段以上给 0.95）。
+    // 只改建议里的倍率和文案，失败就保持首屏那份 MSD 兜底的结果。
+    if (window.Practice && window.Practice.syncAdvice) {
+      window.Practice.syncAdvice(data, res.label);
+    }
     return res;
   }
 
@@ -450,19 +455,150 @@
     (ev.strengths && ev.strengths.length ? ev.strengths : ["—"]).forEach((s) => st.appendChild(el("li", null, s)));
     (ev.weaknesses && ev.weaknesses.length ? ev.weaknesses : ["—"]).forEach((s) => wk.appendChild(el("li", null, s)));
 
+    renderAdviceList(data);
+    renderProgress(data);
+  }
+
+  // 建议列表单独一个函数：段位估算完成后要按新倍率重画这一块，不动整张 hero。
+  function renderAdviceList(data) {
+    const ev = (data && data.evaluation) || {};
     const advice = $("adviceList");
     clearNode(advice);
-    (ev.advice || []).forEach((a) => {
+    (ev.advice || []).forEach((a, i) => {
       const li = el("li");
+      if (i === 0) li.classList.add("is-first");
       const h = el("h4", null, a.title || "");
+      if (i === 0) h.appendChild(el("span", "adv-rank", "先做这个"));
       if (a.tag && CATS[a.tag]) {
         const tag = el("span", "adv-tag", "针对「" + CATS[a.tag].short + "」");
         h.appendChild(tag);
       }
       li.appendChild(h);
       li.appendChild(el("p", null, a.body || ""));
+
+      // 同类里被合并掉的那几条：降级成子项，别和主建议抢位置
+      if (a.subs && a.subs.length) {
+        const ul = el("ul", "adv-subs");
+        a.subs.forEach((t) => ul.appendChild(el("li", null, t)));
+        li.appendChild(ul);
+      }
+
+      // 带具体时间的建议可以直接跳过去看，不用自己拖进度条
+      if (a.timeRange && a.timeRange.length === 2) {
+        const btn = el("button", "adv-jump",
+          "跳到 " + fmtTime(a.timeRange[0]) + " 看这一段");
+        btn.type = "button";
+        btn.addEventListener("click", () => {
+          if (window.UI.seekTo) window.UI.seekTo(a.timeRange[0]);
+        });
+        li.appendChild(btn);
+      }
+
+      // 同一段还能直接做成练习谱面：裁到整八拍、速度与音频一起降速、前面补 3 秒空白。
+      // 倍率跟着建议走：Reform 10 及以下只有 0.9，Alpha 以上是两档（0.95/0.9 或 0.96/0.92），
+      // 每档一个按钮，按哪个就是哪张谱面。
+      const rates = a.rates || (a.rate ? [a.rate] : []);
+      // 全曲提速建议没有 timeRange，靠 fullMap 标记
+      if ((a.timeRange || a.fullMap) && rates.length && data.session && window.Practice) {
+        rates.forEach((r) => {
+          const rate = Number(r) || 0.9;
+          const cut = el("button", "adv-cut",
+            "生成 Slice" + rate + "（" + rate.toFixed(2) + "×）");
+          cut.type = "button";
+          cut.title = "裁到整八拍、连音频一起降到 " + rate.toFixed(2) +
+            "×，生成可直接并进原图包的 .osz";
+          cut.addEventListener("click", () => window.Practice.generate(data, a, cut, rate));
+          li.appendChild(cut);
+        });
+      }
+
+      // 需要降速的建议：每一档都算一次段位，让用户自己挑要哪个速度
+      rates.forEach((r) => {
+        const line = rateLine(r, data);
+        if (line) li.appendChild(line);
+      });
       advice.appendChild(li);
     });
+  }
+
+  // 建议里要求降速时，顺手把「按这个倍率是什么段位」算出来。
+  // 估算器在前端跑（ES 模块），失败或没有会话（离线报告）就整行不显示。
+  function rateLine(rate, data) {
+    const session = data && data.session;
+    const now = Number((data.replay && data.replay.rate) || 1) || 1;
+    // 这里都是**绝对**倍率（谱面上标多少就是多少）：练习谱面烘进去的是 0.9 / 0.95
+    // 这种速度，不是「在当前倍率上再乘一下」。DT 局会和当前 1.5× 并排显示。
+    const want = Number(rate);
+    if (!session || !Number.isFinite(want) || !window.Estimator || !window.Estimator.estimate) {
+      return null;
+    }
+    const target = want;
+    const notes = Number((data.beatmap && data.beatmap.notes) || 0);
+    const fast = notes > 30000;
+    const line = el("p", "adv-rate", "正在估算 " + target.toFixed(2) + "× 的段位…");
+    Promise.all([
+      window.Estimator.estimate(session, target, { fast }),
+      Math.abs(target - now) < 1e-9 ? Promise.resolve(null) : window.Estimator.estimate(session, now, { fast }),
+    ]).then(([slow, cur]) => {
+      if (!slow || !slow.ok) { line.remove(); return; }
+      let text;
+      if (cur && cur.ok && cur.label === slow.label) {
+        // 段位没变说明这张图「降速也不会简单多少」，练它不如换张图——这本身是信息
+        text = target.toFixed(2) + "× 与当前都是 " + slow.label + "，降速不会让它明显变简单";
+      } else {
+        text = "降到 " + target.toFixed(2) + "× 大约是 " + slow.label;
+        if (cur && cur.ok) text += "（当前 " + now.toFixed(2) + "× 是 " + cur.label + "）";
+      }
+      line.textContent = text;
+    }).catch(() => line.remove());
+    return line;
+  }
+
+  // 同一张图打过多次时画走势：准确率与 UR 两条线，点少也能看清方向。
+  // 只比同一倍率的记录（后端已经按 rate 过滤），否则两个数不在同一把尺子上。
+  function renderProgress(data) {
+    const card = $("progressCard");
+    if (!card) return;
+    const hist = (data && data.history) || null;
+    const past = (hist && hist.items) || [];
+    const cur = (data && data.summary) || {};
+    // 至少要有一次历史 + 本次，两点才连得成线
+    if (!past.length || !Number.isFinite(Number(cur.accuracy))) {
+      card.hidden = true;
+      return;
+    }
+    card.hidden = false;
+    const rate = Number((hist && hist.rate) || 1) || 1;
+    const last = past[past.length - 1];
+    const dAcc = Number(cur.accuracy) - Number(last.acc || 0);
+    const dUr = Number(cur.ur) - Number(last.ur || 0);
+    $("progressMeta").textContent =
+      "第 " + (past.length + 1) + " 次 · " + (rate === 1 ? "原速" : rate.toFixed(2) + "×");
+
+    const accTxt = fmtPct(cur.accuracy);
+    const urTxt = Number(cur.ur || 0).toFixed(0);
+    const dAccTxt = (dAcc >= 0 ? "+" : "") + dAcc.toFixed(2);
+    const dUrTxt = (dUr >= 0 ? "+" : "") + dUr.toFixed(0);
+    $("progressLine").textContent =
+      "上次 " + last.acc.toFixed(2) + "% / UR " + last.ur.toFixed(0) +
+      "，这次 " + accTxt + " / UR " + urTxt +
+      "（准确率 " + dAccTxt + " 个百分点，UR " + dUrTxt + "）。UR 越低越好。";
+
+    progressPoints = past.map((it) => ({ acc: Number(it.acc) || 0, ur: Number(it.ur) || 0 }))
+      .concat([{ acc: Number(cur.accuracy) || 0, ur: Number(cur.ur) || 0 }]);
+    drawProgressChart();
+  }
+
+  // 只在卡片真的可见时画（切到总览页、窗口尺寸变化都会重新调）
+  function drawProgressChart() {
+    const canvas = $("chartProgress");
+    if (!canvas || !progressPoints || !progressPoints.length) return;
+    if (!canvas.clientWidth) return;
+    if (window.Charts && window.Charts.drawTrend) {
+      // 高度必须显式给：canvas 的 CSS 是 height:auto，交给它自己量 clientHeight
+      // 会读到上一次的物理高度，越画越高。
+      window.Charts.drawTrend(canvas, progressPoints, { height: 180 });
+    }
   }
 
   // ---------------------------------------------------------------- 失误成因（甜甜圈）
@@ -998,6 +1134,12 @@
     }, wait);
   }
 
+  // 播放器跳转由 main.js 注入：UI 是纯渲染层，不直接碰播放状态。
+  let seekHandler = null;
+  // 走势图的数据点。绘制交给 drawChartsForTab：卡片隐藏时 clientWidth 是 0，
+  // 这时画出来会被 CSS 拉伸成模糊的一大块。
+  let progressPoints = null;
+
   window.UI = {
     $,
     el,
@@ -1012,6 +1154,7 @@
     renderTrack,
     renderLibrary,
     renderHero,
+    renderAdviceList,
     renderMsd,
     applySunnyDan,
     renderPatternShare,
@@ -1029,5 +1172,9 @@
     toast,
     loading,
     tasks: { start: taskStart, update: taskUpdate, end: taskEnd },
+    // 建议里的「跳到 1:12 看这一段」走这里
+    drawProgressChart,
+    setSeek(fn) { seekHandler = typeof fn === "function" ? fn : null; },
+    seekTo(ms) { if (seekHandler) seekHandler(Number(ms) || 0); },
   };
 })();
