@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from types import SimpleNamespace
 
-from . import anchor, attribution, dan, msd, patterns, report
+from . import anchor, attribution, dan, history, msd, patterns, report
 from .beatmap import JUDGEMENT_LABEL, Beatmap, long_path, parse_osu_file
 from .library import get_library
 from .match import (
@@ -337,6 +337,46 @@ def _bucket_rows(
         )
     return buckets
 
+
+
+def _density_timeline(contexts, errors: list[dict], window_ms: int = 4000) -> list[dict]:
+    """按固定窗口聚合密度与失误，给报告定位「哪几段最密」。
+
+    密度取窗口内每个音符自己的 density_1s 均值——那是「这一下前后 1 秒有多密」，
+    比按窗口数音符更接近手感。窗口 4 秒：两分钟的图约 30 个点，够定位段落，
+    又把 payload 控制在几 KB。
+    """
+    if not contexts:
+        return []
+    bins: dict[int, dict] = {}
+    for c in contexts:
+        idx = int(c.time // window_ms)
+        b = bins.get(idx)
+        if b is None:
+            b = bins[idx] = {"t0": idx * window_ms, "notes": 0, "dens": 0.0, "errors": 0}
+        b["notes"] += 1
+        b["dens"] += float(getattr(c, "density_1s", 0) or 0)
+    for e in errors:
+        t = e.get("t")
+        if not isinstance(t, (int, float)):
+            continue
+        b = bins.get(int(t // window_ms))
+        if b is not None:
+            b["errors"] += 1
+    end = max(c.time for c in contexts)
+    out = []
+    for idx in sorted(bins):
+        b = bins[idx]
+        if not b["notes"]:
+            continue
+        out.append({
+            "t0": b["t0"],
+            "t1": round(min(end, b["t0"] + window_ms), 1),
+            "density": round(b["dens"] / b["notes"], 1),
+            "notes": b["notes"],
+            "errors": b["errors"],
+        })
+    return out
 
 
 def _timeline(match: MatchResult, bucket_ms: float | None = None, cat_by_note=None,
@@ -1295,13 +1335,16 @@ def _build_views(match: MatchResult, replay: Replay, contexts: list,
         combo_breaks, combo_break_total = _combo_breaks(match, mode=mode)
         cat_by_note = {id(a.note): a.category for a in atts}
         stamina = (cat_summary.get("profile") or {}).get("stamina")
+        errors = _error_payload(atts, ctx_by_index, stamina, mode)
         views[mode] = {
             "summary": _summary(match, replay, atts, combo_breaks, mode, combo_break_total),
             "timeline": _timeline(match, None, cat_by_note, replay.rate, mode),
             "offsetHistogram": _offset_histogram(match, mode=mode),
             "sections": _section_stats(match, replay.rate, 3, mode),
             "columnStats": _column_stats(match, mode),
-            "errors": _error_payload(atts, ctx_by_index, stamina, mode),
+            "errors": errors,
+            # 密度时间线只给报告定位「哪几段最密」，比 sections 细、比逐音符粗
+            "densityTimeline": _density_timeline(contexts, errors),
             "patterns": _pattern_stats(match, ctx_by_index, mode),
             "comboBreaks": combo_breaks,
             "categories": cat_summary,
@@ -1353,6 +1396,19 @@ def analyze(
         **_beatmap_facts(beatmap, blocks, pattern_detail, beatmap_payload, replay, contexts),
     }
 
+    # 同图历史：这张谱面以前打过几次、走势如何。查询必须在写库之前——
+    # 本局是接口返回后才落库的，否则会把自己算成「上一次」。
+    # 只取同一倍率：1.0× 与 1.2× 的准确率/UR 不在同一把尺子上。
+    # 还要对玩家：别人发来的回放也会入库，混进来就成了拿别人的 100% 当自己的「上次」。
+    # 优先用设置里的玩家名，没设置就按这一局回放里的名字。
+    try:
+        owner = history.configured_player() or (replay.player or "")
+        past = history.same_beatmap(replay.beatmap_md5, replay.rate, limit=10, owner=owner)
+    except Exception:  # noqa: BLE001 - 历史是附加功能，读失败不能影响分析
+        past = []
+    if past:
+        common["history"] = {"rate": round(float(replay.rate or 1.0), 3), "items": past}
+
     judge_default = detect_judge_mode(replay.version, replay.mods, replay.score_info)
     modes = ["v1", "v2"]
     if judge_default == "classic":
@@ -1367,13 +1423,17 @@ def analyze(
     for mode in modes:
         # judgeMode 必须一起传：评语里的“准确率 (v1/v2)”徽章与正文都靠它，
         # 漏了就会在 V2 视图里继续写 v1。
-        view = {**common, **views[mode], "judgeMode": mode}
+        # 提速练习的判断按 v1 口径（用户要求），切到 v2 / classic 时这个数不能跟着变
+        v1_acc = views["v1"]["summary"]["accuracy"]
+        view = {**common, **views[mode], "judgeMode": mode, "accuracyV1": v1_acc}
         views[mode]["evaluation"] = report.build_evaluation(view)
 
     payload = {
         **common,
         # 顶层保留 V1 字段，旧版前端（以及单文件报告）不用改就能继续读
         **views["v1"],
+        # /api/report/advice 直接拿这份顶层 payload 重算建议，也要能读到 v1 准确率
+        "accuracyV1": views["v1"]["summary"]["accuracy"],
         "modes": views,
         "judge": {
             "default": judge_default,
