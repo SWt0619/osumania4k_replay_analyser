@@ -17,6 +17,9 @@ import { runRoxyEstimatorFromText } from "../vendor/mma/estimator/roxyEstimator.
 
 const cache = new Map(); // key: session + 倍率
 
+// 与 vendor 里 Azusa / Roxy 的 rcLnRatioLimit 一致：超过这条线它们会拒绝计算 4K RC。
+const LN_RC_LIMIT = 0.18;
+
 function normalize(result) {
   // 对方有两种返回形态：数组 [star, lnRatio, columnCount] 或对象 {star, lnRatio, columnCount}
   if (Array.isArray(result)) {
@@ -72,11 +75,15 @@ async function estimateFromText(text, rate, opts) {
   const noLn = !!(lnRaw && lnRaw.NoLN);
   const ln = noLn ? { star: 0 } : normalize(lnRaw);
   const lnStar = Number.isFinite(ln.star) ? ln.star : 0;
-  const lnPartsRatio = Number((lnRaw && lnRaw.lnPartsRatio) || 0);
 
-  // 与对方 runSunnyWindowEstimatorFromText 的判定保持一致
-  const showLN =
-    rc.lnRatio > 0.15 || (lnStar > 1.5 && lnStar > rc.star * 0.7) || lnPartsRatio > 0.3;
+  // 面图的分界直接取 Azusa / Roxy 自己的能力边界（vendor 里 rcLnRatioLimit = 0.18）：
+  // 它们只做 4K RC，长条占比超过 18% 会当场拒绝，所以那条线以上才回退 Sunny 查表，
+  // 线以下一律交给三算法链——否则会出现「Azusa 明明能算，却因为下面这条被跳过」。
+  //
+  // 早先这里还叠了「LN 星数 > RC 星数 × 0.7」和「lnPartsRatio > 0.3」两条。前者在低段位
+  // 太容易满足：5.4 星的图只要长条部分有 4.0 星就被判成面图，一批长条占比不到一成的
+  // RC 图因此拿不到数值段位；后者是长条音符占比，与第一条重复。
+  const showLN = rc.lnRatio > LN_RC_LIMIT;
 
   let label = "";
   try {
