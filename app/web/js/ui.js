@@ -274,14 +274,16 @@
       li.appendChild(name);
       li.appendChild(document.createTextNode(" " + it.share + "%"));
 
-      // 大类下面再列细分键型（只取前两个，够看且不挤）。
-      // LN 段不列：它下面永远是"LN 100%"，和左边的类名重复。
-      const d = it.key === "ln" ? null : detail.get(it.key);
+      // 大类下面再列细分键型。细分是段落级的，一类通常只有 2~3 个名字，
+      // 列三个既不会挤，也不会漏掉占比很小的那一项（比如 calm 段里的 LN）。
+      // 长条段以前细分永远是"LN 100%"（和类名重复）所以不列，现在会分成
+      // Release / Density / Coordination / Mixed，必须列出来。
+      const d = detail.get(it.key);
       if (d && d.items && d.items.length) {
         const sub = document.createElement("em");
         sub.className = "pattern-sub";
         sub.textContent = d.items
-          .slice(0, 2)
+          .slice(0, 3)
           .map((x) => x.label + " " + x.share + "%")
           .join(" · ");
         li.appendChild(sub);
@@ -302,7 +304,7 @@
       $("msdDan").textContent = "—";
       $("msdDanNote").textContent = m.error || "MinaCalc 不可用";
       $("msdMeta").textContent = "";
-      $("msdScale").innerHTML = "";
+      renderAnchor(null);
       return;
     }
     box.textContent = m.overall.toFixed(2);
@@ -321,26 +323,45 @@
       "Etterna AA：难度按「打到 93%（Etterna 的 AA）」这个目标算——目标定得越高，MSD 越大\n" +
       "这个数只看谱面本身，不会因为回放里开了 DT/HT 而变化";
 
-    // 段位标尺：每行一个锚点，接近当前 MSD 的高亮
-    const scale = $("msdScale");
-    clearNode(scale);
-    // 段位标尺只显示 4 段以上：低段位区间对打图的人没什么参考价值
-    const anchors = (m.scale || []).filter((a) => Number(a.dan) >= 4);
-    const cur = m.overall;
-    anchors.forEach((a) => {
-      const row = el("div", "msd-scale-row");
-      const near = Math.abs(a.msd - cur) <= 0.6;
-      if (near) row.classList.add("is-here");
-      row.appendChild(el("span", null, a.label));
-      const bar = el("div", "msd-scale-bar");
-      const fill = document.createElement("i");
-      fill.style.width = Math.min(100, (a.msd / (anchors[anchors.length - 1].msd || 1)) * 100) + "%";
-      bar.appendChild(fill);
-      row.appendChild(bar);
-      row.appendChild(el("em", null, a.msd.toFixed(1)));
-      row.title = a.label + " · MSD " + a.msd.toFixed(2);
-      scale.appendChild(row);
-    });
+    // 段位标尺已换成锚度参考（锚度卡片自己渲染）
+    renderAnchor(data && data.anchor);
+  }
+
+  // 锚度：当前谱面的百分位、顺位与链统计。
+  // 只在叠 / 切两个大类下出现；其它键型或数据缺失时整块隐藏。
+  // 不放参考图——参照集里的图跟用户手上的图差得太远，列出来反而干扰判断。
+  function renderAnchor(a) {
+    const cur = $("anchorCurrent");
+    const tip = $("anchorVibro");
+    if (!cur) return;
+    clearNode(cur);
+    cur.hidden = true;
+    if (tip) tip.hidden = true;
+
+    const note = (text) => {
+      cur.hidden = false;
+      cur.appendChild(el("p", "anchor-empty muted", text));
+    };
+    if (!a) return note("这张图的键型不属于叠 / 切，锚度不适用");
+    if (a.error) return note("锚度的参照数据缺失，暂时无法比对");
+
+    cur.hidden = false;
+    const big = el("div", "anchor-score");
+    big.appendChild(el("strong", null, String(a.score)));
+    big.appendChild(el("span", null, a.kind === "cut" ? "切锚度" : "叠锚度"));
+    big.appendChild(el("em", "anchor-rank", "第 " + a.rank + " / " + a.total + " 张"));
+
+    const stat = el("div", "anchor-stat");
+    stat.textContent = "覆盖 " + a.coverage + "% · 平均链 " + a.avgLen + " · 最大链 " + a.longest;
+    stat.title =
+      "覆盖：有多少比例的音符落在同轨连打里\n" +
+      "平均链：每一串同轨连打平均连着几个音符\n" +
+      "最大链：最长的那一串连着几个音符";
+
+    const hint = el("p", "anchor-note",
+      "平均链 = 每串同轨连打平均几个音符；最大链 = 最长的一串有几个。数值越大，同轨重复越密。");
+    cur.append(big, stat, hint);
+    if (tip && a.vibro) tip.hidden = false;
   }
 
   // V1 视图没有后端算好的 ScoreV1 字段：优先用投影里的“当前分数”，
