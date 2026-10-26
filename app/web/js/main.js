@@ -3534,6 +3534,8 @@
     cover.target = "_blank";
     cover.rel = "noopener";
     cover.title = "点击封面下载 " + (it.title || "") + "（.osz）";
+    // 分段并发下载（镜像支持 Range）：拿不到就自己退回新标签页直链
+    if (window.MapDownload) window.MapDownload.attach(cover, it.download, it);
 
     const img = document.createElement("img");
     img.src = it.cover;
