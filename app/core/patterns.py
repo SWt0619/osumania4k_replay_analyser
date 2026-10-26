@@ -11,11 +11,13 @@ stream / jumpstream / handstream / chordjack / trill / jumptrill / jack / minija
 from __future__ import annotations
 
 import bisect
+import collections
 import math
 from dataclasses import dataclass
 
 from .beatmap import Beatmap
 from .metrics import quantile_edges
+from . import ln as ln_patterns
 
 # 键型：机器可读 key → 中文名。
 # 顺序即分类优先级（叠 > 交互 > 切换类 > 单次多押 > 锚 > 散音），见 classify()。
@@ -36,6 +38,11 @@ PATTERN_LABEL = {
     "anchor": "Anchor",
     "single": "Single",
     "longnote": "LN",               # 长条为主的段落，不套用 RC 的四大类
+    # 长条段的写法细分，口径见 app/core/ln.py
+    "lnrelease": "Release",
+    "lndensity": "Density",
+    "lncoordination": "Coordination",
+    "lnmixed": "Mixed LN",
 }
 
 # 判断"这一段里掺了多大的押"的阈值（占窗口内物件的比例）。
@@ -105,6 +112,15 @@ class NoteContext:
     # 本行有几个列在上一行也出现过（占本行比例）。叠段的本质就是"同一组手指被反复按下"，
     # 这个比例比"同列间隔是否 ≤1/16 拍"更贴近实际——1/4 间隔的 chordjack 也能认出来。
     row_overlap: float = 0.0
+    # 这一击是不是长条的音头。calm 段没有稳定键型，只能按押数描述，
+    # 但里面的长条要单独标 LN，否则会混进 single/jump。
+    is_hold: bool = False
+    # 长条的结束时刻（毫秒）；米为 0。长条的分支写法（release / density /
+    # coordination）全靠"尾"来判，只有音头信息一项都算不出来。
+    hold_end: float = 0.0
+    # 细分键型（段落级结论，由 assign_subpattern 写回）。
+    # 空表示还没分块，classify 退回按这一击的动作本身判断。
+    sub: str = ""
 
 
 def _beat_marks(beatmap: Beatmap) -> tuple[list[float], list[float]]:
@@ -286,6 +302,8 @@ def _context_of(i: int, obj, grid: _Grid, keys: int = 4) -> NoteContext:
         column_dominant=dominant,
         keys=keys,
         row_overlap=overlap,
+        is_hold=bool(getattr(obj, "is_hold", False)),
+        hold_end=float(getattr(obj, "end_time", None) or 0.0),
     )
 
 
@@ -581,10 +599,12 @@ def _calm_share(seg: list[NoteContext]) -> float:
 
 def _block_category(hold_ratio: float, calm_share: float, snap_ent: float, jack: float,
                     same_group: float, regularity: float, chord: float,
-                    quad: float = 0.0, fast: float = 0.0, repeat: float = 1.0) -> str:
+                    quad: float = 0.0, fast: float = 0.0, repeat: float = 1.0,
+                    layer: float = 0.0) -> str:
     """块的粗分类。顺序即优先级。
 
     长条最优先——面图的难点不在 RC 键型上；其次是低密度且无明确键型的过渡段。
+    layer 是块内行间隔 / 拍长，只在 same_group 那一条用得上。
     """
     if hold_ratio >= 0.45:
         return "ln"
@@ -613,10 +633,14 @@ def _block_category(hold_ratio: float, calm_share: float, snap_ent: float, jack:
     if snap_ent >= TECH_ENTROPY and jack < 0.12:
         return "tech"
     # 叠还有两条路：16 分层的同列连按（jack），或者同一组和弦连续重复（same_group）。
-    # 后者专治 1/8 层的夹叠图——那种图同列间隔够不到 16 分，但和弦在反复。
-    # jack 的门槛取 0.12：更低的块里同列回按只是零星巧合，够不上"这一段的写法是叠"；
-    # 块级同组重复的分布与门槛见 SAME_GROUP_MIN 上方的实测值。
-    if jack >= 0.12 or same_group >= SAME_GROUP_MIN:
+    # jack 的门槛取 0.12：更低的块里同列回按只是零星巧合，够不上"这一段的写法是叠"。
+    # same_group 只在 1/8 层（行间隔 ≈ 0.5 拍）才算叠：16 分行的双押切图写出来就是
+    # 12-34-12-34，和弦组天然在重复，但那是切不是叠（Exile 的 16 分同轨只占 1%，
+    # 却因为 same_group 高达 0.65 被整段判成叠）。加了这一层后，20 张 Reform 7~10
+    # 的切图判定全部不变，只是叠占比回落。
+    if jack >= 0.12:
+        return "stack"
+    if same_group >= SAME_GROUP_MIN and 0.42 <= layer <= 0.58:
         return "stack"
     if regularity < 0.45:
         return "tech"
@@ -644,8 +668,13 @@ def _make_block(seg: list[NoteContext], start: int, keys: int, holds: list[bool]
     quad = sum(1 for c in seg if c.chord_size >= keys) / n
     fast = sum(1 for c in seg if c.subdivision <= FAST_SUBDIVISION) / n
     repeat = _rhythm_repeat(wide if wide else seg)
+    # 块的行间隔层：same_group 判叠只在 1/8 层有效，16 分行的和弦重复是切。
+    row_gap = _median([c.row_gap for c in seg])
+    beat = _median([c.beat_length for c in seg])
+    layer = (row_gap / beat) if beat > 0 and row_gap < 9999 else 0.0
     category = _block_category(hold_ratio, _calm_share(seg), snap_ent,
-                               jack, same_group, regularity, chord, quad, fast, repeat)
+                               jack, same_group, regularity, chord, quad, fast, repeat,
+                               layer)
 
     return Block(
         start_index=start,
@@ -700,6 +729,61 @@ def assign_coarse(contexts: list[NoteContext], blocks: list[Block]) -> None:
     for b in blocks:
         for c in contexts[b.start_index : b.end_index + 1]:
             c.coarse = b.category
+
+
+# 「这一击按了几个键」——描述打击构成，不是段落键型。
+# 它们只该出现在 calm 段（那一段本来就没有稳定写法），或者整块都没稳定写法时兜底。
+_HIT_KINDS = frozenset(("single", "jump", "hand", "quad"))
+
+# 块内投票平票时的取舍：名字越具体的越优先。
+# 平票意味着两种写法在块里交替出现，这时报更"有特征"的那个，
+# 比随机取字典序靠前的那个更接近玩家的说法。
+_SUB_PRIORITY = {
+    "chordjack": 9, "minijack": 8, "longjack": 8,
+    "jumpstream": 7, "handstream": 7, "quadstream": 7,
+    "jumptrill": 6, "trill": 6, "spamstream": 5, "stream": 4, "anchor": 3,
+}
+
+
+def assign_subpattern(contexts: list[NoteContext], blocks: list[Block]) -> None:
+    """把细分键型从「逐音符」改成「逐段」：一块只出一个名字。
+
+    玩家的说法是「这是一张 jumpstream 图」，不是「这张图 40% 的音符是
+    jumpstream、12% 是 jump」——那 12% 的 jump 本来就是 jumpstream 的组成部分。
+    所以块内投票取众数，押数型（single / jump / hand / quad）不参与投票。
+
+    calm 段例外：它本来就是没有稳定写法的过渡段，逐音符按押数描述才准确；
+    段里的长条单独标 LN，不然会被混进 single / jump。
+
+    必须在 assign_coarse 之后调用（类内判定要用 ctx.coarse）。
+    """
+    for b in blocks:
+        seg = contexts[b.start_index : b.end_index + 1]
+        if not seg:
+            continue
+        if b.category == "ln":
+            # 长条段的写法按「松手时机 / 密度 / 同时按住」三选一，
+            # 口径见 app/core/ln.py（官方 wiki 的 release / density / coordination）
+            kind = ln_patterns.label_of(seg)
+            for c in seg:
+                c.sub = kind
+            continue
+        if b.category == "calm":
+            for c in seg:
+                c.sub = "longnote" if c.is_hold else _by_chord(c.chord_size)
+            continue
+        votes = collections.Counter(
+            _classify_with(b.category, c) for c in seg
+        )
+        cand = {k: n for k, n in votes.items() if k not in _HIT_KINDS}
+        if cand:
+            top = max(cand.items(), key=lambda kv: (kv[1], _SUB_PRIORITY.get(kv[0], 0)))[0]
+            for c in seg:
+                c.sub = top
+        else:
+            # 整块只有单次多押、没有稳定写法：保留逐音符描述，至少不说谎
+            for c in seg:
+                c.sub = _classify_with(b.category, c)
 
 
 def is_jack_gap(gap_ms: float, row_gap: float, beat_length: float = 0.0, chord_size: int = 1) -> bool:
@@ -876,19 +960,35 @@ _BY_CATEGORY = {
 }
 
 
+def _classify_in_category(ctx: NoteContext) -> str:
+    """只看这一击所在的大类，在该类内部挑细分（不考虑段落级结论）。"""
+    return _classify_with(ctx.coarse, ctx)
+
+
+def _classify_with(category: str, ctx: NoteContext) -> str:
+    """按指定的粗分类挑细分。
+
+    `assign_subpattern` 投票时必须用块自己的 category，不能用 ctx.coarse：
+    块之间有 25% 重叠，ctx.coarse 是"最后一个覆盖它的块"的分类，
+    拿它投票会让相邻块的判定串进来（实测会让 LN 段的长条混进 tech 块的票里）。
+    """
+    handler = _BY_CATEGORY.get(category)
+    return handler(ctx) if handler else _classify_by_motion(ctx)
+
+
 def classify(ctx: NoteContext | None) -> str:
     """判定这个物件属于哪种键型，返回机器可读的 key（中文名见 PATTERN_LABEL）。
 
-    分两层：先看所属大块的四类粗分类（叠 / 乱 / 切 / tech），再在**类内**挑细分。
-    这样大方向由整段决定，单个音符的局部抖动改变不了结论。
+    分三层：先看所属大块的四类粗分类（叠 / 乱 / 切 / tech），再在**类内**挑细分，
+    最后由 `assign_subpattern` 用块内众数盖掉——玩家的键型说法是段落级的，
+    一段 jumpstream 里的单键仍然属于 jumpstream，不该单独记成 stream。
 
     锚不再当兜底：只有在「叠」类块里、且这一列在邻域占 ≥40% 时才给。
     以前它是单键的默认分支，密集段里随手一个单键就成锚，等于垃圾桶。
     """
     if ctx is None:
         return "single"
-    handler = _BY_CATEGORY.get(ctx.coarse)
-    return handler(ctx) if handler else _classify_by_motion(ctx)
+    return ctx.sub or _classify_in_category(ctx)
 
 
 def pattern_label(ctx: NoteContext) -> str:
