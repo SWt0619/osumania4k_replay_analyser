@@ -40,6 +40,7 @@ from app.core import (  # noqa: E402
     history,
     hotkey,
     json_safe,
+    map_download,
     osu_dirs,
     practice,
     progress,
@@ -592,6 +593,41 @@ class _AssetMixin(_SessionView):
                     remaining -= len(data)
         except (BrokenPipeError, ConnectionAbortedError):
             pass
+
+    def _send_download(self, path: str, name: str, job_id: str = ""):
+        """把下好的谱面包交给浏览器存盘。
+
+        `Content-Disposition: attachment` 是关键：页面导航到这个地址只会触发下载，
+        当前页不会被顶掉，所以前端可以直接 `location.assign`。
+        """
+        size = os.path.getsize(path)
+        ascii_name = re.sub(r"[^A-Za-z0-9._ ()\[\]-]", "_", name) or "beatmap.osz"
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header(
+            "Content-Disposition",
+            'attachment; filename="%s"; filename*=UTF-8\'\'%s'
+            % (ascii_name, urllib.parse.quote(name)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            with open(path, "rb") as f:
+                remaining = size
+                while remaining > 0:
+                    data = f.read(min(256 * 1024, remaining))
+                    if not data:
+                        break
+                    self.wfile.write(data)
+                    remaining -= len(data)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
+        # 整包发完就删掉临时文件：用户已经拿到手，没必要在缓存里再占几十 MB。
+        # 中途断开的保留，重新点一次封面还能直接发。
+        if remaining <= 0 and job_id:
+            map_download.drop(job_id)
 
 
 def _mask_user_path(path: str) -> str:
@@ -1351,7 +1387,9 @@ class _PracticeMixin(_SessionView):
         if not item:
             return self._error("这次生成的练习谱面已过期，请重新生成", 404)
         wav = self._read_body(limit=64 * 1024 * 1024)
-        if len(wav) < 44 or wav[:4] != b"RIFF":
+        # 只看前四个字节不够：一个 60 字节的 "RIFF"+零 也能过，打进去的包在 osu 里没有声音。
+        # 真 WAV 的第 8~12 字节一定是 "WAVE"。
+        if len(wav) < 44 or wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
             return self._error("音频数据无效（不是 WAV）", 400)
         meta = item["meta"]
         buf = io.BytesIO()
@@ -1361,6 +1399,32 @@ class _PracticeMixin(_SessionView):
         body = buf.getvalue()
         log("[practice] 打包 %s（%.1f MB）" % (meta["fileName"], len(body) / 1048576.0))
         self._send(200, body, "application/octet-stream")
+
+    # ---- 谱面包下载 -----------------------------------------------------
+    # 为什么不让浏览器直接分段取：浏览器到镜像之间若挂着会走 h2 的本地代理，
+    # 分段请求会被复用成一条连接，反而比单连接更慢。分段放在 Python 这边做。
+    def map_download_start(self):
+        req = _parse_json(self._read_body()) or {}
+        try:
+            job = map_download.start(str(req.get("url") or ""),
+                                     str(req.get("name") or ""), CACHE_DIR)
+        except ValueError as e:
+            return self._error(str(e), 400)
+        log("[download] 开始 %s（%s）" % (job["name"], job["id"]))
+        return self._json({"ok": True, **job})
+
+    def map_download_status(self, qs):
+        info = map_download.status((qs.get("id") or [""])[0])
+        if info is None:
+            return self._error("这次下载已结束或过期，请重新点一次", 404)
+        return self._json({"ok": True, **info})
+
+    def map_download_file(self, qs):
+        job_id = (qs.get("id") or [""])[0]
+        path, name = map_download.path_of(job_id)
+        if not path:
+            return self._error("文件还没准备好", 404)
+        return self._send_download(path, name, job_id)
 
 
 class _ChunkUploadMixin:
@@ -1600,6 +1664,10 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
                                "hotkey": hotkey.status()})
         if path == "/api/practice/audio":
             return self.practice_audio(qs)
+        if path == "/api/map/download/status":
+            return self.map_download_status(qs)
+        if path == "/api/map/download/file":
+            return self.map_download_file(qs)
         if path == "/api/beatmap-text":
             return self._beatmap_text(qs)
         if path == "/api/paths":
@@ -1711,6 +1779,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
                 return self.practice_cut()
             if path == "/api/practice/pack":
                 return self.practice_pack(qs)
+            if path == "/api/map/download":
+                return self.map_download_start()
             if path == "/api/chart":
                 return self._chart_only()
             if path == "/api/recommend":
@@ -2049,6 +2119,12 @@ def _clean_chunks() -> None:
                     os.remove(p)
             except OSError:
                 pass
+    except OSError:
+        pass
+
+    # 谱面包下载的临时产物：留一小时，够用户点一次存盘
+    try:
+        map_download.cleanup(CACHE_DIR)
     except OSError:
         pass
 
