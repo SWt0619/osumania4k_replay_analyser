@@ -96,9 +96,14 @@ def safe_name(text: str, limit: int = 60) -> str:
     return (s or "practice")[:limit]
 
 
-def slice_label(rate: float) -> str:
-    """0.9 → "Slice0.9"，0.85 → "Slice0.85"。难度名、音频名、包名都从这里来。"""
-    return "Slice%g" % float(rate)
+def rate_label(rate: float) -> str:
+    """1.1 → "Rate1.1"，0.9 → "Slice0.9"。难度名、音频名、包名都从这里来。
+
+    加速版与降速版分开命名：两者都是「改过速度的同一张图」，但一个是为了把速度
+    余量顶上去、整曲不裁段，一个是为了拆段慢练，混用一个前缀在选歌界面里分不清。
+    """
+    value = float(rate)
+    return ("Rate" if value > 1.0 else "Slice") + ("%g" % value)
 
 
 def cut(
@@ -119,7 +124,7 @@ def cut(
     # 上限放到 2.0：成绩够好时推荐的是提速练习（1.05 ~ 1.1），不是降速
     if not 0.1 <= rate <= 2.0:
         raise ValueError("倍率超出范围（0.1~2.0）")
-    label = slice_label(rate)
+    label = rate_label(rate)
     t0, t1 = float(t0), float(t1)
     if t1 < t0:
         t0, t1 = t1, t0
@@ -154,6 +159,10 @@ def cut(
         cut_start = max(0.0, cut_start)
         if cut_end - cut_start < step:
             cut_end = cut_start + step
+        # 段尾不能无限往后：t1 传成 1e8 时对齐会把 cutEnd 拉到荒谬的位置，
+        # 音频那头根本取不到。夹到最后一个物件之后两拍，等于"到曲尾为止"。
+        last_end = max((o["end"] if o["end"] is not None else o["time"]) for o in objs)
+        cut_end = min(cut_end, last_end + step * 2)
 
     # ---- 2. 时间映射 ----------------------------------------------------
     def conv(t: float) -> float:
@@ -232,8 +241,8 @@ def cut(
 
     # ---- 5. 其它段落 ----------------------------------------------------
     # 曲名一个字都不动：生成的难度要和原图并进同一个图包，改了 Title 就会被
-    # 拆成另一张图。只把 Version 换成 Slice0.9，音频换成本次生成的 wav。
-    audio_name = "slice-%g.wav" % rate
+    # 拆成另一张图。只把 Version 换成 Slice0.9 / Rate1.1，音频换成本次生成的 wav。
+    audio_name = "%s-%g.wav" % ("rate" if rate > 1.0 else "slice", rate)
     title = ""
     artist = ""
     meta_range = _section(lines, "[Metadata]")
