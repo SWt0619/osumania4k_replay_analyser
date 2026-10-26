@@ -424,7 +424,8 @@ def _advice_faster(rates: list[float], acc_v1: float) -> dict:
         "tag": "ability",
         "title": "提速练，把余量用掉",
         "body": "这一局 v1 准确率 %.2f%%，降速练已经没有意义了：用 %s 倍速把全曲过一遍，"
-        "能稳定在 98%% 以上再回原速。" % (acc_v1, _rates_text(rates)),
+        "目标是在加速下也稳在 98%% 以上——做到了说明速度余量是真的有，"
+        "做不到就说明余量就在这一档附近。" % (acc_v1, _rates_text(rates)),
         "rates": rates,
         # 全曲加速：不裁段，整张图重新打包
         "fullMap": True,
