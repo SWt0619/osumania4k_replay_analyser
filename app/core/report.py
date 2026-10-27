@@ -30,6 +30,13 @@ RATE_TIERS = (
 )
 DEFAULT_RATES = (0.9,)
 
+# 入门线：Intro 1 ~ Reform 3。这一档的人大多还没建立稳定的键位映射，节奏也靠眼睛猜，
+# 把密度分段、键型构成、锚度这些拆解摊开会淹没真正该做的事。报告只留数据、推荐曲目
+# 和几条能马上照做的建议；段位上去之后这些内容会自动回来。
+# 标签与数值的对应是 Reform N = N，细分 low/mid/high 各差 0.4，所以「Reform 3 high」
+# 是 3.4、「Reform 4 low」是 3.6 —— 门槛取 3.6，正好把整个 Reform 3 包进去。
+SIMPLE_DAN = 3.6
+
 # 成绩撑不住就降速、撑得住就提速。98.5% 是「这套已经打穿」的线：再降速只是重复劳动，
 # 不如把余量用掉——注意这条线看的是 **v1 口径**，切到 v2 / classic 也不能跟着动。
 FAST_ACC = 98.5
@@ -40,27 +47,42 @@ FAST_TIERS = (
 FAST_DEFAULT = (1.1,)
 
 
+def _dan_of(payload: dict, dan_value: float | None = None) -> float | None:
+    """段位数值：优先用前端回传的混合链结果，没有才退回 MSD 换算。
+
+    两套口径在个别图上能差半档到两段，MSD 只当首屏兜底——前端估算一回来，
+    这里就会用真正的那个数重算一遍。
+    """
+    if dan_value is not None:
+        try:
+            return float(dan_value)
+        except (TypeError, ValueError):
+            return None
+    msd = payload.get("msd") or {}
+    info = msd.get("dan")
+    if not isinstance(info, dict):
+        overall = _f(msd.get("overall"))
+        info = dan.estimate(overall) if overall > 0 else {}
+    raw = info.get("dan")
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _practice_rates(payload: dict, dan_value: float | None = None,
                     acc_v1: float | None = None) -> list[float]:
     """练习谱面用哪几个倍率，从慢到快。
 
     `dan_value` 由前端把混合估算链（Sunny → Azusa → Roxy）的结果传上来——那才是
-    页面上显示的段位。只有拿不到时才退回 MSD 换算：两套口径在个别图上能差半档到
-    两段，用 MSD 顶替会在边界图上给出和页面不一致的倍率。
+    页面上显示的段位。只有拿不到时才退回 MSD 换算。
     """
-    if dan_value is None:
-        msd = payload.get("msd") or {}
-        info = msd.get("dan")
-        if not isinstance(info, dict):
-            overall = _f(msd.get("overall"))
-            info = dan.estimate(overall) if overall > 0 else {}
-        raw = info.get("dan")
-        dan_value = float(raw) if raw is not None else None
+    level = _dan_of(payload, dan_value)
     fast = acc_v1 is not None and float(acc_v1) >= FAST_ACC
-    if dan_value is None:
+    if level is None:
         return list(FAST_DEFAULT if fast else DEFAULT_RATES)
     for floor, rates in (FAST_TIERS if fast else RATE_TIERS):
-        if float(dan_value) >= floor:
+        if level >= floor:
             return list(rates)
     return list(FAST_DEFAULT if fast else DEFAULT_RATES)
 
@@ -925,6 +947,117 @@ def _finalize_advice(items: list[dict], share: dict, limit: int = 3) -> list[dic
     return out[:limit]
 
 
+def _simple_tips(acc: float, ur: float, median_delta: float) -> list[dict]:
+    """入门阶段的三四条建议，先看成绩再决定说什么。
+
+    同一个段位里，100% 和 80% 该做的事完全相反：前者这张图已经没有可练的东西，
+    后者连节奏都还没跟上。所以先按准确率定调，再补一条整局偏移对应的下落速度调整，
+    最后才是「固定键位」这类通用提醒。
+
+    这里刻意不谈键型、密度、锚度：这个段位的人连键位都还没固定下来，
+    分析得再细也落不到手上。
+    """
+    tips: list[dict] = []
+
+    if acc >= 99.0:
+        # 打穿了就别再劝人练基础，直接推去更难的图
+        tips.append({
+            "tag": "ability",
+            "title": "这张图可以放掉了",
+            "body": "准确率 %.2f%%、UR %.0f，这一档已经没有能练的东西。下一局直接去试高两档的图，"
+                    "打不动就退一档，来回试几次比在这张图上刷分有用。" % (acc, ur),
+        })
+        tips.append({
+            "tag": "ability",
+            "title": "换图时把段位拨高两档",
+            "body": "「随机找图」里把段位调到你这一局再往上两档，一次取五张，挑最顺手的那张打。",
+        })
+        return tips
+
+    if acc >= 95.0:
+        tips.append({
+            "tag": "ability",
+            "title": "先把误差收小，再谈加难度",
+            "body": "准确率 %.2f%% 说明这张图你能打下来，差的是每一下都落在判定线正中。"
+                    "这一档连着打三遍，把准确率抬到 99%% 再考虑换更难的图。" % acc,
+        })
+    else:
+        tips.append({
+            "tag": "rhythm",
+            "title": "先把打击音打开",
+            "body": "设置里把打击音调到能听清。跟着声音打比盯着落点准，入门阶段最常见的问题"
+                    "是按得比听到的早半拍。",
+        })
+
+    shifted = abs(median_delta)
+    if median_delta <= -8:
+        tips.append({
+            "tag": "rhythm",
+            "title": "下落速度往上调一点",
+            "body": "这一局整体打早了 %.0f ms。把下落速度调快 0.2~0.3，音符在屏幕上停留的时间"
+                    "短一些，手就不会抢在节奏前面。" % shifted,
+        })
+    elif median_delta >= 8:
+        tips.append({
+            "tag": "rhythm",
+            "title": "下落速度往下调一点",
+            "body": "这一局整体打晚了 %.0f ms。把下落速度调慢 0.2~0.3，给自己多留一点反应时间；"
+                    "调慢之后还是偏晚，再去设置里检查音频偏移。" % shifted,
+        })
+
+    if acc < 95.0 and (acc < 92 or ur > 180):
+        tips.append({
+            "tag": "ability",
+            "title": "先追准，再追快",
+            "body": "这一局准确率 %.2f%%。把速度降到 0.9 倍，慢到每一击都能落在判定线正中，"
+                    "连着三遍不掉准，再回原速。" % acc,
+        })
+
+    if acc < 95.0:
+        tips.append({
+            "tag": "ability",
+            "title": "固定一套键位",
+            "body": "四根手指各管一列，先别换手型。同一个键位连着打十几张同档的图，"
+                    "手指会自己记住位置。",
+        })
+    else:
+        tips.append({
+            "tag": "ability",
+            "title": "断连继续打，别重开",
+            "body": "连击是打准的结果，不是目标。掉了连击就把后面打完，"
+                    "养成重开的习惯反而练不到稳定性。",
+        })
+    return tips[:4]
+
+
+def _build_simple(payload: dict, acc: float, ur: float, median_delta: float) -> dict:
+    """Intro 1 ~ Reform 3 的简易报告：数据、推荐曲目、几条建议，其余一概不给。"""
+    s = payload.get("summary", {})
+    grade, grade_desc = _grade(acc, ur, _f(s.get("errorRate")))
+    # 满分或接近满分的局，标题还写「先把节奏练出来」就是睁眼说瞎话
+    if acc >= 99.0:
+        headline = "这张图已经在你能力之下"
+        lead = ("这一局几乎没有失误，说明这张图的难度压不住你。数据都留着，方便以后回头看；"
+                "下一步直接去试高两档的图，打不动就退一档。")
+    else:
+        headline = "先把节奏和键位练出来"
+        lead = ("这张图还在入门段位，报告把重点放在数据、推荐曲目和几条基础建议上。"
+                "等段位到 Reform 4 之后，时间轴、失误清单这些逐点分析会自动出现。")
+    return {
+        "grade": grade,
+        "gradeDesc": grade_desc,
+        "headline": headline,
+        "paragraphs": [lead],
+        # 亮点 / 短板对这批人同样是噪声：一句话说不清，说多了像在挑刺
+        "strengths": [],
+        "weaknesses": [],
+        "advice": _simple_tips(acc, ur, median_delta),
+        "badges": _badges(acc, ur, _f(s.get("absMedian")), s.get("maxCombo", 0),
+                          str(payload.get("judgeMode") or "v1")),
+        "simple": True,
+    }
+
+
 def build_evaluation(payload: dict, dan_value: float | None = None) -> dict:
     s = payload.get("summary", {})
     acc = _f(s.get("accuracy"))
@@ -933,6 +1066,11 @@ def build_evaluation(payload: dict, dan_value: float | None = None) -> dict:
     acc_v1 = _f(acc_v1_raw) if acc_v1_raw is not None else None
     ur = _f(s.get("ur"))
     median_delta = _f(s.get("medianDelta"))
+
+    # 入门段位直接走简易版：拆解类内容对这批人没有落点
+    level = _dan_of(payload, dan_value)
+    if level is not None and level < SIMPLE_DAN:
+        return _build_simple(payload, acc, ur, median_delta)
 
     draft = _Draft(
         payload=payload,
@@ -979,4 +1117,5 @@ def build_evaluation(payload: dict, dan_value: float | None = None) -> dict:
         "weaknesses": draft.weaknesses[:4],
         "advice": advice,
         "badges": _badges(acc, ur, _f(s.get("absMedian")), s.get("maxCombo", 0), draft.judge_mode),
+        "simple": False,
     }
