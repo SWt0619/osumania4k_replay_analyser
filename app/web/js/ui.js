@@ -379,8 +379,26 @@
     return Number.isFinite(raw) && raw > 0 ? raw : null;
   }
 
+  // ---------------------------------------------------------------- 简易模式
+  // Intro 1 ~ Reform 3 收起的是"逐点分析"那一类页签（时间轴、失误清单、细节数据），
+  // 总览里的图表和「谱面难度」照旧——新手同样要看这些。
+  // 判定在后端（report.SIMPLE_DAN），这里只负责收放界面。
+  const SIMPLE_TABS = ["timeline", "errors", "details"];
+
+  function applySimpleMode(on) {
+    document.body.classList.toggle("is-simple", !!on);
+    if (!on) return;
+    // 正停在被收起的页签上时回到总览，别留一个空白页
+    const active = document.querySelector(".rail-btn.is-active");
+    if (active && SIMPLE_TABS.indexOf(active.dataset.tab) >= 0) {
+      const overview = document.querySelector('.rail-btn[data-tab="overview"]');
+      if (overview) overview.click();
+    }
+  }
+
   function renderHero(data) {
     const ev = data.evaluation || {};
+    applySimpleMode(!!ev.simple);
     const sm = data.summary || {};
     const card = $("heroCard");
     card.className = "card glass hero grade-" + (ev.grade || "B").replace("+", "");
@@ -1162,6 +1180,7 @@
     renderTrack,
     renderLibrary,
     renderHero,
+    applySimpleMode,
     renderAdviceList,
     renderMsd,
     applySunnyDan,
