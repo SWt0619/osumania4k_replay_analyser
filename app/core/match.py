@@ -1,25 +1,21 @@
-"""把「回放的按下事件」和「谱面的物件」配对，得出每一击的误差。
+"""把回放和谱面配上，得出每一击的判定与误差。
 
 这是整个分析的地基：所有误差、判定、失误都从这里来，所以规则要写清楚、可解释、可测试。
 
-配对规则（逐列独立）：
-  * 一次按下只能命中同一列的一个物件。
-  * 允许的最大偏差 = 该谱面的**命中窗口**（meh 窗口，151 - 3*OD），而不是 miss 窗口。
-    这是关键：误差超过 meh 时官方就已经判漏了，那一下按键并没有打在这颗物件上，
-    它很可能是**下一颗物件的稍早按键**，必须留着给后面的物件（见下面的"不消耗"规则）。
-  * 按时间顺序贪心配对：先来的物件先挑，避免后面的物件抢走前面物件的按键。
-  * 配不上的按键 = 空敲；配不到按键的物件 = 漏接。两者都**不消耗**对方。
+**主路径是逐帧状态机**（`match_replay_frames` → `mania_engine`）：回放本身就是一串
+「时间 + 绝对按键掩码」，按帧推进、每列独立走状态机，和游戏里的结算顺序一致。
+物件到期先于按键边沿、每列每帧只消费一个物件、长条松手当场结算——这三条决定了
+面条图上判定能不能对上，全局配对做不到。
 
-长按（hold）：
-  * 头部按普通物件判。
-  * **ScoreV1**：整条只出一个判定。用「按下之后该列最后一次松手」算尾部误差，
-    再按官方的合并口径降档（|头| ≤ 各档窗口的 1.2 / 1.1 / 1 倍，且
-    |头|+|尾| ≤ 2.4 / 2.2 / 2 倍），见 _hold_judgement()。体中松过手（hold break）
-    会把整条封顶在 MEH，而不是直接算 miss —— 官方只要求"按到尾部"，
-    中途松手后按回来仍然能拿到 MEH。
-  * **ScoreV2**：头、尾各判一次，尾窗口放大 1.5 倍，长按算两次判定、两点连击。
-    体中松手同样把尾判封顶在 MEH。两套结果都留在 JudgedNote 里，
-    页面可以随时切换（见 judged(mode)）。
+`match_replay` 保留的是另一套「先全局配对、再补尾判」的算法：它不依赖帧，只用
+按下/松手事件，适合没有帧数据的手工样本与对照实验。两套算法给出的 `JudgedNote`
+结构相同，上层（归因、时间轴、报告）不用区分。
+
+长按的三套口径（都写在 `JudgedNote` 里）：
+  * **ScoreV1**（stable）：整条只出一个判定，头尾合并误差按官方那套「头 ≤ 窗×1.2、
+    合并 ≤ 窗×2.4」降档；体中松手封顶 200。
+  * **ScoreV2**：头尾各判一次，尾窗口放大 1.5 倍，长按算两次判定；体中松手封顶 50。
+  * **Classic**（lazer + CL）：stable 的窗口配 V2 的分判，只用于展示。
 """
 
 from __future__ import annotations
@@ -29,6 +25,7 @@ import itertools
 import math
 from dataclasses import dataclass, field
 
+from . import mania_engine
 from .beatmap import Beatmap, HitObject, judge_offset, judgement_windows, judge_with_windows
 from .osr import PressEvent, ReleaseEvent
 
@@ -36,6 +33,10 @@ from .osr import PressEvent, ReleaseEvent
 # 用精确分数而不是 0.667/0.333/0.167 —— 后者在大谱面上会累积出千分之几的偏差，
 # 而官方公式就是 200/300、100/300、50/300。
 V1_WEIGHTS = {"perfect": 1.0, "great": 1.0, "good": 2 / 3, "ok": 1 / 3, "meh": 1 / 6, "miss": 0.0}
+
+# 长条体中的连击 tick 间隔（毫秒）：与 mania_engine 的模拟共用同一个值，
+# 两处各写一个数迟早会分叉，连击和判定就对不上了。
+LN_TICK_MS = mania_engine.LN_TICK_MS
 
 # ---------------------------------------------------------------------------
 # ScoreV2 常量
@@ -196,6 +197,10 @@ class MatchResult:
     beatmap: Beatmap
     od: float
     windows: dict[str, float] = field(default_factory=dict)
+    # 判定**产生**的顺序（判定名）。分数里的 bonus 是逐条累积的，同一时刻的和弦里
+    # 谁先判会改变后面每一下的 bonus —— 按物件顺序算分，实测中位差 219 分；
+    # 按这个顺序算，中位差 0。所以算分要用它，不要用 notes 的顺序。
+    judge_order: list[str] = field(default_factory=list)
 
     # ---- 汇总 -----------------------------------------------------------
     def counts(self, mode: str = "v1") -> dict[str, int]:
@@ -319,17 +324,49 @@ class MatchResult:
         """最长连击。V1 按物件、V2 / Classic 按头尾两个单位。
 
         V2 / Classic 下体中层松手会断连（即使尾判是 MEH），所以不能只看判定名。
+
+        长条**体中每 100ms 一个 tick 也计入连击**（官方 ManiaHoldNote 的 combo tick）：
+        只算头尾的话，面条图的最大连击会比游戏少一两千——实测一张 96% 长条的图
+        算 485、游戏是 708；补上 tick 之后 707。tick 从按下的位置起算，到松手或
+        长条结尾为止，中途断过的长条不补（不知道断点在哪，宁少不多）。
         """
-        if mode in ("v2", "classic"):
-            best = cur = 0
-            for _t, judgement, brk in self.units(mode):
-                if brk or judgement == "miss":
-                    cur = 0
-                    continue
-                cur += 1
-                best = max(best, cur)
-            return best
-        return max_combo_from([n.judgement for n in self.notes])
+        events: list[tuple[float, bool]] = []   # (时刻, 是否续上连击)
+        # 连击按**物件**算：一个长条是 1 个 combo（不是头尾两个），体中 tick 再逐个加。
+        # lazer 的 ScoreV2 虽然把长条拆成两次判定，但连击仍然一次——实测 1122 物件
+        # 508 长条的图，按头尾算会多出 500 多。
+        for n in self.notes:
+            if mode == "classic":
+                judgement = n.judgement_classic
+            elif mode == "v2":
+                judgement = n.judgement_v2 or n.judgement
+            else:
+                judgement = n.judgement
+            events.append((n.note_time, judgement != "miss"))
+
+        for n in self.notes:
+            if not n.is_hold or n.press_time is None or n.end_time is None:
+                continue
+            head = (n.head_judgement_classic or n.judgement) if mode == "classic" else (
+                n.head_judgement or n.judgement)
+            if head == "miss" or n.body_break:
+                continue
+            stop = n.end_time
+            if n.release_delta is not None:
+                stop = min(stop, n.end_time + n.release_delta)
+            t = n.press_time + LN_TICK_MS
+            while t < stop:
+                events.append((t, True))
+                t += LN_TICK_MS
+
+        events.sort(key=lambda e: (e[0], e[1]))   # 同一时刻先断后连，宁可少算
+        best = cur = 0
+        for _t, ok in events:
+            if not ok:
+                cur = 0
+                continue
+            cur += 1
+            best = max(best, cur)
+        return best
 
     def deltas(self, mode: str = "v1") -> list[float]:
         """击打误差序列。V2 / Classic 把长条尾判的误差也算进来（lazer 的 UR 口径）。"""
@@ -545,8 +582,10 @@ def _hold_judgement(head_delta: float | None, tail_delta: float | None,
       * 从「尾部 MEH 早窗口」到「OK 晚窗口」之间没按住键（提前松手且没按回来）；
       * 松手太晚（晚期 MEH 不可能，直接 MISS）。
 
-    body_break：长条体中松过手。官方只把它封顶在 MEH，不直接算 MISS ——
-    松手后按回来仍然能拿到 MEH，这一点以前的实现会误判成 MISS。
+    body_break：长条体中松过手。官方把它封顶在 200（V1 分支），不直接算 MISS ——
+    松手后按回来仍然能拿到 200，这一点以前的实现会误判成 MISS。
+
+    algo 参数只为兼容旧的调用点保留：A/B/C/D 现在都走这一套（stable 口径）。
     """
     if head_delta is None or tail_delta is None:
         return "miss"
@@ -555,11 +594,10 @@ def _hold_judgement(head_delta: float | None, tail_delta: float | None,
 
     meh = windows["meh"]
     ok = windows["ok"]
-    # A/B/C 保持旧口径：晚松超过 OK 窗口直接 MISS。
-    # D 是 V1 优化：晚松允许到 OK*2（只要整体误差还在 OK*2 内），
-    # 对应官方表格里 OK 的“整体误差 ≤ OK 最大值 × 2”；超过 OK 窗口的尾判最高只到 100。
-    late_limit = ok * 2 if algo == "D" else ok
-    if tail_delta < -meh or tail_delta > late_limit:
+    # stable 会把"松手太晚"镜像回 end - (release - end) 再算误差，所以早松晚松用的是
+    # 同一把尺子：超过 W50 才算 MISS。以前晚松只允许到 W100，104~130ms 的尾巴会被
+    # 误判成漏接 —— 实测 28 份 stable 回放，漏接数因此多出 119 个。
+    if tail_delta < -meh or tail_delta > meh:
         return "miss"
 
     p = windows["perfect"]
@@ -573,10 +611,10 @@ def _hold_judgement(head_delta: float | None, tail_delta: float | None,
         result = "ok"
     else:
         result = "meh"
-    # D：晚松超过 OK 窗口，整体最高只到 100，避免 103~146ms 的尾误差被算成 200。
-    if algo == "D" and tail_delta > ok:
-        result = _worse(result, "ok")
-    return "meh" if body_break and result != "miss" else result
+    # 破 LN 在 V1 里封顶 200（ScoreV2 才封顶 50，见 _settle_hold 里的尾判）。
+    if body_break and result != "miss":
+        result = _worse(result, "good")
+    return result
 
 
 _JUDGE_RANK = {"perfect": 5, "great": 4, "good": 3, "ok": 2, "meh": 1, "miss": 0}
@@ -691,21 +729,10 @@ def _apply_hold_tails(
         _hold_with_release(item, tail_rel, body_break, windows, windows_v2, algo)
 
 
-def _drain_missed(objs: list[HitObject], idx: int, until: float,
-                  windows: dict[str, float], out: list[JudgedNote]) -> int:
-    """把 until 之前已经不可能再被命中的物件记成漏接，返回新的物件下标。
-
-    判据用 meh 窗口：到了 `until - meh` 还没被按到，之后任何按键都超出命中窗口了。
-    """
-    while idx < len(objs) and objs[idx].time < until - windows["meh"]:
-        out.append(_make_miss(objs[idx]))
-        idx += 1
-    return idx
-
-
 def _settle_hold(obj: HitObject, press_time: float, head: str,
                  release_delta: float | None, windows: dict[str, float],
-                 windows_v2: dict[str, float]) -> JudgedNote:
+                 windows_v2: dict[str, float],
+                 body_break: bool | None = None) -> JudgedNote:
     """长条松开时结算判定（C 算法用）。
 
     release_delta 为 None 表示回放里没有松手记录（一直按到结尾）：按 0 处理，
@@ -718,7 +745,8 @@ def _settle_hold(obj: HitObject, press_time: float, head: str,
         release_delta = 0.0
     delta = press_time - obj.time
     tail = judge_with_windows(release_delta, windows_v2, 1.5)
-    body_break = release_delta < -windows["meh"]
+    if body_break is None:
+        body_break = release_delta < -windows["meh"]
     if (head == "miss" or body_break) and tail != "miss":
         tail = "meh"
     head_classic = judge_with_windows(delta, windows)
@@ -749,12 +777,17 @@ def _match_state_machine(
     od_value: float,
     windows: dict[str, float],
     windows_v2: dict[str, float],
+    note_lock: bool = False,
 ) -> MatchResult:
     """C 算法：按列逐事件模拟 DrawableHoldNote 的按住状态。
 
     和 A 口径的差别在头判：A 先做全局贪心配对，再补尾判；这里按键事件来一个处理一个，
     当前按住的键只属于一个长条，松开就结算它的尾判。连续/重叠长条时松手归属更接近官方，
     但同帧多事件的先后顺序仍然还原不了（回放里没有这个信息）。
+
+    note_lock：lazer 的 OrderedHitPolicy。一个音符只有在「下一个音符的起点还没到」时
+    才可打——玩家在 A、B 之间按下时，只要还没越过 B 的起点就归 A（哪怕 A 的偏差已经
+    一百多毫秒），越过了就顺延给 B，并把 A 强制判漏。stable 的事件机没有这层锁。
     """
     keys = max(1, beatmap.keys)
     by_col: list[list[HitObject]] = [[] for _ in range(keys)]
@@ -784,32 +817,94 @@ def _match_state_machine(
         events.sort(key=lambda e: (e[0], e[1]))
 
         idx = 0
+        alive = [True] * len(objs)        # 还没产生判定；note lock 会跳过一些音符，不能只看 idx
         active: HitObject | None = None   # 当前按住的这条长条
         active_press = 0.0                # 它的按下时刻
         active_head = "miss"              # 它的头判（尾判要按头判封顶）
 
+        def first_alive(start: int) -> int:
+            j = start
+            while j < len(objs) and not alive[j]:
+                j += 1
+            return j
+
+        def drain(until: float) -> None:
+            """把 until 之前已经不可能再命中的物件记成漏接。
+
+            用 meh 当界限是安全的：过了 meh 就超出命中窗口，之后无论怎么按都只能判漏，
+            只是「判漏的时刻」被提前到这次事件，不影响最终判定。
+            """
+            nonlocal idx
+            limit = until - windows["meh"]
+            while idx < len(objs) and objs[idx].time < limit:
+                if alive[idx]:
+                    alive[idx] = False
+                    out.append(_make_miss(objs[idx]))
+                idx += 1
+            idx = first_alive(idx)
+
         for t, kind in events:
-            idx = _drain_missed(objs, idx, t, windows, out)
+            drain(t)
             if kind == 0:
                 # 新的一次按下：上一条还按着的长条到此为止（没有松手记录，按到结尾算）
                 if active is not None:
                     out.append(_settle_hold(active, active_press, active_head, None,
                                             windows, windows_v2))
                     active = None
-                if idx >= len(objs):
-                    ghosts.append(GhostPress(time=t, column=col))
-                    continue
-                obj = objs[idx]
-                delta = t - obj.time
-                if abs(delta) > windows["meh"]:
-                    ghosts.append(GhostPress(time=t, column=col))
-                    continue
+                if note_lock:
+                    # 官方 OrderedHitPolicy：一个音符只有在「下一个音符的起点还没到」时才可打，
+                    # 否则这一击要顺延给后面的音符；命中时把更早未判的全部强制漏接。
+                    j = first_alive(idx)
+                    pick = -1
+                    while j < len(objs):
+                        nxt = first_alive(j + 1)
+                        if nxt < len(objs) and t >= objs[nxt].time:
+                            alive[j] = False
+                            out.append(_make_miss(objs[j]))
+                            j = nxt
+                            continue
+                        if abs(t - objs[j].time) > windows["meh"]:
+                            # 超出命中档但还在 Miss 窗内：官方 ResultFor 会返回 Miss 并**消费**这一击
+                            # （DrawableNote.CheckForResult 直接 ApplyResult(Miss)）。当成空敲留给
+                            # 下一次按键，会让这个音符被后面的按键「救回来」，那正是误差的来源。
+                            if abs(t - objs[j].time) <= windows["miss"]:
+                                pick = j
+                                break
+                            # 连 Miss 窗都过了：ResultFor 返回 None，官方返回 false 继续问下一个音符
+                            j = first_alive(j + 1)
+                            continue
+                        pick = j
+                        break
+                    if pick < 0:
+                        ghosts.append(GhostPress(time=t, column=col))
+                        continue
+                    k = idx
+                    while k < pick:
+                        if alive[k]:
+                            alive[k] = False
+                            out.append(_make_miss(objs[k]))
+                        k += 1
+                    obj = objs[pick]
+                    delta = t - obj.time
+                    alive[pick] = False
+                    idx = first_alive(idx)
+                else:
+                    if idx >= len(objs):
+                        ghosts.append(GhostPress(time=t, column=col))
+                        continue
+                    obj = objs[idx]
+                    delta = t - obj.time
+                    if abs(delta) > windows["meh"]:
+                        ghosts.append(GhostPress(time=t, column=col))
+                        continue
+                    alive[idx] = False
+                    idx = first_alive(idx + 1)
                 head = judge_with_windows(delta, windows_v2)
-                idx += 1
                 if obj.is_hold and obj.end_time is not None:
                     active, active_press, active_head = obj, t, head
                 else:
-                    item = _make_hit(obj, t, delta, judge_offset(delta, od_value))
+                    # 用传进来的 windows（可能已按 mod 缩放），不能重新按 OD 推一遍
+                    item = _make_hit(obj, t, delta, judge_with_windows(delta, windows))
                     item.head_judgement = head
                     item.judgement_v2 = head
                     out.append(item)
@@ -818,7 +913,7 @@ def _match_state_machine(
                                         t - active.end_time, windows, windows_v2))
                 active = None
 
-        idx = _drain_missed(objs, idx, float("inf"), windows, out)
+        drain(float("inf"))
         if active is not None:
             out.append(_settle_hold(active, active_press, active_head, None,
                                     windows, windows_v2))
@@ -830,6 +925,125 @@ def _match_state_machine(
     return MatchResult(notes=out, ghosts=ghosts, beatmap=beatmap, od=od_value, windows=windows)
 
 
+def _scaled_windows(windows: dict[str, float], mods: list[str] | None,
+                    v2: bool = False) -> dict[str, float]:
+    """按 stable 的顺序缩放判定窗：HR ÷1.4（否则 EZ ×1.4），DT/NC ×1.5（否则 HT ×0.75），
+    最后向零截断。
+
+    回放帧和谱面都在 audio clock 上，DT 下同样的手感误差在时间轴上会被放大 1.5 倍，
+    所以窗口也得跟着放大。这里不缩放的话，DT/HT 的成绩会被系统性算严/算松。
+    """
+    mods = set(mods or [])
+    scale = 1.0
+    if "HR" in mods:
+        scale /= 1.4
+    elif "EZ" in mods:
+        scale *= 1.4
+    if "DT" in mods or "NC" in mods:
+        scale *= 1.5
+    elif "HT" in mods:
+        scale *= 0.75
+    if scale == 1.0:
+        return windows
+    out = {k: float(int(v * scale)) for k, v in windows.items()}
+    if v2:
+        # ScoreV2 的 EarlyInputWindow（「提前按能识别」的下界）是裸值，官方的
+        # computeManiaWindowSet 只在另外五档上套 adjustManiaHitWindowFor。HR/DT 下
+        # 缩了它会把「早按但还在窗口内」的音符判成空敲。
+        out["miss"] = windows["miss"]
+    return out
+
+
+def match_replay_frames(
+    beatmap: Beatmap,
+    frames,
+    mods: list[str] | None = None,
+    column_map: list[int] | None = None,
+    od: float | None = None,
+) -> MatchResult:
+    """逐帧状态机的配对入口（与 stable 同构，见 mania_engine）。
+
+    为什么不用 presses/releases：判定依赖「这一帧按住了几列、上一帧是什么状态」，
+    而 events 只有按下/松手两个时刻，还原不出「按住期间物件到期」这类分支。
+    回放帧本身就是绝对掩码，直接喂给状态机最省事、也最接近游戏。
+
+    跑两遍：V1 一遍、ScoreV2 一遍。两套判定窗只在 V2 的 PERFECT 与长条尾窗上不同，
+    但状态机里「头判是否产生」「破 LN 封顶 50 还是 200」都跟着口径走，只能分开跑。
+    """
+    od_value = beatmap.od if od is None else od
+    windows = _scaled_windows(judgement_windows(od_value), mods)
+    windows_v2 = _scaled_windows(judgement_windows(od_value, score_v2=True), mods, v2=True)
+    objs = [
+        {"column": o.column, "time": o.time,
+         "end": o.end_time if o.is_hold else o.time, "hold": o.is_hold}
+        for o in beatmap.objects
+    ]
+    keys = max(1, beatmap.keys)
+    sim_v1 = mania_engine.simulate(objs, frames, windows, score_v2=False,
+                                   keys=keys, column_map=column_map)
+    sim_v2 = mania_engine.simulate(objs, frames, windows_v2, score_v2=True,
+                                   keys=keys, column_map=column_map)
+
+    by_index_v2 = {n.index: n for n in sim_v2.notes}
+    out: list[JudgedNote] = []
+    for state in sim_v1.notes:
+        obj = beatmap.objects[state.index]
+        v2 = by_index_v2.get(state.index)
+        # 头判：长条只有 ScoreV2 才真的产生头判（V1 是头尾合并），单点则直接取
+        # V2 那一遍的结果。不能拿 V1 的 `state.judgement` 顶替——两套状态机不只是
+        # 窗口不同，ScoreV2 还有「每帧每列预选」，同一击的归属都可能不一样。
+        # 实测一张 ScoreV2 的图：V1 把 140520 那一下给了更早的长条，140590 的单点
+        # 因此判漏；V2 按预选给了它、判 good，而这里若沿用 V1 就会把这一个报成 miss。
+        if v2 and state.is_hold:
+            head = v2.head_judgement or "miss"
+        else:
+            head = v2.judgement if v2 else state.judgement
+        tail = v2.judgement if state.is_hold and v2 else None
+        if state.is_hold and v2:
+            judgement_v2 = _worse(head, tail or "miss")
+        else:
+            judgement_v2 = v2.judgement if v2 else state.judgement
+
+        # Classic：stable 的窗口 + 头尾分判（我们自己的一种展示口径，不是官方模式）
+        delta = state.delta
+        release_delta = state.release_delta
+        head_classic = "miss" if delta is None else judge_with_windows(delta, windows)
+        tail_classic = None
+        if state.is_hold:
+            tail_classic = judge_with_windows(release_delta or 0.0, windows, 1.5)
+            if (head_classic == "miss" or state.was_broken) and tail_classic != "miss":
+                tail_classic = "meh"
+            judgement_classic = _worse(head_classic, tail_classic)
+        else:
+            judgement_classic = head_classic
+
+        item = JudgedNote(
+            index=state.index, obj_index=state.index, column=obj.column,
+            note_time=obj.time, is_hold=obj.is_hold, end_time=obj.end_time,
+            judgement=state.judgement,
+            delta=float(delta) if delta is not None else None,
+            press_time=float(state.press_time) if state.press_recorded else None,
+            release_delta=float(release_delta) if release_delta is not None else None,
+            head_judgement=head,
+            tail_judgement=tail,
+            judgement_v2=judgement_v2,
+            head_judgement_classic=head_classic,
+            tail_judgement_classic=tail_classic,
+            judgement_classic=judgement_classic,
+            body_break=state.was_broken,
+        )
+        item.dropped = item.judgement == "miss"
+        out.append(item)
+
+    out.sort(key=lambda x: (x.note_time, x.column))
+    for i, item in enumerate(out):
+        item.index = i
+    ghosts = [GhostPress(time=float(t), column=c) for t, c in sim_v1.ghosts]
+    order = [sim_v1.notes[i].judgement for i in sim_v1.sequence]
+    return MatchResult(notes=out, ghosts=ghosts, beatmap=beatmap, od=od_value,
+                       windows=windows, judge_order=order)
+
+
 def match_replay(
     beatmap: Beatmap,
     presses: list[PressEvent],
@@ -837,19 +1051,27 @@ def match_replay(
     od: float | None = None,
     extra_window: float = 0.0,
     algo: str = "A",
+    mods: list[str] | None = None,
+    windows: dict[str, float] | None = None,
+    windows_v2: dict[str, float] | None = None,
+    note_lock: bool = False,
 ) -> MatchResult:
     """执行配对。
 
     extra_window：可选的额外宽容（ms），用于"如果放宽一点会怎样"的对照实验。
     algo：C = 头判尾判都走事件流（服务端固定用这一条）；其余值走"A 口径"——
-    先全局贪心配对、再补尾判，供测试与对照实验用。D 只影响 A 口径下的尾判宽容，
-    C 口径不读这个参数。
+    先全局贪心配对、再补尾判，供测试与对照实验用。
+    mods：回放里带的 mod 名（HR/EZ/DT/NC/HT），用来缩放判定窗。
+    windows / windows_v2：直接指定判定窗（lazer 口径要用它绕开 stable 的表）。
     """
     od_value = beatmap.od if od is None else od
-    windows = judgement_windows(od_value)
-    windows_v2 = judgement_windows(od_value, score_v2=True)
+    if windows is None:
+        windows = _scaled_windows(judgement_windows(od_value), mods)
+    if windows_v2 is None:
+        windows_v2 = _scaled_windows(judgement_windows(od_value, score_v2=True), mods, v2=True)
     if algo == "C":
-        return _match_state_machine(beatmap, presses, releases, od_value, windows, windows_v2)
+        return _match_state_machine(beatmap, presses, releases, od_value, windows, windows_v2,
+                                    note_lock=note_lock)
     # 配对窗口 = 命中窗口（meh）。超过它官方就已经判漏，按键必须留给后面的物件。
     hit_window = windows["meh"] + max(0.0, extra_window)
 
