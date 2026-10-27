@@ -34,7 +34,10 @@ SKIP_DIRS = {"__pycache__", "dist", "build", ".git", ".venv", "node_modules", "_
 SKIP_EXT = {".pyc", ".pyo", ".osr", ".osu", ".osz", ".osb", ".osk", ".log", ".env",
             ".xlsx", ".xls", ".csv"}   # 表格只是设计期的参考，运行用不到
 SKIP_FILES = {"thumbs.db", "desktop.ini", "推送公开仓库.bat", "config.json", ".env",
-              ".gitignore", "ROADMAP.md"}
+              ".gitignore", "roadmap.md",
+              # 自己打印出来的更新记录，1.7MB 且玩家用不上，别混进发行包
+              # （这里一律小写比较，写大写会匹配不上）
+              "changelog.pdf"}
 # 仓库根目录下这些前缀的 md 是给自己看的（审查报告、待修清单、检验记录），不进发行包
 SKIP_DOC_PREFIX = ("待修清单", "代码质量报告", "独立验收报告", "键型判定检验")
 
@@ -48,6 +51,9 @@ def version() -> str:
 
 def should_skip(path: str) -> bool:
     name = os.path.basename(path)
+    # 「报告」目录只保留那句占位说明；用户自己跑出来的对比表、导出的 html 都留在本机
+    if os.path.basename(os.path.dirname(path)) == "报告" and not name.lower().endswith(".txt"):
+        return True
     if name.lower() in SKIP_FILES:
         return True
     # 内部工作笔记（待修清单 / 代码审查 / 检验报告）不进发行包：它们会过期，用户看了只会困惑
