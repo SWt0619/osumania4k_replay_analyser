@@ -1041,18 +1041,17 @@ class _AnalyzeApiMixin(_SessionView):
             beatmap_path = _write_temp(tmp_dir, ".osu", bm_bytes)
 
         songs_root = _field(req, "songsRoot") or None
-        return self._finish_analyze(replay_path, beatmap_path, songs_root, _field(req, "algo") or "C")
+        return self._finish_analyze(replay_path, beatmap_path, songs_root)
 
-    def _finish_analyze(self, replay_path: str, beatmap_path: str | None, songs_root: str | None,
-                        algo: str = "C"):
+    def _finish_analyze(self, replay_path: str, beatmap_path: str | None, songs_root: str | None):
         """分析已落盘的回放并返回 JSON（直接上传 / 分片上传 / 本地文件夹共用）。"""
-        return self._json(_analyze_and_store(replay_path, beatmap_path, songs_root, algo))
+        return self._json(_analyze_and_store(replay_path, beatmap_path, songs_root))
 
     # ---- 快捷导入（先按 F2 导出，再按 Shift+F2）--------------------------
     def _quick_import(self):
         """手动触发一次「分析最近导出的回放」。热键走的也是同一条逻辑。"""
         req = _parse_json(self._read_body()) or {}
-        payload, problem = _quick_payload(_field(req, "algo") or "C", bool(req.get("force")))
+        payload, problem = _quick_payload(bool(req.get("force")))
         if problem:
             return self._error(problem, 404)
         with QUICK_LOCK:
@@ -1167,7 +1166,7 @@ class _AnalyzeApiMixin(_SessionView):
         t0 = time.time()
         log("[analyze-local] " + name)
         resp = self._finish_analyze(
-            replay_path, None, _field(req, "songsRoot") or None, _field(req, "algo") or "C"
+            replay_path, None, _field(req, "songsRoot") or None
         )
         log("[analyze-local] 完成 用时 %.0f ms" % ((time.time() - t0) * 1000))
         return resp
@@ -1300,6 +1299,7 @@ class _PracticeMixin(_SessionView):
             "ok": True,
             "label": label,
             "dan": value,
+            "simple": bool(ev.get("simple")),
             "rates": report._practice_rates(payload, value, acc_v1),
             "advice": ev.get("advice") or [],
         })
@@ -1339,10 +1339,15 @@ class _PracticeMixin(_SessionView):
         # 这时退到补音频缓存（同一图包下过整包的音频也在那里）。
         audio = ""
         md5 = ""
+        bg_path = ""
+        bg_name = ""
         try:
             bm = parse_osu_text(text, path)
             md5 = bm.md5 or ""
             audio = bm.audio_path
+            # 切片要能显示背景：谱面里那行坐标还指着原图，包里没这张图就会是一片空白
+            bg_name = bm.background_filename
+            bg_path = bm.background_path
         except Exception:
             audio = ""
         if not audio:
@@ -1354,7 +1359,8 @@ class _PracticeMixin(_SessionView):
             return self._error("这张谱面的音频不在本地，无法变速；先在设置里补一次音频再试", 409)
 
         cid = uuid.uuid4().hex[:16]
-        _CUTS[cid] = {"text": out["text"], "audio": audio, "meta": out, "at": time.time()}
+        _CUTS[cid] = {"text": out["text"], "audio": audio, "meta": out,
+                      "bg": (bg_path, bg_name), "at": time.time()}
         _prune_cuts()
         payload = {k: v for k, v in out.items() if k != "text"}
         payload.update({
@@ -1393,9 +1399,13 @@ class _PracticeMixin(_SessionView):
             return self._error("音频数据无效（不是 WAV）", 400)
         meta = item["meta"]
         buf = io.BytesIO()
+        bg_path, bg_name = item.get("bg") or ("", "")
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
             z.writestr(meta["fileName"][:-4] + ".osu", item["text"].encode("utf-8"))
             z.writestr(meta["audioName"], wav)
+            # 背景图跟着一起打包，否则游戏里这张图是一片底色（谱面那行 Events 还指着它）
+            if bg_name and bg_path and os.path.isfile(bg_path):
+                z.write(bg_path, bg_name)
         body = buf.getvalue()
         log("[practice] 打包 %s（%.1f MB）" % (meta["fileName"], len(body) / 1048576.0))
         self._send(200, body, "application/octet-stream")
@@ -1499,7 +1509,6 @@ class _ChunkUploadMixin:
             return self._finish_analyze(
                 replay_path, beatmap_path=None,
                 songs_root=_field(req, "songsRoot") or None,
-                algo=_field(req, "algo") or "C",
             )
         finally:
             try:
@@ -1938,14 +1947,16 @@ def _refresh_library() -> None:
 
 
 def _analyze_and_store(replay_path: str, beatmap_path: str | None,
-                       songs_root: str | None, algo: str = "C") -> dict:
-    """跑完分析、建会话、记历史，返回完整结果。HTTP 入口与热键共用这一份。"""
+                       songs_root: str | None) -> dict:
+    """跑完分析、建会话、记历史，返回完整结果。HTTP 入口与热键共用这一份。
+
+    判定模型由回放里的客户端版本决定（stable 逐帧状态机 / lazer 事件式），
+    没有手动开关：两套规则混用只会算错，选项留着也只会让人选错。
+    """
     _refresh_library()
-    algo = algo if algo in ("C", "D") else "C"
     before = library_mod.LAST_BUILD[0]
     try:
-        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root,
-                          judge_algo=algo)
+        payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root)
     finally:
         # 重扫恰好发生在"找不到这张图"这条路上，而那条路是会抛异常的，
         # 所以日志必须写在 finally 里，否则最需要它的场景反而没有记录。
@@ -1978,7 +1989,7 @@ def _analyze_and_store(replay_path: str, beatmap_path: str | None,
     return payload
 
 
-def _quick_payload(algo: str = "C", force: bool = False) -> tuple[dict | None, str]:
+def _quick_payload(force: bool = False) -> tuple[dict | None, str]:
     """分析最近一次导出的回放。返回（结果, 错误说明），出错时结果为 None。
 
     同一份文件连按两次不会重复分析：路径与修改时间都没变时直接给上一次的结果，
@@ -2006,7 +2017,7 @@ def _quick_payload(algo: str = "C", force: bool = False) -> tuple[dict | None, s
             QUICK.update(busy=True, error="")
             QUICK_COND.notify_all()
         try:
-            payload = _analyze_and_store(item["path"], None, None, algo)
+            payload = _analyze_and_store(item["path"], None, None)
         except Exception:
             with QUICK_COND:
                 QUICK["busy"] = False
