@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 from . import anchor, attribution, dan, history, msd, patterns, report
-from .beatmap import JUDGEMENT_LABEL, Beatmap, long_path, parse_osu_file
+from .beatmap import JUDGEMENT_LABEL, Beatmap, lazer_windows, long_path, parse_osu_file
 from .library import get_library
+from . import lazer_engine
 from .match import (
     V1_WEIGHTS,
     V2_ACC_VALUE,
@@ -25,11 +26,14 @@ from .match import (
     compare_with_header,
     infer_random_order,
     match_replay,
+    match_replay_frames,
+    _scaled_windows,
     max_combo_from,
     v1_weight,
 )
 from .metrics import histogram, median, percentile, stdev, unstable_rate
-from .osr import MOD_MR, MOD_RANDOM, Replay, detect_judge_mode, extract_events, judge_source, mods_human, parse_osr
+from .osr import (LAZER_VERSION, MOD_MR, MOD_RANDOM, Replay, detect_judge_mode, extract_events,
+                  judge_source, mods_human, parse_osr)
 from ..version import __version__
 
 JUDGEMENT_CODE = {"perfect": 0, "great": 1, "good": 2, "ok": 3, "meh": 4, "miss": 5}
@@ -907,7 +911,9 @@ def _projection(match: MatchResult, atts, actual_score: int = 0, mods: list[str]
     new_combo = max_combo_from(new_js)
     # 分数用官方的 ScoreV1 公式（基础分 + 奖励分）直接算，两端同一把尺子，不做任何比例校准。
     # 回放头里的官方分数单独放在 officialScore 里，只作对照。
-    cur_model = _v1_score(cur_js, mods)
+    # 「现在」的分数按状态机的判定顺序算（改判之前，顺序与 notes 一致的情况极少）；
+    # 修好 N 条之后是假设值，只能按物件顺序近似
+    cur_model = _v1_score(match.judge_order or cur_js, mods)
     new_model = _v1_score(new_js, mods)
     # 基准分用回放里那个**真实分数**（如果合法），涨幅用官方公式算出的差值：
     # 这样"现在"和游戏里一字不差，涨幅也不是凭空的比例系数，而是公式给的增量。
@@ -1191,8 +1197,68 @@ def _prepare_events(replay: Replay, beatmap_path: str | None, songs_root: str | 
     return beatmap, source, presses, releases, warn, column_order
 
 
-def _pair(beatmap: Beatmap, presses, releases, algo: str = "C") -> MatchResult:
-    match = match_replay(beatmap, presses, releases, algo=algo)
+def _column_map(replay: Replay, column_order: list[int] | None, keys: int) -> list[int] | None:
+    """「谱面列 → 回放列」的映射，给逐帧状态机用。
+
+    Random 的列序已经推断好了（order 就是 谱面列→回放列）；Mirror 是整体翻转。
+    两者都没有时返回 None，让状态机按原列号读掩码。
+    """
+    if column_order:
+        return list(column_order)
+    if replay.mods & MOD_MR:
+        return [keys - 1 - c for c in range(keys)]
+    return None
+
+
+def _judge_model(replay: Replay) -> str:
+    """按客户端选判定模型，没有手动开关。
+
+    lazer 和 stable 不是「同一套规则的两个参数」，而是两套判定：
+    stable 逐帧推进状态机、长条头尾合并；lazer 按下判头、松手判尾，窗口还带 +0.5。
+    拿 stable 的规则去算 lazer 的回放，面条图上会越算越偏，所以只能由回放的
+    客户端版本决定——手选留着只会让人选错。
+    """
+    return "lazer" if int(replay.version or 0) >= LAZER_VERSION else "stable"
+
+
+def _merge_converted_v1(laz: MatchResult, stable: MatchResult) -> None:
+    """把 stable 口径的 Classic 结果搬进 lazer 的配对结果。
+
+    V1 不搬：lazer 回放没有「V1 / ScoreV2」之分，回放头记的 300/100/50 就是
+    perfect+great / good / ok+meh 的合并（compare_with_header 也是这么比的），
+    直接用 lazer 的判定合并就能对上。拿 stable 的逐帧机器重算反而会多出几个
+    漏接——实测同一局 lazer 回放，头记 38 漏，stable 机器算出 42 漏。
+    """
+    by_obj = {n.obj_index: n for n in stable.notes}
+    for note in laz.notes:
+        src = by_obj.get(note.obj_index)
+        if src is None:
+            continue
+        note.head_judgement_classic = src.head_judgement_classic
+        note.tail_judgement_classic = src.tail_judgement_classic
+        note.judgement_classic = src.judgement_classic
+
+
+def _pair(beatmap: Beatmap, presses, releases, algo: str = "C",
+          mods: list[str] | None = None, frames=None,
+          column_map: list[int] | None = None,
+          model: str = "stable") -> MatchResult:
+    if frames:
+        stable = match_replay_frames(beatmap, frames, mods=mods, column_map=column_map)
+        if model != "lazer":
+            match = stable
+        else:
+            # lazer：事件驱动 + lazer 窗口。它没有逐帧状态机，长条是「按下判头、
+            # 松手判尾」，用 stable 的机器只会把松手时机算成 break/miss。
+            # note_lock：lazer 的 OrderedHitPolicy（下一个音符起点一到，前一个就不可打），
+            # 密集单点上归属与结算都靠它对齐，stable 没有这层锁。
+            # lazer 的判定粒度与 stable 不同（头 / 尾 / body 三个单元，尾判在最后一次
+            # 松手时结算），所以走 lazer_engine 的逐帧状态机，而不是事件式配对。
+            win = _scaled_windows(lazer_windows(beatmap.od), mods)
+            match = lazer_engine.match_lazer(beatmap, frames, win, column_map=column_map)
+            _merge_converted_v1(match, stable)
+    else:
+        match = match_replay(beatmap, presses, releases, algo=algo, mods=mods)
     if not match.notes:
         raise AnalyzeError("谱面里没有可分析的物件，或者回放与谱面完全不匹配。")
     return match
@@ -1366,7 +1432,6 @@ def analyze(
     replay_path: str,
     beatmap_path: str | None = None,
     songs_root: str | None = None,
-    judge_algo: str = "C",
 ) -> dict:
     watch = _Stopwatch()
     replay = _load_replay(replay_path)
@@ -1374,7 +1439,12 @@ def analyze(
         replay, beatmap_path, songs_root)
     watch.mark("parse")
 
-    match = _pair(beatmap, presses, releases, judge_algo)
+    # 逐帧状态机直接吃回放帧（绝对掩码），presses/releases 只留给「没有帧」的兜底路径
+    frames = [(f.time, f.mask) for f in replay.frames]
+    column_map = _column_map(replay, column_order, max(1, beatmap.keys))
+    model = _judge_model(replay)
+    match = _pair(beatmap, presses, releases, "C", replay.mod_names,
+                  frames=frames, column_map=column_map, model=model)
     watch.mark("match")
 
     contexts, blocks = _build_contexts(beatmap)
@@ -1391,6 +1461,8 @@ def analyze(
         "ok": True,
         "version": __version__,
         "warnings": [w for w in [warn] if w],
+        # 判定用的是哪套模型：页面据此给 V1 页签加「换算」提示
+        "judgeModel": model,
         "replay": _replay_block(replay, verify, column_order),
         "beatmap": beatmap_payload,
         **_beatmap_facts(beatmap, blocks, pattern_detail, beatmap_payload, replay, contexts),
@@ -1439,7 +1511,8 @@ def analyze(
             "default": judge_default,
             "source": judge_source(replay.version, replay.mods, replay.score_info),
             "modes": modes,
-            "algo": judge_algo,
+            # 实际用的判定模型（由回放版本决定），页面据此标注口径来源
+            "model": model,
         },
         "elapsedMs": watch.elapsed_ms(),
         "timings": watch.timings,
