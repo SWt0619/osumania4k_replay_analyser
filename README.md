@@ -11,17 +11,24 @@
 ### 分析这一局
 
 - **逐击误差**：把回放里的按键帧和谱面音符逐一对上，给出每一击的毫秒偏差、分列分布与 UR。
-- **判定还原**：按 mania 官方判定窗口判 MAX / 300 / 200 / 100 / 50 / MISS，长条可选Stable或Lazer判定方式，判定分布基本能与游戏内对上。
+- **判定还原**：按 mania 官方判定窗口判 MAX / 300 / 200 / 100 / 50 / MISS，规则按回放里的客户端版本自动选——stable 逐帧重演游戏的状态机，lazer 用它自己的窗口和按键归属。判定分布与游戏记录基本逐档一致：实测 36 张 stable 回放全部相同，118 张 lazer 回放里 77 张完全相同、准确率差都在 0.12 个百分点以内。
 - **失误归因**：每个失误给出四类原因之一（超出能力范围 / 节奏感弱 / 分神 / 随机失手），附打分依据和次要成因。
 - **键型分类**：细分到 stream、jumpstream、handstream、jack、trill、anchor 等 14 类（部分细分仍在调，见「注意事项」）。
 - **总体评价**：等级、一句话结论、分段表现、左右手对比、最吃亏的键型、稳定上限，以及几条具体建议。
+- **简易报告**：段位在 Reform 3 及以下的回放只留总览、谱面难度和两条建议——建议按成绩分档（99% 以上直接推高两档的图，95~99% 讲怎么追稳，再往下才讲打击音与下落速度），逐点分析的页签收起来。
 - **相似谱面推荐**：每份回放给出五张键型构成最接近、段位也最接近的谱面，附段位差与一键下载。
 
 ### 看和听
 
 - **跟曲重放**：播放谱面原声并渲染下落音符，支持 0.5×~1.5× 变速、只看失误、两路并排对比、点选失误物件直接看原因。
 - **打击音**：回放时可以听到每一下击打的声音，可切换「正解音」（按谱面要求的时间响）和「实际击打」（按你真正按下的时间响）
-- **判定口径可切换**：顶部栏的 V1 / V2 随时切换。V1 按 stable 的合并口径，V2 按 ScoreV2 的头尾分判（尾窗口 1.5 倍）。切换后播放器颜色、失误清单、准确率、时间轴与评语一起变，刷新后保持选择。
+- **判定口径可切换**：顶部栏的 V1 / V2 随时切换。V1 按 stable 的合并口径，V2 按 ScoreV2 的头尾分判（尾窗口 1.5 倍）。切换只是换一套统计口径、不会重新分析，播放器颜色、失误清单、准确率、时间轴与评语一起变，刷新后保持选择。
+
+### 练习
+
+- **倍速切片**：建议里点一下就能生成练习谱面——薄弱段落向外扩到最近的整八拍、开头补 3 秒空白、音频一起变速，导出成 `.osz` 直接并进原曲包，难度名带 `Slice` / `Rate` 前缀方便事后批量删。倍率按段位给：Reform 10 及以下只有 0.9×，Alpha~Gamma 是 0.95× 与 0.9×，Delta 以上是 0.96× 与 0.92×，每一档都单独给估算段位。
+- **提速练习**：V1 准确率 98.5% 以上时反过来给提速版——Reform 10 及以下整曲 1.1×，Alpha~Gamma 给 1.05× 与 1.1×，Delta 以上只给 1.05×，这时不再出降速与分段复练的建议。
+- **改进建议**：最多三条，同一类的合并成一条主建议，点建议里的时间直接跳到回放的那一段。
 
 ### 长期追踪
 
@@ -38,6 +45,7 @@
 - **难度与段位**：MinaCalc 算 MSD 与七维雷达图；段位按谱面类型选算法——RC 图优先 Roxy（数值 11~17），超出范围或被拒绝时回退 Azusa，再回退 Sunny；面图仍用 Sunny 的 LN 标尺，长条图给「RC 段位 || LN 段位」两条。界面会标明用的是哪一个，开 DT / HT 时按实际倍率下的密度计算。
 - **音频在线补齐**：只在 lazer 里下载过的谱面本地没有音频，程序会按图集 id 去镜像站取一次谱面包，只留下音频并缓存。补的时候右上角会有一条「补音频」进度条，写着下到多少、当前是下载还是校验。
 - **随机找图**：选常规或面条段位 + 键型，自动推荐 ±1 段的 8 张图；点封面直接下载 `.osz`。
+- **锚度**：叠（stack）与切（cut）两类写法各给一个锚度，写明是第几张 / 共几张、覆盖率、平均链长与最大链长。两套口径不同，只能同类之间比。
 - **本地回放搜索**：`_replays` 目录里的回放多了以后，导入页可以直接按文件名搜。
 - **纯本地、免安装**：只监听 `127.0.0.1`，便携版自带 Python 运行时，不装任何东西。
 
@@ -167,7 +175,7 @@
 ## 注意事项
 
 1. **DT / HT / Mirror**：回放帧时间和谱面时间在同一条时间轴上，所以误差值不用换算；UR 按官方口径除以倍率。开了 Mirror 的回放会先把按键的左右键位翻回来再配对，分列统计仍然按谱面原本的列号。
-2. **长条（面图）的判定口径**：V1 按 stable 的合并口径，整条只出一个判定；V2 头尾各判一次，尾窗口放大 1.5 倍。体中松过手会把当前口径封顶在 MEH；松到尾部窗口之外、或松得太晚才算 MISS。面图的判定分布与游戏内仍可能有 1~2 个判定的出入，切到 V1 / V2 可以对照你当时用的计分模式。长条只按头部判定键形。
+2. **判定规则跟着客户端走，V1 / V2 只是展示口径**：stable 的回放按 stable 的逐帧状态机算，lazer 的回放按 lazer 自己那套算（头、尾、体三段分开，尾判在真正跨过结尾的那次松手才结算），设置里没有开关，也不用选。顶部栏的 V1 / V2 切的是同一局的两套统计口径，不会重新分析。体中松过手会把结果封顶在 MEH；松到尾部窗口之外、或松得太晚才算 MISS。面图的判定分布可能与游戏差几个音符（实测 36 张 stable 回放全部相同，118 张 lazer 回放里 77 张完全相同、最差 0.12 个百分点）。长条只按头部判定键形。
 3. **准确率的两个数不是一回事**：顶栏的「击打偏差」是每次击打偏离目标的幅度（取绝对值），正文的「整局偏移」是带正负号的中位数（整体偏早还是偏晚）。有早有晚时整局偏移可能接近 0，但每次击打照样偏了十几毫秒。
 4. **启发式归因**：四类的边界在真实数据里会重叠（尤其「能力 + 节奏」双重），所以每条结论都带可信度，可信度低时请当成「两种都有可能」。
 5. **谱面版本对不上**（比如谱面后来被更新过）时 MD5 会查不到，程序会在「本次数据」里如实标注。
@@ -197,6 +205,10 @@ app/
     osr.py             .osr 解析（文件头 + LZMA 帧 + 按键位掩码 → 按下/松手事件）
     beatmap.py         .osu 解析（mania 列号、长条、判定窗口）
     match.py           击打 ↔ 音符配对与判定
+    mania_engine.py    stable 的逐帧判定引擎（状态机、长条体、连击 tick）
+    lazer_engine.py    lazer 的逐帧判定引擎（头 / 尾 / 体三段）
+    practice.py        倍速切片（按八拍裁段、音频变速、打包 osz）
+    anchor.py          锚度（叠 / 切两套口径与分位表）
     metrics.py         统计工具（UR、游程检验、CUSUM、分箱、分位数）
     patterns.py        每个音符的局部上下文（密度、和弦、连打、交错、细分）
     attribution.py     失误归因（打分 + 理由 + 次要成因）
@@ -216,6 +228,8 @@ app/
   web/                 前端（原生 JS，零构建）
     js/estimator.js    段位估算的封装：前端跑 Sunny → Azusa → Roxy，再查 RC / LN 两张标尺
     js/hitsound.js     打击音（hihat 采样 + 独立音量）
+    js/practice.js     倍速切片入口（按段位给倍率、生成与下载）
+    js/download.js     谱面包下载（服务端分段并发，页面只轮询进度）
     js/player.js       回放渲染、打击特效、打击音触发
     audio/hihat.wav    打击音采样
     vendor/mma/        第三方算法与段位表（MIT，原样复制，说明见该目录 README）
@@ -244,8 +258,11 @@ _replays/              备用通道：把回放放这里，页面里点文件名
 ## 参考内容
 
 - [ppy/osu](https://github.com/ppy/osu)：判定窗口口径、测试回放与 ScoreV1 计分公式的依据。
+- [osumania-replay-analyzer](https://github.com/uuUlazis/osumania-replay-analyzer)：提供了非常严谨的 stable 和 lazer 端物件重建算法，大大提高了本程序回放重建精准度（作者 [@uuUlazis](https://github.com/uuUlazis)）。
 - [Etterna](https://github.com/etternagame/etterna)：使用其 MinaCalc 计算 MSD 难度。
 - [sayobot](https://osu.sayobot.cn)：谱面镜像站。本地没有音频时，程序从这里下载谱面包并只保留音频（见「注意事项」第 7 条）。备用镜像：[nerinyan](https://nerinyan.moe)、[catboy](https://catboy.best)。
 - [osumania_map_analyser](https://github.com/LeoBlackMT/osumania_map_analyser)：段位估算的实现来源。Roxy 与 Azusa 两套算法、RC / LN 段位标尺都原样放在 `app\web\vendor\mma\` 下（未做改动，说明见该目录的 README）。Roxy 是 4K RC 的元结构估算器，用 Ridge 元模型融合 Azusa / Daniel 的预测；Azusa 则融合 Daniel 与 Sunny 的结果。算法细节见 [Roxy 文档](https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/roxy_algorithm.md)、[Azusa 文档](https://github.com/LeoBlackMT/osumania_map_analyser/blob/main/docs/azusa_algorithm.md)。
 - [Sunny Rework](https://github.com/sunnyxxy/Star-Rating-Rebirth)：Sunny 星级与长条（LN）星级。Roxy / Azusa 只做 4K RC，长条占比高的谱面只用 Sunny 估段位。
 - [Daniel](https://thebagelofman.github.io/Daniel/)：Daniel 难度算法，作为 Azusa 与 Roxy 的输入之一。
+- [osumania_estimator](https://github.com/AkutaZehy/osumania_estimator)：借鉴了部分公开算法优化长条判定逻辑。
+- [魔女的观景台](https://guanjingscene.xyz/)：锚度（叠 / 切）的灵感来源。
