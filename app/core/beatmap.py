@@ -179,18 +179,23 @@ class Beatmap:
         return resolve_audio(os.path.dirname(self.path), self.audio_filename)
 
     @property
-    def background_path(self) -> str:
+    def background_filename(self) -> str:
+        """[Events] 里背景图那一行指向的文件名，原样返回（可能带子目录）。"""
         for ev in self.events:
             if len(ev) >= 3 and ev[0] == "0" and ev[1] == "0":
                 name = (ev[2] or "").strip()
-                if not name:
-                    continue
-                if not name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
-                    continue
-                p = os.path.join(os.path.dirname(self.path), name.replace("/", os.sep))
-                if _isfile(p):
-                    return p
+                if name and name.lower().endswith((".png", ".jpg", ".jpeg", ".bmp")):
+                    return name
         return ""
+
+    @property
+    def background_path(self) -> str:
+        """背景图的绝对路径。lazer 把文件拆开存时找不到，返回空串。"""
+        name = self.background_filename
+        if not name:
+            return ""
+        p = os.path.join(os.path.dirname(self.path), name.replace("/", os.sep))
+        return p if _isfile(p) else ""
 
     # ---- 时间轴 / 密度 --------------------------------------------------
     @property
@@ -501,6 +506,35 @@ def judgement_windows(od: float, score_v2: bool = False) -> dict[str, float]:
         "ok": float(math.floor(127.0 - 3.0 * od + 1e-9)),
         "meh": float(math.floor(151.0 - 3.0 * od + 1e-9)),
         "miss": float(math.floor(188.0 - 3.0 * od + 1e-9)),
+    }
+
+
+def _difficulty_range(od: float, min_v: float, mid_v: float, max_v: float) -> float:
+    """osu! 的 DifficultyRange：OD 5 取中间值，两端线性外推到 min/max。"""
+    if od > 5:
+        return mid_v + (max_v - mid_v) * (od - 5) / 5.0
+    if od < 5:
+        return mid_v - (mid_v - min_v) * (5 - od) / 5.0
+    return mid_v
+
+
+def lazer_windows(od: float) -> dict[str, float]:
+    """lazer 的 mania 判定窗。
+
+    和 stable 的差别不只是公式：lazer 把每个窗口算成 `floor(值) + 0.5`，也就是
+    「半开区间向右挪半毫秒」——边界上那些差 0.2ms 的音，两边会判成不同档。
+    stable 那边是直接 floor 成整数（见 judgement_windows）。
+
+    另外 lazer 的 PERFECT 是随 OD 变的（22.4 / 19.4 / 13.9），stable 的 V1 固定 16。
+    """
+    od = max(0.0, min(10.0, od))
+    return {
+        "perfect": float(math.floor(_difficulty_range(od, 22.4, 19.4, 13.9)) + 0.5),
+        "great": float(math.floor(_difficulty_range(od, 64.0, 49.0, 34.0)) + 0.5),
+        "good": float(math.floor(_difficulty_range(od, 97.0, 82.0, 67.0)) + 0.5),
+        "ok": float(math.floor(_difficulty_range(od, 127.0, 112.0, 97.0)) + 0.5),
+        "meh": float(math.floor(_difficulty_range(od, 151.0, 136.0, 121.0)) + 0.5),
+        "miss": float(math.floor(_difficulty_range(od, 188.0, 173.0, 158.0)) + 0.5),
     }
 
 
