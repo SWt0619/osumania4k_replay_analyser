@@ -185,14 +185,18 @@
     }
     if (!res || !res.ok || !res.advice || !res.advice.length) return;
     var old = (data.evaluation && data.evaluation.advice) || [];
-    var changed = old.length !== res.advice.length || old.some(function (a, i) {
+    var wasSimple = !!(data.evaluation && data.evaluation.simple);
+    var nowSimple = !!res.simple;
+    var changed = wasSimple !== nowSimple || old.length !== res.advice.length || old.some(function (a, i) {
       var before = (a.rates || (a.rate ? [a.rate] : [])).join("|");
       var after = ((res.advice[i] || {}).rates || []).join("|");
       return before !== after;
     });
     data.evaluation = data.evaluation || {};
     data.evaluation.advice = res.advice;
+    data.evaluation.simple = nowSimple;
     data.practiceRates = res.rates;
+    if (window.UI && window.UI.applySimpleMode) window.UI.applySimpleMode(nowSimple);
     if (changed && window.UI && window.UI.renderAdviceList) {
       window.UI.renderAdviceList(data);
     }
