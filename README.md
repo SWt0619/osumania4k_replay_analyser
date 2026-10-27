@@ -46,7 +46,7 @@
 
 ### 使用便携版 zip（推荐）
 
-1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.8.3-win64.zip`。
+1. 前往 [Release](https://github.com/SWt0619/osumania4k_replay_analyser/releases/latest) 下载 `osumania_replay_analyser-1.8.4-win64.zip`。
 2. 解压到任意位置。
 3. 双击 `启动分析器.exe`。它会静默起服务，不弹任何窗口。
 4. 浏览器会打开 `http://127.0.0.1:8806/`。端口被占用时程序会自动往后找一个空的。
