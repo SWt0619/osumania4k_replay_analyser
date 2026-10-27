@@ -135,12 +135,12 @@
     },
 
     // 手动触发一次「分析最近导出的回放」（热键被占用时的兜底）。
-    // force=true 表示同一份文件也要重算一遍（切换判定算法时用）。
-    quickImport(algo, force) {
+    // force=true 表示同一份文件也要重算一遍。
+    quickImport(force) {
       return jsonFetch("/api/quick-import", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ algo: algo || "C", force: !!force }),
+        body: JSON.stringify({ force: !!force }),
       });
     },
 
@@ -170,7 +170,7 @@
       });
     },
 
-    analyzeLocal(name, algo) {
+    analyzeLocal(name) {
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", "/api/analyze-local", true);
@@ -195,7 +195,7 @@
         };
         xhr.onerror = () => reject(new Error("请求发不出去"));
         xhr.ontimeout = () => reject(new Error("分析超时"));
-        xhr.send(JSON.stringify({ name: name, algo: algo || "C" }));
+        xhr.send(JSON.stringify({ name: name }));
       });
     },
 
@@ -219,7 +219,7 @@
       });
     },
 
-    analyze(replayBase64, beatmapBase64, songsRoot, beatmapPath, signal, algo) {
+    analyze(replayBase64, beatmapBase64, songsRoot, beatmapPath, signal) {
       return jsonFetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -228,7 +228,6 @@
           beatmap: beatmapBase64 || null,
           beatmapPath: beatmapPath || null,
           songsRoot: songsRoot || null,
-          algo: algo || "C",
         }),
         signal: signal || undefined,
       });
@@ -284,7 +283,7 @@
     // 分片上传兜底：把回放切成小片逐个 POST，每一片都是独立的小请求并带重试。
     // 用途：个别机器上安全软件/代理会把大 POST 体整包吞掉（表现为请求有去无回），
     // 小请求却畅通。直接上传失败时自动切到这条通道。
-    analyzeUploadChunked(base64, onProgress, onStage, algo) {
+    analyzeUploadChunked(base64, onProgress, onStage) {
       const CHUNK = 24 * 1024; // 24KB 原始字节/片
       return new Promise((resolve, reject) => {
         let bin;
@@ -336,7 +335,7 @@
             const res = await fetch("/api/analyze-chunked", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ sid: sid, algo: algo || "C" }),
+              body: JSON.stringify({ sid: sid }),
             });
             const text = await res.text();
             let data;
