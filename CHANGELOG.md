@@ -10,7 +10,7 @@
 
 - stable 回放的判定改成逐帧重演游戏的状态机：每个回放帧推进一次，物件到期先于按键、每列每帧只消费一个物件、长条体中松手还能按回来结算；同一列「提前按下」不会再把它之后的音符判死，长条到期还没松手也不会整列跳过。开着 ScoreV2 打的成绩按它的按键归属规则算，判定窗同时按 HR / EZ / DT / HT 缩放，面条图的最大连击把长条体里每 100 毫秒的 tick 也算进去。
 - lazer 回放的判定换成 lazer 自己的一套：判定窗每个窗口多半个毫秒、PERFECT 随 OD 变；长条拆成头 / 尾 / 体三段，尾判在真正跨过结尾的那次松手才结算，中途抖一下手指只断连击、尾巴还能按完，按键归属按它的「下一件音符到点就锁死」规则走。以前拿 stable 的规则去算，面条图上漏接会多算一大截，连纯 RC 图都会多认几个完美（游戏 96.02% 算成 96.21%）。
-- 以上特别感谢@Ulazis提供的算法参考，算法原文 https://github.com/uuUlazis/osumania-replay-analyzer/blob/main/judgement-report.md
+- 以上特别感谢@uuUlazis提供的算法参考，算法原文 https://github.com/uuUlazis/osumania-replay-analyzer/blob/main/judgement-report.md
 - 倍速切片打进游戏后没有背景图（谱面里那行仍然指着原图的 bg.jpg，包里却没有这张图），现在打包时会一起带上
 
 ### 调整内容
