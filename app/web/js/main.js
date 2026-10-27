@@ -59,9 +59,6 @@
     // 切换只是换一份视图，不重新请求分析。
     judgeMode: "v1",
     baseData: null,
-    // 判定算法（仅调试用）：C 头尾都走事件流（默认）、D 在 A 口径下放宽晚松。
-    // 页面上只有这两个选项，服务端也只认这两个值。
-    judgeAlgo: "C",
     lastReplay: null,   // 最后一次回放来源：{kind:"local", name} 或 {kind:"file", file}
     // 失误清单过滤：只影响显示，不参与判定
     hideLowConfidence: false,
@@ -93,7 +90,6 @@
         state.hitsoundVolume = p.hitsoundVolume;
       }
       if (p.judgeMode === "v1" || p.judgeMode === "v2" || p.judgeMode === "classic") state.judgeMode = p.judgeMode;
-      if (p.judgeAlgo === "C" || p.judgeAlgo === "D") state.judgeAlgo = p.judgeAlgo;
       if (typeof p.hideLowConfidence === "boolean") state.hideLowConfidence = p.hideLowConfidence;
       if (typeof p.confThreshold === "number" && p.confThreshold >= 0 && p.confThreshold <= 1) {
         state.confThreshold = p.confThreshold;
@@ -113,7 +109,6 @@
         hitsoundMode: state.hitsoundMode,
         hitsoundVolume: state.hitsoundVolume,
         judgeMode: state.judgeMode,
-        judgeAlgo: state.judgeAlgo,
         hideLowConfidence: state.hideLowConfidence,
         confThreshold: state.confThreshold,
         theme: state.theme,
@@ -1619,49 +1614,6 @@
     });
   }
 
-  function setJudgeAlgo(algo) {
-    if (algo !== "C" && algo !== "D") return;
-    if (state.busy) {
-      window.UI.toast("正在分析，等这次结束再切");
-      return;
-    }
-    state.judgeAlgo = algo;
-    savePrefs();
-    const box = $("judgeAlgoToggle");
-    if (box) {
-      box.querySelectorAll("[data-algo]").forEach((b) => {
-        b.classList.toggle("is-active", b.getAttribute("data-algo") === algo);
-      });
-    }
-    const last = state.lastReplay;
-    if (!last) {
-      window.UI.toast("导入文件后生效");
-      return;
-    }
-    if (last.kind === "local") {
-      state.busy = true;
-      window.UI.loading(true, "正在重新分析…");
-      window.API.analyzeLocal(last.name, algo)
-        .then((data) => {
-          renderAnalysis(data);
-          window.UI.toast("已生效");
-        })
-        .catch((e) => {
-          window.UI.loading(false);
-          window.UI.toast((e && e.message) || "重新分析失败", true);
-        })
-        .finally(() => { state.busy = false; });
-    } else if (last.kind === "file") {
-      handleReplayFile(last.file);
-      window.UI.toast("已生效");
-    } else if (last.kind === "quick") {
-      // 快捷导入没有本地文件句柄，只能让服务端按新算法把最近一份重算一遍；
-      // 结果还是走轮询那条路回来。
-      window.API.quickImport(algo, true)
-        .then(() => window.UI.toast("已按新算法重新分析"))
-        .catch((e) => window.UI.toast((e && e.message) || "重新分析失败", true));
-    }
-  }
 
   function setJudgeMode(mode, silent) {
     if (mode !== "v1" && mode !== "v2" && mode !== "classic") return;
@@ -1775,8 +1727,17 @@
       : data.judge.source === "lazer-classic"
         ? "lazer + Classic"
         : (data.judge.source === "stable-v2" ? "stable + ScoreV2" : "stable 回放");
+    const model = (data.judge && data.judge.model) || "";
     judgeBox.title = "长条判定口径：V1 头尾合并，V2 头尾分判（尾窗口 1.5 倍）。"
       + "已识别为 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase() + "，可随时手动切换。";
+    // lazer 的判定本身就是 320/300/200/100/50 六档，回放头记的 300/100/50 就是
+    // 「perfect+great / good / ok+meh」的合并；这里不再用 stable 机器重算，标一句免得误会
+    const v1Btn = document.querySelector('#judgeToggle [data-judge="v1"]');
+    if (v1Btn) {
+      v1Btn.title = model === "lazer"
+        ? "这局是 lazer 打的，V1 是把六档并成 300/100/50 的三档视图（与游戏结算一致），只作对照"
+        : "ScoreV1：长条整条算一个判定，头尾误差合并";
+    }
     if (state._autoJudge !== autoJudge) {
       state._autoJudge = autoJudge;
       window.UI.toast("已识别 " + srcLabel + "，自动使用 " + state.judgeMode.toUpperCase());
@@ -2165,7 +2126,7 @@
     beacon("upload-start", { bytes: base64.length });
     try {
       return await window.API.analyzeUpload(
-        { replay: base64, beatmap: null, beatmapPath: null, songsRoot: null, algo: state.judgeAlgo },
+        { replay: base64, beatmap: null, beatmapPath: null, songsRoot: null },
         (loaded, total) => {
           const pct = total ? Math.round((loaded / total) * 100) : 0;
           if (pct >= 100) setStage("上传完成，正在分析");
@@ -2188,8 +2149,7 @@
           const pct = total ? Math.round((loaded / total) * 100) : 0;
           setStage("分片上传 " + pct + "%（" + Math.round(loaded / 1024) + " / " + Math.round(total / 1024) + " KB）");
         },
-        (text) => setStage(text),
-        state.judgeAlgo
+        (text) => setStage(text)
       );
     }
   }
@@ -2296,7 +2256,7 @@
         window.UI.toast("本工具只支持 4K（4 键）谱面，你选的是 " + meta.keys + "K：" + meta.label, true);
         return;
       }
-      const data = await window.API.analyze(state.replayBase64, b64, null, null, null, state.judgeAlgo);
+      const data = await window.API.analyze(state.replayBase64, b64, null, null, null);
       closeModal("bmModal");
       renderAnalysis(data);
     } catch (e) {
@@ -2459,7 +2419,7 @@
   async function useLibraryBeatmap(path) {
     window.UI.loading(true, "正在用曲库里的谱面分析…");
     try {
-      const data = await window.API.analyze(state.replayBase64, null, null, path, null, state.judgeAlgo);
+      const data = await window.API.analyze(state.replayBase64, null, null, path, null);
       closeModal("bmModal");
       renderAnalysis(data);
     } catch (e) {
@@ -2669,8 +2629,6 @@
     }
     on("btnSaveHotkey", "click", saveHotkeySettings);
     on("btnMirrorTest", "click", testMirrors);
-    $("btnAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = false; });
-    $("btnCloseAlgoHelp").addEventListener("click", () => { $("algoHelpModal").hidden = true; });
     document.querySelectorAll(".modal").forEach((m) => {
       m.addEventListener("click", (e) => {
         if (e.target === m) m.hidden = true;
@@ -2801,19 +2759,6 @@
         const btn = ev.target && ev.target.closest ? ev.target.closest("[data-judge]") : null;
         if (!btn) return;
         setJudgeMode(btn.getAttribute("data-judge"));
-      });
-    }
-
-    // 判定算法（调试）：C/D 切换后按最后一次回放来源重新分析
-    const algoBox = $("judgeAlgoToggle");
-    if (algoBox) {
-      algoBox.addEventListener("click", (ev) => {
-        const btn = ev.target && ev.target.closest ? ev.target.closest("[data-algo]") : null;
-        if (!btn) return;
-        setJudgeAlgo(btn.getAttribute("data-algo"));
-      });
-      algoBox.querySelectorAll("[data-algo]").forEach((b) => {
-        b.classList.toggle("is-active", b.getAttribute("data-algo") === state.judgeAlgo);
       });
     }
 
@@ -3058,7 +3003,7 @@
         window.UI.loading(true, "正在读取本地回放…");
         setStage("正在分析本地回放");
         startWaiting();
-        window.API.analyzeLocal(it.name, state.judgeAlgo)
+        window.API.analyzeLocal(it.name)
           .then((data) => renderAnalysis(data))
           .catch((e) => {
             window.UI.loading(false);
