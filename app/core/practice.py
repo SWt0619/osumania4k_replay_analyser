@@ -4,8 +4,9 @@
 半拍上开始，前奏听不出重音，练的时候找不到落点。八拍是 4/4 里最自然的呼吸单位，
 多扩一点点没有副作用。
 
-0.9 倍速是**烘进谱面**的：物件时间和红线的 beatLength 一起乘 1/rate，BPM 显示成原来的
-0.9 倍，八分音符的间隔不变。玩家用原速打开就是慢速版，不依赖游戏里的 HT 档位。
+倍率是**烘进谱面**的：物件时间和红线的 beatLength 一起乘 1/rate，BPM 显示成原来的
+1/rate 倍，八分音符的间隔不变。玩家用原速打开就是变速版，不依赖游戏里的 HT / DT 档位。
+慢练取 0.85~0.9，冲速度时反过来取 1.05~1.1。
 绿线的 beatLength 是负值、表示流速，不能跟着缩。
 
 音频不在这里处理：这个项目没有解码能力，交给浏览器的 Web Audio（见 app/web/js/practice.js）。
@@ -106,71 +107,44 @@ def rate_label(rate: float) -> str:
     return ("Rate" if value > 1.0 else "Slice") + ("%g" % value)
 
 
-def cut(
-    osu_text: str,
-    t0: float,
-    t1: float,
-    rate: float = 0.9,
-    pad_ms: int = 3000,
-    tail_ms: int = 2000,
-    full: bool = False,
-) -> dict:
-    """把 [t0, t1] 扩到整八拍、按 rate 缩放，返回新谱面文本与时间信息。
+def _scale_time(t: float, cut_start: float, rate: float, pad_ms: int) -> float:
+    """原曲时间 → 练习谱面时间：先去掉段首偏移，再按倍率缩放，最后让出前奏静音。"""
+    return (t - cut_start) / rate + pad_ms
 
-    返回体里的 audioStart/audioEnd 是**原曲**上的取音区间（毫秒），前端按
-    `(audioEnd - audioStart) / rate` 渲染，再在最前面补 pad_ms 的静音。
+
+def _cut_window(tps: list[dict], objs: list[dict], t0: float, t1: float,
+                full: bool) -> tuple[float, float, float]:
+    """把 [t0, t1] 扩到整八拍，返回（裁切起点, 裁切终点, 拍长）。
+
+    终点必须向上取整：向下取整会让段尾落在网格线之前，段长就不是八拍的整数倍，
+    接回原曲时听感上会缺半拍。
     """
-    rate = float(rate)
-    # 上限放到 2.0：成绩够好时推荐的是提速练习（1.05 ~ 1.1），不是降速
-    if not 0.1 <= rate <= 2.0:
-        raise ValueError("倍率超出范围（0.1~2.0）")
-    label = rate_label(rate)
-    t0, t1 = float(t0), float(t1)
-    if t1 < t0:
-        t0, t1 = t1, t0
-    if not full and t1 - t0 < 1:
-        raise ValueError("这一段太短，没有可裁切的内容")
-
-    lines = osu_text.splitlines()
-    tp_range = _section(lines, "[TimingPoints]")
-    obj_range = _section(lines, "[HitObjects]")
-    if not tp_range or not obj_range:
-        raise ValueError("这张谱面缺少 [TimingPoints] 或 [HitObjects]，无法裁切")
-
-    tps = [p for p in (_parse_timing_point(l) for l in lines[tp_range[0]:tp_range[1]]) if p]
-    objs = [o for o in (_parse_object(l) for l in lines[obj_range[0]:obj_range[1]]) if o]
-    if not tps or not objs:
-        raise ValueError("这张谱面没有可用的节奏线或物件")
-
-    # ---- 1. 对齐到整八拍 ------------------------------------------------
     base = _grid_base(tps, t0)
     beat = base["beat"] if base["beat"] > 0 else DEFAULT_BEAT_MS
     step = beat * BEATS_PER_CUT
-    # 注意终点必须用 ceil：写成 -(-x // step) 在 Python 里等于 x // step（向下取整），
-    # 段尾会落在网格线之前，切出来的长度就不是整八拍的倍数。
+    last_end = max((o["end"] if o["end"] is not None else o["time"]) for o in objs)
     if full:
         # 全曲模式不裁：从 0 到最后一个物件，也不做八拍对齐（没有段要接）
-        cut_start = 0.0
-        cut_end = max((o["end"] if o["end"] is not None else o["time"]) for o in objs)
-    else:
-        cut_start = base["time"] + math.floor((t0 - base["time"]) / step) * step
-        cut_end = base["time"] + math.ceil((t1 - base["time"]) / step) * step
-        # 先夹到 0 以上，再保证至少一段：顺序反了会把开头那一段压短
-        cut_start = max(0.0, cut_start)
-        if cut_end - cut_start < step:
-            cut_end = cut_start + step
-        # 段尾不能无限往后：t1 传成 1e8 时对齐会把 cutEnd 拉到荒谬的位置，
-        # 音频那头根本取不到。夹到最后一个物件之后两拍，等于"到曲尾为止"。
-        last_end = max((o["end"] if o["end"] is not None else o["time"]) for o in objs)
-        cut_end = min(cut_end, last_end + step * 2)
+        return 0.0, last_end, beat
 
-    # ---- 2. 时间映射 ----------------------------------------------------
-    def conv(t: float) -> float:
-        return (t - cut_start) / rate + pad_ms
+    cut_start = base["time"] + math.floor((t0 - base["time"]) / step) * step
+    cut_end = base["time"] + math.ceil((t1 - base["time"]) / step) * step
+    # 先夹到 0 以上，再保证至少一段：顺序反了会把开头那一段压短
+    cut_start = max(0.0, cut_start)
+    if cut_end - cut_start < step:
+        cut_end = cut_start + step
+    # 段尾不能无限往后：t1 传成 1e8 时对齐会把终点拉到荒谬的位置，音频那头根本取不到。
+    # 夹到最后一个物件之后两拍，等于"到曲尾为止"。
+    return cut_start, min(cut_end, last_end + step * 2), beat
 
-    # ---- 3. 节奏线 ------------------------------------------------------
-    # 区间之前的那条红线（和它后面的绿线）要复制到前奏的 3000ms 处，
-    # 否则段首那几秒没有 BPM / 流速，物件会按默认值显示。
+
+def _retime_timing_points(tps: list[dict], cut_start: float, cut_end: float,
+                          rate: float, pad_ms: int) -> list[str]:
+    """把区间内的节奏线整体平移缩放，并给前奏补一条。
+
+    区间之前的那条红线（和它后面的绿线）要复制到前奏的 pad_ms 处，
+    否则段首那几秒没有 BPM / 流速，物件会按默认值显示。
+    """
     head_base = None
     head_sv = None
     for tp in tps:
@@ -197,15 +171,16 @@ def cut(
         if tp["time"] < cut_start or tp["time"] > cut_end:
             continue
         parts = list(tp["parts"])
-        parts[0] = _fmt_ms(conv(tp["time"]))
+        parts[0] = _fmt_ms(_scale_time(tp["time"], cut_start, rate, pad_ms))
         if tp["uninherited"] and tp["beat"] > 0:
             parts[1] = "%.10f" % (tp["beat"] / rate)
         new_tps.append(",".join(parts))
+    return new_tps
 
-    if not new_tps:
-        raise ValueError("这一段里没有任何节奏线，无法生成练习谱面")
 
-    # ---- 4. 物件 --------------------------------------------------------
+def _retime_objects(objs: list[dict], cut_start: float, cut_end: float,
+                    rate: float, pad_ms: int) -> list[tuple[float, str]]:
+    """裁出落在区间内的物件，时间缩放后重新拼行，返回（新时间, 行文本）。"""
     kept: list[tuple[float, str]] = []
     seen: set[tuple[str, int]] = set()
     for obj in objs:
@@ -213,8 +188,8 @@ def cut(
         end = obj["end"] if obj["end"] is not None else start
         if end < cut_start or start > cut_end:
             continue
-        new_start = conv(max(start, cut_start))
-        new_end = conv(min(end, cut_end))
+        new_start = _scale_time(max(start, cut_start), cut_start, rate, pad_ms)
+        new_end = _scale_time(min(end, cut_end), cut_start, rate, pad_ms)
         parts = list(obj["parts"])
         is_hold = bool(obj["kind"] & 128) and obj["end"] is not None
         if is_hold and new_end - new_start < MIN_HOLD_MS:
@@ -234,14 +209,19 @@ def cut(
             continue
         seen.add(key)
         kept.append((new_start, ",".join(parts)))
-
-    if not kept:
-        raise ValueError("这一段里没有任何物件，无法生成练习谱面")
     kept.sort(key=lambda kv: kv[0])
+    return kept
 
-    # ---- 5. 其它段落 ----------------------------------------------------
-    # 曲名一个字都不动：生成的难度要和原图并进同一个图包，改了 Title 就会被
-    # 拆成另一张图。只把 Version 换成 Slice0.9 / Rate1.1，音频换成本次生成的 wav。
+
+def _rewrite_beatmap(lines: list[str], tp_range: tuple[int, int],
+                     obj_range: tuple[int, int], new_tps: list[str],
+                     kept: list[tuple[float, str]], rate: float,
+                     label: str) -> tuple[str, str, str]:
+    """把新节奏线与物件写回原谱面，返回（文本, 曲名, 作者）。
+
+    曲名一个字都不动：生成的难度要和原图并进同一个图包，改了 Title 就会被
+    拆成另一张图。只把 Version 换成 Slice0.9 / Rate1.1，音频换成本次生成的 wav。
+    """
     audio_name = "%s-%g.wav" % ("rate" if rate > 1.0 else "slice", rate)
     title = ""
     artist = ""
@@ -292,11 +272,58 @@ def cut(
             if s.startswith(("Video,", "Sprite,", "Animation,", "Sample,")):
                 continue
         out.append(line)
+    return "\n".join(out) + "\n", title, artist
 
-    text = "\n".join(out) + "\n"
+
+def cut(
+    osu_text: str,
+    t0: float,
+    t1: float,
+    rate: float = 0.9,
+    pad_ms: int = 3000,
+    tail_ms: int = 2000,
+    full: bool = False,
+) -> dict:
+    """把 [t0, t1] 扩到整八拍、按 rate 缩放，返回新谱面文本与时间信息。
+
+    返回体里的 audioStart/audioEnd 是**原曲**上的取音区间（毫秒），前端按
+    `(audioEnd - audioStart) / rate` 渲染，再在最前面补 pad_ms 的静音。
+    """
+    rate = float(rate)
+    # 上限放到 2.0：成绩够好时推荐的是提速练习（1.05 ~ 1.1），不是降速
+    if not 0.1 <= rate <= 2.0:
+        raise ValueError("倍率超出范围（0.1~2.0）")
+    label = rate_label(rate)
+    t0, t1 = float(t0), float(t1)
+    if t1 < t0:
+        t0, t1 = t1, t0
+    if not full and t1 - t0 < 1:
+        raise ValueError("这一段太短，没有可裁切的内容")
+
+    lines = osu_text.splitlines()
+    tp_range = _section(lines, "[TimingPoints]")
+    obj_range = _section(lines, "[HitObjects]")
+    if not tp_range or not obj_range:
+        raise ValueError("这张谱面缺少 [TimingPoints] 或 [HitObjects]，无法裁切")
+
+    tps = [p for p in (_parse_timing_point(l) for l in lines[tp_range[0]:tp_range[1]]) if p]
+    objs = [o for o in (_parse_object(l) for l in lines[obj_range[0]:obj_range[1]]) if o]
+    if not tps or not objs:
+        raise ValueError("这张谱面没有可用的节奏线或物件")
+
+    cut_start, cut_end, beat = _cut_window(tps, objs, t0, t1, full)
+    new_tps = _retime_timing_points(tps, cut_start, cut_end, rate, pad_ms)
+    if not new_tps:
+        raise ValueError("这一段里没有任何节奏线，无法生成练习谱面")
+    kept = _retime_objects(objs, cut_start, cut_end, rate, pad_ms)
+    if not kept:
+        raise ValueError("这一段里没有任何物件，无法生成练习谱面")
+    text, title, artist = _rewrite_beatmap(lines, tp_range, obj_range,
+                                           new_tps, kept, rate, label)
+
     return {
         "text": text,
-        "audioName": audio_name,
+        "audioName": "%s-%g.wav" % ("rate" if rate > 1.0 else "slice", rate),
         "audioStart": round(cut_start, 3),
         # 尾部多留一点，免得最后一个音符后面立刻静音；前端拿到真实音频长度后自己夹
         "audioEnd": round(cut_end + tail_ms, 3),
