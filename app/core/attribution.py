@@ -1007,7 +1007,9 @@ def _stamina_profile(
     """耐力：在**同一种键型**的长段里，看后半程失误有没有明显高于前半程。
 
     判据都在 _stamina_candidate 里（段数、样本量、涨幅与显著性、密度不变）。
-    多条长段都满足时取 z 最大的那条；"过渡"段不参与（低密度段的失误更像走神）。
+    多条长段都满足时取 z 最大的那条当主证据，"过渡"段不参与（低密度段的失误更像走神）；
+    其余成立的长段放进 others —— 报告里只写一段会让人以为只有那一处，
+    实际上同样的写法可能在图里出现好几次。
     """
     empty = {
         # lateFrom 用 None 表示"没有这个窗口"。不能写 inf：那个值会一路进 JSON，
@@ -1016,22 +1018,34 @@ def _stamina_profile(
         "fromTime": 0.0, "toTime": 0.0,
         "baseNotes": 0, "baseFlaws": 0, "baseRate": 0.0, "baseDensity": 0.0,
         "testNotes": 0, "testFlaws": 0, "testRate": 0.0, "testDensity": 0.0,
-        "rise": 0.0, "z": 0.0, "blocks": 0, "reason": "",
+        "rise": 0.0, "z": 0.0, "blocks": 0, "reason": "", "others": [],
     }
     if not notes or not segments:
         return empty
 
     by_index = {n.obj_index: n for n in notes}
-    best: dict | None = None
+    cands: list[dict] = []
     for run in _same_category_runs(segments):
         cand = _stamina_candidate(run, by_index, density_of, mode)
-        if cand is None:
-            continue
-        if best is None or cand["z"] > best["z"]:
-            best = cand
+        if cand is not None:
+            cands.append(cand)
 
-    if best is None:
+    if not cands:
         return empty
+    best = max(cands, key=lambda c: c["z"])
+    # 其他成立的长段按时间排，报告里要把它们全列出来（只写主证据会漏掉别处）
+    best["others"] = [
+        {
+            "fromTime": c["fromTime"],
+            "toTime": c["toTime"],
+            "blocks": c["blocks"],
+            "label": c["label"],
+            "baseRate": c["baseRate"],
+            "testRate": c["testRate"],
+        }
+        for c in sorted(cands, key=lambda c: c["fromTime"])
+        if c is not best
+    ]
     best["reason"] = (
         "%s 起连续 %d 段都是「%s」：前 %d 段的失误率是 %.0f%%，之后升到 %.0f%%"
         "（多 %.0f 个百分点，同期密度 %.1f → %.1f 没有明显上升），是耐力撑不住了"
