@@ -21,7 +21,7 @@ import lzma
 import math
 import struct
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .beatmap import long_path
 
@@ -619,7 +619,11 @@ def parse_osr(path: str) -> Replay:
     stamp = None
     if head.ticks > 0:
         try:
-            stamp = datetime(1, 1, 1) + timedelta(microseconds=head.ticks // 10)
+            # 头部这个 Ticks 是 UTC（lazer 导出文件的文件名是本地时间，正好比它早 8 小时）。
+            # 以前直接按本地格式化，回放页和列表里显示的时间总比实际游玩时间早 8 小时。
+            utc = datetime(1, 1, 1, tzinfo=timezone.utc) + timedelta(
+                microseconds=head.ticks // 10)
+            stamp = utc.astimezone().replace(tzinfo=None)
         except (OverflowError, ValueError):
             stamp = None
 
