@@ -19,15 +19,16 @@
   // 常量
   // ---------------------------------------------------------------------------
 
-  // 可选参数的默认值。scrollMs 取 1200ms 是因为 osu!mania 常见下落速度落在
-  // 1000~1600ms 之间，1200 既不挤也不至于一屏看不到几个音符。
+  // 可选参数的默认值。调节区间是 250~800ms，这里取最慢的一档：
+  // 调用方都会显式传 scrollMs，这个值只在没人传参时兜底。
   var DEFAULTS = {
-    scrollMs: 1200,
+    scrollMs: 800,
     judgementFilter: 'all',
     showJudgements: true,
     deviationBars: true,
     showPresses: true,        // 是否画"实际击打/松手位置"那两条线
-    fixedJudgeColors: false   // 是否用固定判定色（白黄绿蓝紫红），而不是主题色
+    fixedJudgeColors: false,  // 是否用固定判定色（白黄绿蓝紫红），而不是主题色
+    hideJudged: false         // 已判定的音符是否立刻消失（跟打用，回放要看判定色）
   };
 
   // 主题兜底色。键名与 CSS 变量一一对应（见 CSS_VARS），
@@ -79,6 +80,8 @@
   // 「实际击打位置」那条线的颜色：按判定固定（不跟主题变，方便一眼认出判级）
   // MAX 白 / 300 黄 / 200 绿 / 100 蓝 / 50 紫 / MISS 红
   var PRESS_COLORS = ['#ffffff', '#ffd54a', '#4ade80', '#5aa2ff', '#b06bff', '#ff4d4d'];
+  // 跟打时还没判定的音符：中性灰，和六档判定色都区分得开
+  var NOTE_IDLE = '#8b93b5';
 
   // 长条松手：早于尾判点是"提前松手"（会掉判定），晚于是"松晚了"。
   // 两个方向的意义完全不同，所以分色 —— 青=提前，橙=拖晚。
@@ -258,6 +261,7 @@
       deviationBars: DEFAULTS.deviationBars,
       showPresses: DEFAULTS.showPresses,
       fixedJudgeColors: DEFAULTS.fixedJudgeColors,
+      hideJudged: DEFAULTS.hideJudged,
       // 打击音效：hitsound 是 HitSound 实例（页面创建），mode 决定按哪个时间点触发。
       // 播放器自己不出声，只负责"该响哪一下"的判断，方便两个实例里只让主播放器响。
       hitsound: null,
@@ -384,6 +388,7 @@
       // 漏掉它们的话 create() 时传进来会被静默丢弃 —— 表现就是"说了没生效"。
       if (typeof partial.showPresses === 'boolean') opts.showPresses = partial.showPresses;
       if (typeof partial.fixedJudgeColors === 'boolean') opts.fixedJudgeColors = partial.fixedJudgeColors;
+      if (typeof partial.hideJudged === 'boolean') opts.hideJudged = partial.hideJudged;
       // 音效模式随时可切：切的时候把上一段的残留声音掐掉，否则新旧两种节奏会叠在一起
       if (partial.hitsound !== undefined) {
         opts.hitsound = partial.hitsound || null;
@@ -1024,6 +1029,28 @@
         var note = notes[i];
         if (note.t > futureEdge) break; // 升序，后面的更远，可以停
 
+        var lane = note.c | 0;
+        if (lane < 0) lane = 0;
+        if (lane >= keys) lane = keys - 1;
+
+        var laneLeft = stageLeft + lane * laneW;
+        var cx = laneLeft + laneW * 0.5;
+        var x = cx - noteW * 0.5;
+
+        // 跟打：打掉的音符立刻消失，只在判定线上留一次击打闪光。
+        // 闪光按判定真正发生的那一刻算（_jt，由跟打模块写入）：提前打就提前闪，
+        // 漏接和长条也能对上时间；没有 _jt 的旧数据退回「音符时间 + 偏差」。
+        if (opts.hideJudged && note.j >= 0 && note.j <= 5) {
+          var hitAt = (typeof note._jt === 'number')
+            ? note._jt
+            : note.t + (typeof note.d === 'number' ? note.d : 0);
+          var since = now - hitAt;
+          if (opts.showJudgements && since >= -8 && since <= IMPACT_MS) {
+            drawImpact(cx, Math.max(0, since) / IMPACT_MS, judgeColor(note.j | 0), laneW);
+          }
+          continue;
+        }
+
         var isHold = note.h !== null && note.h !== undefined && note.h > note.t;
         var activeHold = isHold && note.h > now;
 
@@ -1039,15 +1066,10 @@
         // errors 过滤：只留 e 为真的音符（规格里就是按 e 字段判断）
         if (onlyErrors && !note.e) continue;
 
-        var code = (note.j >= 0 && note.j <= 5) ? (note.j | 0) : 0;
-        var color = judgeColor(code);
-        var lane = note.c | 0;
-        if (lane < 0) lane = 0;
-        if (lane >= keys) lane = keys - 1;
-
-        var laneLeft = stageLeft + lane * laneW;
-        var cx = laneLeft + laneW * 0.5;
-        var x = cx - noteW * 0.5;
+        // 回放的音符一定带判定；跟打里 j=-1 表示还没打，用中性灰
+        var unjudged = !(note.j >= 0 && note.j <= 5);
+        var code = unjudged ? 0 : (note.j | 0);
+        var color = unjudged ? NOTE_IDLE : judgeColor(code);
 
         if (headVisible) {
           // 时间 -> y（头部的判定位置）
