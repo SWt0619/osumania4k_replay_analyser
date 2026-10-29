@@ -263,13 +263,12 @@ def next_rung(current: float) -> tuple[float, str] | None:
     return None
 
 
-def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
-    """把存档折成一份评估结果。profile 是用户选的当前段位（里面带本人名字）。
+def _kept_sessions(sessions: list[dict], owner: str) -> tuple[list[dict], int, int, int]:
+    """筛掉「不是本人」和 LN / Hybrid，返回（留下的记录, 别人的, 身份不明的, LN/Hybrid 的）。
 
-    只统计纯 RC 谱面：LN 与 Hybrid 的准确率口径和 96% 过段线不是一回事，
-    混进来会把综合评价往奇怪的方向拉。
+    只排除 LN / Hybrid。老库里 map_class 还可能是 stack/spam/tech/cut ——
+    那是 RC 的细类，按"不等于 rc 就排除"会误伤一大批正经 RC 图。
     """
-    owner = str((profile or {}).get("player") or "").strip()
     kept: list[dict] = []
     others = 0
     unknown = 0
@@ -283,15 +282,17 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
             if flag is None:
                 unknown += 1
                 continue
-        # 只排除 LN / Hybrid。老库里 map_class 还可能是 stack/spam/tech/cut
-        # —— 那是 RC 的细类，按"不等于 rc 就排除"会误伤一大批正经 RC 图。
         cls = (s.get("map_class") or "rc").strip().lower()
         if cls in ("ln", "hybrid"):
             ln_hybrid += 1
             continue
         kept.append(s)
+    return kept, others, unknown, ln_hybrid
 
-    plays = []
+
+def _play_rows(kept: list[dict]) -> tuple[list[dict], int]:
+    """把记录折算成可比较的成绩行，返回（按段位降序的行, 准确率过低的条数）。"""
+    plays: list[dict] = []
     low_acc = 0
     for s in kept:
         v = play_value(s)
@@ -305,6 +306,88 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
             continue
         plays.append(_play_row(s, v))
     plays.sort(key=lambda p: p["value"], reverse=True)
+    return plays, low_acc
+
+
+def _skill_blocks(plays: list[dict]) -> dict:
+    """按练法分组，各自取最好的若干局。样本不够的组只给局数，不出段位。"""
+    by_skill: dict[str, list[dict]] = defaultdict(list)
+    for p in plays:
+        if p["skill"] in SKILLS:
+            by_skill[p["skill"]].append(p)
+
+    skills = {}
+    for key in SKILLS:
+        group = by_skill.get(key, [])
+        rows = group[:SKILL_TOP]
+        avg = _average(rows)
+        skills[key] = {
+            "label": SKILL_LABEL[key],
+            "count": len(group),
+            "used": len(rows),
+            "visible": len(group) >= MIN_SKILL,
+            "preliminary": MIN_SKILL <= len(group) < FULL_SKILL,
+            "need": max(0, MIN_SKILL - len(group)),
+            "dan": round(avg, 2) if (avg is not None and len(group) >= MIN_SKILL) else None,
+            # 该练法实际用到的局（最好 10 局），点开卡片时摊给玩家看
+            "plays": rows,
+        }
+    return skills
+
+
+def _target_block(profile: dict | None, overall_dan: float | None, count: int,
+                  top: list[dict]) -> tuple[dict, bool]:
+    """离下一段还差多少。返回（目标块, 是否已经越过评估上限）。"""
+    target: dict = {}
+    beyond = False
+    if not (profile and profile.get("dan")):
+        return target, beyond
+
+    current = float(profile["dan"])
+    beyond = current >= BEYOND_DAN - 1e-9
+    nxt = next_rung(current)
+    if not nxt:
+        return {"dan": None, "label": "", "progress": 1.0, "gap": 0.0,
+                "status": "max", "qualified": 0, "beyond": True}, beyond
+
+    target_dan, target_label = nxt
+    span = max(0.1, target_dan - current)
+    if overall_dan is None or count < MIN_SESSIONS:
+        return {
+            "dan": target_dan,
+            "label": target_label,
+            "progress": 0.0,
+            "gap": None,
+            "status": "unknown",
+            "qualified": 0,
+            "beyond": beyond,
+        }, beyond
+
+    gap = target_dan - overall_dan
+    ratio = max(0.0, gap) / span
+    qualified = sum(1 for p in top if p["value"] >= target_dan - span * 0.45)
+    return {
+        "dan": target_dan,
+        "label": target_label,
+        "progress": round(max(0.0, min(1.0, 1.0 - ratio)), 3),
+        "gap": round(gap, 2),
+        "status": ("above" if gap <= -span else
+                   "ready" if ratio <= 0.15 else
+                   "close" if ratio <= 0.45 else "far"),
+        "qualified": qualified,
+        "beyond": beyond,
+    }, beyond
+
+
+def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
+    """把存档折成一份评估结果。profile 是用户选的当前段位（里面带本人名字）。
+
+    只统计纯 RC 谱面：LN 与 Hybrid 的准确率口径和 96% 过段线不是一回事，
+    混进来会把综合评价往奇怪的方向拉。
+    """
+    owner = str((profile or {}).get("player") or "").strip()
+    kept, others, unknown, ln_hybrid = _kept_sessions(sessions, owner)
+    plays, low_acc = _play_rows(kept)
 
     top = plays[:TOP_PLAYS]
     overall_dan = _average(top)
@@ -320,63 +403,7 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
         "plays": top,
     }
 
-    by_skill: dict[str, list[dict]] = defaultdict(list)
-    for p in plays:
-        if p["skill"] in SKILLS:
-            by_skill[p["skill"]].append(p)
-    skills = {}
-    for key in SKILLS:
-        rows = by_skill.get(key, [])[:SKILL_TOP]
-        avg = _average(rows)
-        skills[key] = {
-            "label": SKILL_LABEL[key],
-            "count": len(by_skill.get(key, [])),
-            "used": len(rows),
-            "visible": len(by_skill.get(key, [])) >= MIN_SKILL,
-            "preliminary": MIN_SKILL <= len(by_skill.get(key, [])) < FULL_SKILL,
-            "need": max(0, MIN_SKILL - len(by_skill.get(key, []))),
-            "dan": round(avg, 2) if (avg is not None and len(by_skill.get(key, [])) >= MIN_SKILL) else None,
-            # 该练法实际用到的局（最好 10 局），点开卡片时摊给玩家看
-            "plays": rows,
-        }
-
-    target = {}
-    beyond = False
-    if profile and profile.get("dan"):
-        current = float(profile["dan"])
-        beyond = current >= BEYOND_DAN - 1e-9
-        nxt = next_rung(current)
-        if not nxt:
-            target = {"dan": None, "label": "", "progress": 1.0, "gap": 0.0,
-                      "status": "max", "qualified": 0, "beyond": True}
-        else:
-            target_dan, target_label = nxt
-            span = max(0.1, target_dan - current)
-            if overall_dan is None or count < MIN_SESSIONS:
-                target = {
-                    "dan": target_dan,
-                    "label": target_label,
-                    "progress": 0.0,
-                    "gap": None,
-                    "status": "unknown",
-                    "qualified": 0,
-                    "beyond": beyond,
-                }
-            else:
-                gap = target_dan - overall_dan
-                ratio = max(0.0, gap) / span
-                qualified = sum(1 for p in top if p["value"] >= target_dan - span * 0.45)
-                target = {
-                    "dan": target_dan,
-                    "label": target_label,
-                    "progress": round(max(0.0, min(1.0, 1.0 - ratio)), 3),
-                    "gap": round(gap, 2),
-                    "status": ("above" if gap <= -span else
-                               "ready" if ratio <= 0.15 else
-                               "close" if ratio <= 0.45 else "far"),
-                    "qualified": qualified,
-                    "beyond": beyond,
-                }
+    target, beyond = _target_block(profile, overall_dan, count, top)
 
     return {
         "ok": True,
@@ -387,14 +414,13 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
                     "lowAcc": low_acc},
         "beyond": beyond,
         "overall": overall,
-        "skills": skills,
+        "skills": _skill_blocks(plays),
         "target": target,
         "minSessions": MIN_SESSIONS,
         "fullSessions": FULL_SESSIONS,
         "minSkill": MIN_SKILL,
         "passAcc": PASS_ACC,
     }
-
 
 def dan_label(value: float) -> str:
     """把连续段位写成玩家看得懂的名字。"""
