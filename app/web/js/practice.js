@@ -195,8 +195,16 @@
     data.evaluation = data.evaluation || {};
     data.evaluation.advice = res.advice;
     data.evaluation.simple = nowSimple;
+    if (typeof res.playalong === "boolean") data.evaluation.playalong = res.playalong;
     data.practiceRates = res.rates;
+    // 段位跨过 3.6 时整份评价会换写法（简易 / 完整），标题、段落、亮点短板要一起换；
+    // 只换建议会留下「新手标题配高手短板」这种半新半旧的组合。
+    if (res.headline) data.evaluation.headline = res.headline;
+    if (Array.isArray(res.paragraphs)) data.evaluation.paragraphs = res.paragraphs;
+    if (Array.isArray(res.strengths)) data.evaluation.strengths = res.strengths;
+    if (Array.isArray(res.weaknesses)) data.evaluation.weaknesses = res.weaknesses;
     if (window.UI && window.UI.applySimpleMode) window.UI.applySimpleMode(nowSimple);
+    if (window.UI && window.UI.renderHeroText) window.UI.renderHeroText(data);
     if (changed && window.UI && window.UI.renderAdviceList) {
       window.UI.renderAdviceList(data);
     }
