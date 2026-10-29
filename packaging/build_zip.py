@@ -24,6 +24,8 @@ except Exception:  # noqa: BLE001
     START_NAME, STOP_NAME = "启动分析器.exe", "停止分析器.exe"
 SKIP_DIRS = {"__pycache__", "dist", "build", ".git", ".venv", "node_modules", "_cache",
              "_tools", "_tmp", "_dataset",
+             # 重构前的源码快照（_backup）：本机回滚用的，体积不小，绝不能混进发行包
+             "_backup",
              # 测试、构建脚本、内部调研都不该出现在发行包里
              "tests", "packaging", "docs",
              # legacy 里是早年的 pyw 备用入口，运行用不到，别塞进发行包
@@ -53,6 +55,9 @@ def should_skip(path: str) -> bool:
     name = os.path.basename(path)
     # 「报告」目录只保留那句占位说明；用户自己跑出来的对比表、导出的 html 都留在本机
     if os.path.basename(os.path.dirname(path)) == "报告" and not name.lower().endswith(".txt"):
+        return True
+    # 同一条规则给 card：只带占位说明，用户导出的成绩卡 / B50 不进发行包
+    if os.path.basename(os.path.dirname(path)) == "card" and not name.lower().endswith(".txt"):
         return True
     if name.lower() in SKIP_FILES:
         return True
