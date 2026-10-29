@@ -394,6 +394,7 @@ class Library:
 
     # ---- 构建 -----------------------------------------------------------
     def build(self, root: str, force: bool = False, cache_path: str = "") -> None:
+        global _LAST_BUILD
         with self._lock:
             started = time.time()
             if not force and self.root == root and self.entries and (time.time() - self.built_at) < 3600:
@@ -426,7 +427,7 @@ class Library:
             self._stamp_at = self._stamp()
             if entries:
                 _save_cache_file(cache_path, self)
-            LAST_BUILD[0] = self.built_at
+            _LAST_BUILD = self.built_at
 
     def _tick(self, n: int = 1) -> None:
         """扫描回调：累加"已经认出多少张谱面"。
@@ -695,7 +696,13 @@ _LIB = Library()
 _CACHE_PATH = ""
 # 最近一次真正重建索引的时间。server 用它判断"这次分析里是不是重扫了曲库"，
 # 好在日志里留一句 —— 找不到谱面时静默扫一遍，事后排查会看不见线索。
-LAST_BUILD = [0.0]
+# 只通过 last_build_at() 读：外部直接改这个数会让「重扫过没有」的判断失真。
+_LAST_BUILD = 0.0
+
+
+def last_build_at() -> float:
+    """最近一次建索引完成的时刻（Unix 秒）。没建过时返回 0。"""
+    return _LAST_BUILD
 
 
 def set_cache_path(path: str) -> None:
