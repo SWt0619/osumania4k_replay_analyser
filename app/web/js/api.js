@@ -264,12 +264,14 @@
       });
     },
 
-    // 把估算器算出的段位写回这一局，成长页折合要用同一个数
-    setHistoryDan(key, dan) {
+    // 把估算器算出的段位写回这一局，成长页折合要用同一个数。
+    // fresh = 这一局是本次刚入库的：服务端据此把"导入前"还原成"库里没有这一局"，
+    // 否则会拿入库时的 MSD 兜底值当基线，新成绩容易一律显示掉段。
+    setHistoryDan(key, dan, fresh) {
       return jsonFetch("/api/history/dan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: key, dan: dan }),
+        body: JSON.stringify({ key: key, dan: dan, fresh: !!fresh }),
       });
     },
 
@@ -407,6 +409,15 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ osu: osuBase64 }),
+      });
+    },
+
+    // 成绩卡 / B50：把 PNG 直接写进程序目录的 card/，不落浏览器的下载文件夹
+    saveCard(blob, name) {
+      return jsonFetch("/api/card/save?name=" + encodeURIComponent(name || "card.png"), {
+        method: "POST",
+        headers: { "Content-Type": "image/png" },
+        body: blob,
       });
     },
 
