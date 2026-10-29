@@ -49,8 +49,11 @@ class _Unit:
     tail_res: str | None = None
     body_hit: bool = False
     holding: bool = False
-    head_time: int = 0
-    tail_time: int = 0
+    # 画面上的「实际按下 / 实际松手」位置只认真实输入：到期补判出来的漏接没有这一刻，
+    # 留 None。以前这里存的是判定时刻，漏接会在 +130ms 左右凭空长出一根按键线，
+    # 还会被算进整局偏移和 UR。
+    press_t: int | None = None
+    rel_t: int | None = None
     released_early: bool = False
     marked: bool = False       # 父物件记过号（IgnoreMiss）
 
@@ -105,8 +108,6 @@ class _Lazer:
         # 判定结果按物件收口，最后统一转成 JudgedNote
         self._head: dict[int, str] = {}
         self._tail: dict[int, str] = {}
-        self._head_t: dict[int, int] = {}
-        self._tail_t: dict[int, int] = {}
 
     # ---- 判定出口 ---------------------------------------------------------
     def _grade(self, offset: float) -> str | None:
@@ -118,20 +119,16 @@ class _Lazer:
             return "miss"
         return None
 
-    def _judge_head(self, u: _Unit, t: int, res: str) -> None:
+    def _judge_head(self, u: _Unit, res: str) -> None:
         u.head_judged = True
         u.head_res = res
-        u.head_time = t
         self._head[u.index] = res
-        self._head_t[u.index] = t
         self.out.order.append(res)
 
-    def _judge_tail(self, u: _Unit, t: int, res: str) -> None:
+    def _judge_tail(self, u: _Unit, res: str) -> None:
         u.tail_judged = True
         u.tail_res = res
-        u.tail_time = t
         self._tail[u.index] = res
-        self._tail_t[u.index] = t
         self.out.order.append(res)
 
     def _cap_tail(self, u: _Unit, res: str) -> str:
@@ -144,7 +141,7 @@ class _Lazer:
             return "meh"
         return res
 
-    def _handle_hit(self, col: int, target: int, now: int) -> None:
+    def _handle_hit(self, col: int, target: int) -> None:
         """Column.OnNewResult：把同列 end 早于 target 的未判物件强制判漏。
 
         target 随判定单调递增，所以每列用一个游标扫过就行——不加游标时每次
@@ -158,20 +155,19 @@ class _Lazer:
             if obj_end >= target:
                 break
             k += 1
-            idx = u.index
             if not u.is_hold:
                 if not u.head_judged:
-                    self._judge_head(u, now, "miss")
+                    self._judge_head(u, "miss")
                 continue
             if not u.marked:
                 u.marked = True
                 u.holding = False
             if u.start < target:
                 if not u.head_judged:
-                    self._judge_head(u, now, "miss")
+                    self._judge_head(u, "miss")
                 if u.end < target:
                     if not u.tail_judged:
-                        self._judge_tail(u, now, "miss")
+                        self._judge_tail(u, "miss")
                     if not u.body_judged:
                         u.body_judged = True
                         u.body_hit = False
@@ -190,20 +186,24 @@ class _Lazer:
                     continue                  # 过了尾巴还在 Meh 窗外
                 if (t - u.start) >= -self.w.get("miss", 0.0):
                     u.holding = True          # 头判过不过都置：松手后按回来能续
+                    # 头判可能是 miss（超出窗口但那一下确实按了），位置仍然按真实按下记
+                    if u.press_t is None:
+                        u.press_t = t
                 if not u.head_judged:
                     res = self._grade(t - u.start)
                     if res is not None:
-                        self._judge_head(u, t, res)
+                        self._judge_head(u, res)
                         if _is_hit(res):
-                            self._handle_hit(col, u.start, t)
+                            self._handle_hit(col, u.start)
                         return
                 continue                      # 这一击没受理，落给下一个物件
             res = self._grade(t - u.start)
             if res is None:
                 continue
-            self._judge_head(u, t, res)
+            u.press_t = t
+            self._judge_head(u, res)
             if _is_hit(res):
-                self._handle_hit(col, u.start, t)
+                self._handle_hit(col, u.start)
             return
         self.out.ghosts.append(GhostPress(time=float(t), column=col))
 
@@ -212,15 +212,16 @@ class _Lazer:
             u = self.units[idx]
             if not u.is_hold or u.all_judged() or not u.holding:
                 continue
+            u.rel_t = t                       # 真实松手帧：尾判成 miss 也要留位置
             if t < u.end:
                 u.released_early = True
             if not u.tail_judged:
                 res = self._grade((t - u.end) / 1.5)
                 if res is not None:
                     capped = self._cap_tail(u, res)
-                    self._judge_tail(u, t, capped)
+                    self._judge_tail(u, capped)
                     if _is_hit(capped):
-                        self._handle_hit(col, u.end, t)
+                        self._handle_hit(col, u.end)
             if not u.body_judged:
                 u.body_judged = True
                 u.body_hit = u.tail_judged and _is_hit(u.tail_res)
@@ -234,7 +235,7 @@ class _Lazer:
             if t - u.start <= limit:
                 break
             if not u.head_judged:
-                self._judge_head(u, t, "miss")
+                self._judge_head(u, "miss")
             self._head_ptr += 1
         limit = 1.5 * self.w["meh"]
         order = self._tail_order
@@ -243,7 +244,7 @@ class _Lazer:
             if t - u.end <= limit:
                 break
             if not u.tail_judged:
-                self._judge_tail(u, t, "miss")
+                self._judge_tail(u, "miss")
                 if not u.body_judged:
                     u.body_judged = True
                     u.body_hit = False
@@ -270,9 +271,9 @@ class _Lazer:
         # 回放结束还挂着的物件：补漏
         for u in self.units:
             if not u.head_judged:
-                self._judge_head(u, u.start, "miss")
+                self._judge_head(u, "miss")
             if u.is_hold and not u.tail_judged:
-                self._judge_tail(u, u.end, "miss")
+                self._judge_tail(u, "miss")
                 if not u.body_judged:
                     u.body_judged = True
                     u.body_hit = False
@@ -282,15 +283,17 @@ class _Lazer:
             obj = self.beatmap_objects[u.index]
             head = self._head.get(u.index, "miss")
             tail = self._tail.get(u.index) if u.is_hold else None
-            hit_t = self._head_t.get(u.index)
-            rel_t = self._tail_t.get(u.index) if u.is_hold else None
+            # 只有真实输入才留位置：到期补判的漏接没有「按下的那一刻」，
+            # 硬塞判定时刻会让回放页画出一根不存在的按键线，还会污染整局偏移与 UR。
+            press_t = u.press_t
+            rel_t = u.rel_t if u.is_hold else None
             item = JudgedNote(
                 index=u.index, obj_index=u.index, column=obj.column,
                 note_time=obj.time, is_hold=u.is_hold,
                 end_time=obj.end_time if u.is_hold else None,
                 judgement=head,
-                delta=float(hit_t - u.start) if hit_t is not None and u.head_judged else None,
-                press_time=float(hit_t) if hit_t is not None and u.head_judged else None,
+                delta=float(press_t - u.start) if press_t is not None else None,
+                press_time=float(press_t) if press_t is not None else None,
                 release_delta=float(rel_t - u.end) if rel_t is not None else None,
                 head_judgement=head,
                 tail_judgement=tail,
