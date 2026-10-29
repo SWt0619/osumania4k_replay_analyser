@@ -27,6 +27,24 @@
   <span class="blob blob-c"></span>
 </div>
 
+<!-- 构成主义底纹：同心圆、直角三角、十字网格、标尺刻度、两枚小方块。
+     全部压在卡片下面，颜色取 currentColor，所以切主题时跟着文字色一起走。 -->
+<div class="geo-field" aria-hidden="true">
+  <svg class="geo geo-ring" viewBox="0 0 560 560" fill="none">
+    <circle cx="280" cy="280" r="268" stroke="currentColor" stroke-width="1.1"/>
+    <circle cx="280" cy="280" r="206" stroke="currentColor" stroke-width="1.1" stroke-dasharray="3 9"/>
+    <circle cx="280" cy="280" r="128" stroke="currentColor" stroke-width="1.1"/>
+  </svg>
+  <svg class="geo geo-grid" viewBox="0 0 200 160" fill="none" stroke="currentColor" stroke-width="1.1">
+    <path d="M3 8h10M8 3v10M3 56h10M8 51v10M3 104h10M8 99v10M3 152h10M8 147v10M51 8h10M56 3v10M51 56h10M56 51v10M51 104h10M56 99v10M51 152h10M56 147v10M99 8h10M104 3v10M99 56h10M104 51v10M99 104h10M104 99v10M99 152h10M104 147v10M147 8h10M152 3v10M147 56h10M152 51v10M147 104h10M152 99v10M147 152h10M152 147v10"/>
+  </svg>
+  <svg class="geo geo-ruler" viewBox="0 0 20 320" fill="none" stroke="currentColor" stroke-width="1.1">
+    <path d="M19 0v320M6 24h13M9 104h10M6 184h13M9 264h10M6 316h13"/>
+  </svg>
+  <span class="geo-chip geo-chip-a"></span>
+  <span class="geo-chip geo-chip-b"></span>
+</div>
+
 <!-- ============ 顶栏 ============ -->
 <header class="topbar glass">
   <div class="brand">
@@ -161,6 +179,13 @@
 
     <!-- 总览 -->
     <div class="tab-panel" id="panel-overview" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">01</b>
+        <span class="pm-name">总览</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">OVERVIEW</span>
+      </div>
       <div class="grid-overview">
         <article class="card glass hero" id="heroCard">
           <div class="hero-top">
@@ -182,6 +207,11 @@
               <div class="badges" id="heroBadges"></div>
               <p class="projection" id="heroProjection" hidden></p>
             </div>
+            <!-- 成绩卡：把这一局压成一张图，发群/发推不用再截图拼字 -->
+            <button class="chip chip-btn hero-share" id="btnShareCard" title="把这一局生成一张 1200×630 的成绩卡">
+              <svg viewBox="0 0 24 24" class="ico" aria-hidden="true"><path d="M12 4v10m0 0 3.5-3.5M12 14l-3.5-3.5M5 16v2.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V16" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              成绩卡
+            </button>
           </div>
           <div class="hero-paras" id="heroParas"></div>
           <div class="hero-lists">
@@ -213,6 +243,12 @@
             </div>
             <ul class="legend" id="catLegend"></ul>
             <div class="stat-strip" id="catStats"></div>
+            <!-- 本次数据搬进这张卡：右侧那一列原本在环形图下面空着一大块，
+                 合并之后总览少一张通栏卡，也不用再往下滚才看得到谱面信息 -->
+            <div class="cat-meta">
+              <h3 class="cat-meta-title">本次数据</h3>
+              <dl class="kv kv-dense" id="metaKv"></dl>
+            </div>
           </div>
         </article>
 
@@ -269,23 +305,18 @@
             <div class="similar-grid" id="similarList"></div>
           </div>
         </article>
-
-        <article class="card glass" id="metaCard">
-          <div class="card-head">
-            <h2>本次数据</h2>
-            <button class="fold-btn" data-fold="metaCard" title="折叠/展开">
-              <svg viewBox="0 0 24 24" class="ico"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
-          </div>
-          <div class="card-body">
-            <dl class="kv" id="metaKv"></dl>
-          </div>
-        </article>
       </div>
     </div>
 
     <!-- 时间轴 -->
     <div class="tab-panel" id="panel-timeline" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">02</b>
+        <span class="pm-name">时间轴</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">TIMELINE</span>
+      </div>
       <article class="card glass" id="timelineCard">
         <div class="card-head">
           <h2>时间轴</h2>
@@ -324,6 +355,13 @@
 
     <!-- 失误清单 -->
     <div class="tab-panel" id="panel-errors" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">03</b>
+        <span class="pm-name">失误清单</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">ERRORS</span>
+      </div>
       <article class="card glass" id="errorsCard">
         <div class="card-head">
           <h2>失误清单</h2>
@@ -351,6 +389,13 @@
 
     <!-- 回放 -->
     <div class="tab-panel" id="panel-replay" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">04</b>
+        <span class="pm-name">回放</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">REPLAY</span>
+      </div>
       <div class="grid-replay">
         <article class="card glass player-card">
           <div class="card-head">
@@ -358,13 +403,32 @@
             <div class="card-tools">
               <button class="chip chip-btn" id="btnToggleErrors" title="只高亮失误">只看失误</button>
               <button class="chip chip-btn" id="btnCompare" title="上传同一张谱面的另一份回放，两路并排同步播放对比">对比</button>
+              <button class="chip chip-btn" id="btnPlayalong" title="在网页里跟着这张谱面打，判定按 stable 的 mania 窗口（由 OD 决定）。只对 Reform 4 及以下开放">跟打</button>
               <span class="tag" id="playTime">0:00 / 0:00</span>
             </div>
           </div>
+          <div class="pa-hud" id="paHud" hidden>
+            <div class="pa-hud-top">
+              <b id="paCombo">0</b><span class="pa-combo-label">combo</span>
+              <span class="pa-acc" id="paAccHud">100.00%</span>
+              <span class="pa-speed">
+                <button class="pa-step" id="paSlower" title="下落时间 +25ms（更慢）">−</button>
+                <b id="paScrollVal">800ms</b>
+                <button class="pa-step" id="paFaster" title="下落时间 -25ms（更快）">+</button>
+              </span>
+              <button class="chip chip-btn" id="btnPaExit">退出</button>
+            </div>
+            <div class="pa-hud-bottom">
+              <span class="pa-counts" id="paCountHud">MAX 0 · 300 0 · 200 0 · 100 0 · 50 0 · MISS 0</span>
+              <span class="pa-keys" id="paKeyHint">D F J K</span>
+            </div>
+          </div>
+          <div class="pa-judge" id="paJudge" hidden aria-hidden="true"><i></i></div>
           <div class="card-body playfield-wrap" id="playfieldWrap">
             <div class="pf-slot" id="pfSlot1">
               <canvas id="playfield" class="playfield"></canvas>
               <span class="pf-badge" id="pfBadge1" hidden>回放 1 · 主</span>
+              <div class="pa-countdown" id="paCountdown" hidden><b>3</b><span>准备</span></div>
             </div>
             <div class="pf-slot" id="pfSlot2" hidden>
               <canvas id="playfield2" class="playfield"></canvas>
@@ -388,52 +452,76 @@
               <svg viewBox="0 0 24 24" class="ico"><path d="M5 9.5h3l4-3.5v12l-4-3.5H5z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/><path d="M16 9a4 4 0 0 1 0 6" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
             </button>
           </div>
-          <div class="transport transport-extra">
-            <label class="mini-field" title="音符从画布顶端落到判定线花多少毫秒。数字越小 = 下落越快、一屏里音符越稀">
-              <span>下落</span>
-              <input type="range" id="scroll" class="mini-range" min="300" max="2600" step="50" value="1200" aria-label="下落速度">
-              <b id="scrollVal">1200 ms</b>
-            </label>
-            <label class="mini-field" title="音画偏移（毫秒）。正值 = 谱面比音频提前，负值 = 谱面比音频延后">
-              <span>音画</span>
-              <input type="range" id="offset" class="mini-range" min="-500" max="500" step="5" value="0" aria-label="音画偏移">
-              <b id="offsetVal">0 ms</b>
-            </label>
-            <label class="mini-field" title="回放音量（只影响本页面，不动系统音量）">
-              <span>音量</span>
-              <input type="range" id="volume" class="mini-range" min="0" max="100" step="5" value="60" aria-label="音量">
-              <b id="volumeVal">60%</b>
-            </label>
-            <label class="mini-field" title="打击音：按谱面要求的时间响（正解音），还是按你实际按下的时间响（实际击打）。后者会把抢拍、拖拍、漏接直接放大成节奏上的错位">
-              <span>打击音</span>
-              <select id="hitsound" class="mini-select">
-                <option value="off" selected>关</option>
-                <option value="planned">正解音</option>
-                <option value="actual">实际击打</option>
-              </select>
-            </label>
-            <label class="mini-field" title="打击音自己的音量，和左边的回放音量分开调。最高 300%：谱面原声再大也能听见打击音（回放音量本身仍然最多 100%）">
-              <span>打击音量</span>
-              <input type="range" id="hitVol" class="mini-range" min="0" max="300" step="5" value="70" aria-label="打击音音量">
-              <b id="hitVolVal">70%</b>
-            </label>
-          </div>
           <p class="fineprint" id="audioNote"></p>
         </article>
 
-        <aside class="card glass now-card">
-          <div class="card-head"><h2>此刻</h2></div>
-          <div class="card-body">
-            <div class="now-big" id="nowTime">0.000s</div>
-            <div class="now-cats" id="nowCats"></div>
-            <p class="muted" id="nowHint">播放时这里会显示最近一次击打的判定与误差。</p>
-          </div>
-        </aside>
+        <div class="replay-side">
+          <aside class="card glass now-card">
+            <div class="card-head"><h2>此刻</h2></div>
+            <div class="card-body">
+              <div class="now-big" id="nowTime">0.000s</div>
+              <div class="now-cats" id="nowCats"></div>
+              <p class="muted" id="nowHint">播放时这里会显示最近一次击打的判定与误差。</p>
+            </div>
+          </aside>
+
+          <aside class="card glass player-controls" id="playerControls">
+            <div class="card-head"><h2>设置</h2></div>
+            <div class="card-body">
+              <div class="transport transport-extra">
+                <label class="mini-field" title="音符从画布顶端落到判定线花多少毫秒。数字越小 = 下落越快、一屏里音符越稀；按 25ms 一档调">
+                  <span>下落</span>
+                  <input type="range" id="scroll" class="mini-range" min="250" max="800" step="25" value="800" aria-label="下落速度">
+                  <b id="scrollVal">1200 ms</b>
+                </label>
+                <div class="pa-key-field">
+                  <span>跟打键位</span>
+                  <div class="pa-key-row" id="paKeyRow">
+                    <button class="pa-key" data-col="0" title="点击后按一个键">D</button>
+                    <button class="pa-key" data-col="1" title="点击后按一个键">F</button>
+                    <button class="pa-key" data-col="2" title="点击后按一个键">J</button>
+                    <button class="pa-key" data-col="3" title="点击后按一个键">K</button>
+                  </div>
+                </div>
+                <label class="mini-field" title="音画偏移（毫秒）。正值 = 谱面比音频提前，负值 = 谱面比音频延后">
+                  <span>音画</span>
+                  <input type="range" id="offset" class="mini-range" min="-500" max="500" step="5" value="0" aria-label="音画偏移">
+                  <b id="offsetVal">0 ms</b>
+                </label>
+                <label class="mini-field" title="回放音量（只影响本页面，不动系统音量）">
+                  <span>音量</span>
+                  <input type="range" id="volume" class="mini-range" min="0" max="100" step="5" value="60" aria-label="音量">
+                  <b id="volumeVal">60%</b>
+                </label>
+                <label class="mini-field" title="打击音：按谱面要求的时间响（正解音），还是按你实际按下的时间响（实际击打）。后者会把抢拍、拖拍、漏接直接放大成节奏上的错位">
+                  <span>打击音</span>
+                  <select id="hitsound" class="mini-select">
+                    <option value="off" selected>关</option>
+                    <option value="planned">正解音</option>
+                    <option value="actual">实际击打</option>
+                  </select>
+                </label>
+                <label class="mini-field" title="打击音自己的音量，和回放音量分开调。最高 300%：谱面原声再大也能听见打击音（回放音量本身仍然最多 100%）">
+                  <span>打击音量</span>
+                  <input type="range" id="hitVol" class="mini-range" min="0" max="300" step="5" value="70" aria-label="打击音音量">
+                  <b id="hitVolVal">70%</b>
+                </label>
+              </div>
+            </div>
+          </aside>
+        </div>
       </div>
     </div>
 
     <!-- 谱面难度（MSD） -->
     <div class="tab-panel" id="panel-chart" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">05</b>
+        <span class="pm-name">谱面难度</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">DIFFICULTY</span>
+      </div>
       <article class="card glass">
         <div class="card-head">
           <h2>谱面难度（MSD）</h2>
@@ -468,6 +556,13 @@
 
     <!-- 只看谱面（.osu）：不读回放，只给难度与键型 -->
     <div class="tab-panel" id="panel-chartonly" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">05</b>
+        <span class="pm-name">谱面难度</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">DIFFICULTY</span>
+      </div>
       <article class="card glass">
         <div class="card-head">
           <h2 id="coTitle">谱面</h2>
@@ -496,6 +591,13 @@
 
     <!-- 随机找图：输入难度与键型，从随附索引里随机抽。不依赖回放结果 -->
     <div class="tab-panel" id="panel-finder" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">08</b>
+        <span class="pm-name">随机找图</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">FINDER</span>
+      </div>
       <article class="card glass">
         <div class="card-head">
           <h2>随机找图</h2>
@@ -543,6 +645,13 @@
 
     <!-- 细节 -->
     <div class="tab-panel" id="panel-details" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">06</b>
+        <span class="pm-name">细节数据</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">DETAILS</span>
+      </div>
       <article class="card glass" id="patternCard">
         <div class="card-head">
           <h2>键型构成</h2>
@@ -578,10 +687,21 @@
 
     <!-- 设置：osu! 目录、主题等。不依赖分析结果，随时可进。 -->
     <div class="tab-panel" id="panel-progress" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">07</b>
+        <span class="pm-name">成长</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">PROGRESS</span>
+      </div>
       <article class="card glass">
         <div class="card-head">
           <h2>成长</h2>
-          <p class="muted">用本机存档的每一局估算离下一个段位还有多远；数据只在本机</p>
+          <div class="card-tools">
+            <p class="muted">用本机存档的每一局估算离下一个段位还有多远；数据只在本机</p>
+            <button class="chip chip-btn" id="btnExportB50" disabled
+                    title="把综合段位和计入评估的 50 局导成一张图">导出 B50</button>
+          </div>
         </div>
         <div class="card-body">
           <div class="pg-profile">
@@ -634,12 +754,21 @@
     </div>
 
     <div class="tab-panel" id="panel-settings" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">09</b>
+        <span class="pm-name">设置</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">SETTINGS</span>
+      </div>
       <article class="card glass">
         <div class="card-head">
           <h2>设置</h2>
           <p class="muted">osu! 目录、快捷导入与界面</p>
         </div>
         <div class="card-body">
+          <div class="settings-grid">
+          <div class="settings-col">
           <h3>osu! 目录</h3>
           <p class="muted">默认会自动找曲库；找不到时在这里手动指定，填完保存会重新扫一遍。</p>
 
@@ -652,7 +781,7 @@
           <label class="dir-field">
             <span>lazer（osu!lazer）</span>
             <input type="text" id="pathLazer" class="text-input" placeholder="例如 C:\Users\你的用户名\AppData\Roaming\osu" autocomplete="off">
-            <em>选到<b>同时有 Songs 和 files 的那一级</b>。没装 lazer 就留空。</em>
+            <em>选到有 <b>client.realm 和 files</b> 的那一级（就是 osu!lazer 的数据目录）。没装 lazer 就留空。</em>
           </label>
 
           <p class="dir-status" id="pathStatus"></p>
@@ -679,8 +808,9 @@
             <button class="btn btn-primary" id="btnSaveHotkey">保存快捷键</button>
           </div>
 
-          <hr class="settings-sep">
+          </div>
 
+          <div class="settings-col">
           <h3>回放帧率上限</h3>
           <div class="seg" id="fpsCapToggle">
             <button class="seg-btn" data-fps="30">30 帧</button>
@@ -737,6 +867,8 @@
             <button class="btn btn-ghost" id="btnMirrorTest">测试连接</button>
           </div>
           <ul class="mirror-list" id="mirrorResult" hidden></ul>
+          </div>
+          </div>
         </div>
       </article>
     </div>
@@ -744,6 +876,13 @@
     <!-- 关于：版本、项目地址、参考来源。
          这一页不依赖分析结果，没导入回放时也能看（见 switchTab 对 emptyState 的处理）。 -->
     <div class="tab-panel" id="panel-about" hidden>
+      <div class="page-mark" aria-hidden="true">
+        <i class="pm-chip"></i>
+        <b class="pm-idx">10</b>
+        <span class="pm-name">关于</span>
+        <span class="pm-rule"></span>
+        <span class="pm-en">ABOUT</span>
+      </div>
       <article class="card glass">
         <div class="card-head">
           <h2>关于</h2>
@@ -785,6 +924,21 @@
               <dd>MIT<span class="muted">作者 RJL0619</span></dd>
             </div>
           </dl>
+        </div>
+      </article>
+
+      <!-- 更新说明：内容直接来自仓库根的 CHANGELOG.md（服务端解析），不另存一份。
+           默认只展开最新一版，老版本点开才占高度。 -->
+      <article class="card glass" id="releaseCard" hidden>
+        <div class="card-head">
+          <h2>更新说明</h2>
+          <div class="card-tools">
+            <p class="muted">按版本倒序，点版本号展开</p>
+            <button class="chip chip-btn" id="btnReleaseAll" type="button">展开全部</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="rel-list" id="releaseList"></div>
         </div>
       </article>
 
@@ -965,7 +1119,7 @@
           <p class="tut-lead">边听边看，判断是手慢、听错，还是根本读不出来。</p>
           <ul class="help-list">
             <li><b>播放</b>：按空格或点按钮播放/暂停（在回放页和时间轴页都有效），进度条可拖，倍速 0.5× ~ 1.5×。</li>
-            <li><b>下落</b>：音符从画布顶端落到判定线花多少毫秒，越小越快；300 ~ 2600ms 可调。</li>
+            <li><b>下落</b>：音符从画布顶端落到判定线花多少毫秒，越小越快；250 ~ 800ms 可调。</li>
             <li><b>音画</b>：画面整体提前/延后，±500ms，用来对齐你自己设备的延迟。</li>
             <li><b>打击音</b>：选「正解音」听到的是谱面要求的时间，选「实际击打」听到的是你真正按下的时间。两个交替听，抢拍和拖拍会立刻暴露。打击音量最高 300%，回放音量仍然最多 100%。</li>
             <li><b>没有声音时</b>：本地找不到这张图的音频，程序会按图集 id 去镜像站补一份（要下整个谱面包，几十 MB）。右上角会出现一条「补音频」进度条，写着下到多少、当前是下载还是校验；补好了自动接上原来的音频，补不到就用虚拟时钟照常播画面。</li>
@@ -1022,7 +1176,7 @@
         <section class="tut-page" data-page="7">
           <h4>设置里值得看一眼的</h4>
           <ul class="help-list">
-            <li><b>osu! 目录</b>：stable 选到有 <code>osu!.exe</code> 的那一级；lazer 选到同时有 <code>Songs</code> 和 <code>files</code> 的那一级。保存后会重扫曲库。</li>
+            <li><b>osu! 目录</b>：stable 选到有 <code>osu!.exe</code> 的那一级；lazer 选到有 <code>client.realm</code> 和 <code>files</code> 的数据目录。保存后会重扫曲库。</li>
             <li><b>快捷导入</b>：默认 <code>Shift+F2</code>，可以改，但至少要带一个修饰键。</li>
             <li><b>回放帧率上限</b>：30 / 60 / 90 / 120 / 180 / 240 帧或「无限制」，默认 120。选得太高会给 CPU 更多压力，性能跟不上时程序会自动降低一档。</li>
             <li><b>性能面板</b>：勾上后右下角显示渲染帧率、屏幕刷新率、每帧绘制耗时，排查卡顿时用。</li>
@@ -1082,10 +1236,18 @@
   </div>
 </div>
 
-<footer class="foot">
-  <span id="footLeft">mania replay analysis · 本地运行</span>
-  <span id="footRight">© 2026 RJL0619 · MIT License</span>
-</footer>
+<div class="modal" id="paResult" hidden>
+  <div class="modal-card glass pa-result">
+    <h3 id="paResultTitle">跟打结果</h3>
+    <div class="pa-result-acc" id="paResultAcc">0.00%</div>
+    <div class="pa-count-grid" id="paResultCounts"></div>
+    <p class="muted" id="paResultMeta"></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="btnPaAgain">再来一次</button>
+      <button class="btn" id="btnPaClose">关闭</button>
+    </div>
+  </div>
+</div>
 
 <script src="/static/js/charts.js?v=__ASSET_V__"></script>
 <script src="/static/js/hitsound.js?v=__ASSET_V__"></script>
@@ -1095,6 +1257,19 @@
 <script src="/static/js/practice.js?v=__ASSET_V__"></script>
 <!-- 谱面包下载：分段并发取，失败退回直链。缺了也只是没有进度条 -->
 <script src="/static/js/download.js?v=__ASSET_V__"></script>
+<!-- 成绩卡 / B50：纯 canvas 画图，不依赖任何库；缺了只是少一个按钮 -->
+<script src="/static/js/sharecard.js?v=__ASSET_V__"></script>
+<script src="/static/js/b50card.js?v=__ASSET_V__"></script>
+<!-- 页面主体拆成八个模块，共用 window.App：state 与需要跨文件调用的函数都挂在上面。
+     main.core.js 必须最先（它建 state），main.js 必须最后（DOMContentLoaded 时启动）。 -->
+<script src="/static/js/main.core.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.replay.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.result.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.playalong.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.import.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.settings.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.bind.js?v=__ASSET_V__"></script>
+<script src="/static/js/main.pages.js?v=__ASSET_V__"></script>
 <script src="/static/js/main.js?v=__ASSET_V__"></script>
 <!-- 段位估算器：ES 模块，内部 import vendor/mma 下的 Sunny 实现。
      放在最后且异步加载——它只影响难度页那一行文字，缺了也不影响其他功能。 -->
