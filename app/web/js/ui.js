@@ -387,6 +387,10 @@
 
   function applySimpleMode(on) {
     document.body.classList.toggle("is-simple", !!on);
+    // 跟打开放到 Reform 4 及以下，段位跨线时按钮要跟着开/关
+    if (window.App && typeof window.App.updatePlayalongGate === "function") {
+      window.App.updatePlayalongGate();
+    }
     if (!on) return;
     // 正停在被收起的页签上时回到总览，别留一个空白页
     const active = document.querySelector(".rail-btn.is-active");
@@ -404,7 +408,6 @@
     card.className = "card glass hero grade-" + (ev.grade || "B").replace("+", "");
 
     $("gradeLetter").textContent = ev.grade || "–";
-    $("heroHeadline").textContent = ev.headline || "";
     $("heroDesc").textContent = ev.gradeDesc
       ? ev.gradeDesc + " · 准确率(" + (data.judgeMode === "classic" ? "classic" : data.judgeMode === "v2" ? "v2" : "v1") + ") "
         + fmtPct(sm.accuracy) + " · UR " + Number(sm.ur || 0).toFixed(0)
@@ -462,19 +465,68 @@
       badges.appendChild(wrap);
     });
 
+    // 段位变动跟着这次导入走：切 V1 / V2 会重画整块徽章，所以放在最后按数据补回来
+    renderDanChange(data);
+
+    renderHeroText(data);
+
+    renderAdviceList(data);
+    renderProgress(data);
+  }
+
+  // 标题、段落、亮点、短板这一整块文字。段位估算跑完可能把简版换成完整版
+  // （或者反过来），那时只换这几段，不动徽章和圆环——重画徽章会把段位变动一起抹掉。
+  function renderHeroText(data) {
+    const ev = (data && data.evaluation) || {};
+    $("heroHeadline").textContent = ev.headline || "";
     const paras = $("heroParas");
     clearNode(paras);
     (ev.paragraphs || []).forEach((p) => paras.appendChild(el("p", null, p)));
+    renderHeroLists(data);
+  }
 
+  function renderHeroLists(data) {
+    const ev = (data && data.evaluation) || {};
     const st = $("listStrengths");
     const wk = $("listWeaknesses");
+    if (!st || !wk) return;
     clearNode(st);
     clearNode(wk);
     (ev.strengths && ev.strengths.length ? ev.strengths : ["—"]).forEach((s) => st.appendChild(el("li", null, s)));
     (ev.weaknesses && ev.weaknesses.length ? ev.weaknesses : ["—"]).forEach((s) => wk.appendChild(el("li", null, s)));
+  }
 
-    renderAdviceList(data);
-    renderProgress(data);
+  // 本次导入让「成长页的综合段位」动了多少。数据由服务端回填段位时一起算好
+  // （折合公式在 Python 那边，页面不重复实现），这里只负责画。
+  // 涨绿跌红：这是玩家的水平读数，和股票相反。
+  function renderDanChange(data) {
+    const host = $("heroBadges");
+    if (!host) return;
+    const old = $("danChangeBadge");
+    if (old) old.remove();
+    const change = data && data.danChange;
+    if (!change) return;
+    const delta = Number(change.delta);
+    if (!Number.isFinite(delta) || !delta) return;
+    const up = delta > 0;
+    const wrap = el("div", "badge badge-dan " + (up ? "is-up" : "is-down"));
+    wrap.id = "danChangeBadge";
+    wrap.appendChild(el("span", null, "综合段位"));
+    wrap.appendChild(el("strong", null,
+      Number(change.from).toFixed(2) + " → " + Number(change.to).toFixed(2)));
+    wrap.appendChild(el("em", "badge-delta", (up ? "▲ +" : "▼ ") + Math.abs(delta).toFixed(2)));
+    wrap.title =
+      "成长页的综合段位（最好的 50 局加权）：" + (change.fromLabel || change.from) +
+      " → " + (change.toLabel || change.to) + "\n" +
+      "这一局把估算值" + (up ? "拉高" : "拉低") + "了 " + Math.abs(delta).toFixed(2) + " 段" +
+      (change.count ? "（参与评估 " + change.count + " 局）" : "") + "。";
+    host.appendChild(wrap);
+  }
+
+  // 记在当前这份分析结果上，切 V1 / V2 重画 hero 时还能补回来
+  function applyDanChange(data, change) {
+    if (data) data.danChange = change || null;
+    renderDanChange(data);
   }
 
   // 建议列表单独一个函数：段位估算完成后要按新倍率重画这一块，不动整张 hero。
@@ -585,7 +637,9 @@
     if (!card) return;
     const hist = (data && data.history) || null;
     const past = (hist && hist.items) || [];
-    const cur = (data && data.summary) || {};
+    // 走势一律按 V1 口径：历史行存的就是 V1，这里要是跟着顶部口径换成 V2，
+    // 同一份回放会因为当前页签不同画出两个不同的点（同一局出现两个成绩）。
+    const cur = (((data || {}).modes || {}).v1 || {}).summary || (data && data.summary) || {};
     // 至少要有一次历史 + 本次，两点才连得成线
     if (!past.length || !Number.isFinite(Number(cur.accuracy))) {
       card.hidden = true;
@@ -597,7 +651,7 @@
     const dAcc = Number(cur.accuracy) - Number(last.acc || 0);
     const dUr = Number(cur.ur) - Number(last.ur || 0);
     $("progressMeta").textContent =
-      "第 " + (past.length + 1) + " 次 · " + (rate === 1 ? "原速" : rate.toFixed(2) + "×");
+      "第 " + (past.length + 1) + " 次 · " + (rate === 1 ? "原速" : rate.toFixed(2) + "×") + " · V1";
 
     const accTxt = fmtPct(cur.accuracy);
     const urTxt = Number(cur.ur || 0).toFixed(0);
@@ -628,7 +682,7 @@
   // ---------------------------------------------------------------- 失误成因（甜甜圈）
   function drawDonut(canvas, counts, total) {
     const dpr = window.devicePixelRatio || 1;
-    const css = 180;
+    const css = 152;          // 与 .donut-wrap 保持一致
     canvas.width = css * dpr;
     canvas.height = css * dpr;
     canvas.style.width = css + "px";
@@ -639,8 +693,8 @@
 
     const cx = css / 2;
     const cy = css / 2;
-    const r = 68;
-    const lineWidth = 20;
+    const r = 57;
+    const lineWidth = 17;
     let start = -Math.PI / 2;
     const sum = Math.max(1, total);
 
@@ -696,9 +750,9 @@
     const strip = $("catStats");
     clearNode(strip);
     const prof = cat.profile || {};
+    // UR 在顶栏的徽章里已经有了，这里只放两张顶栏没有的：整局偏移与稳定上限
     const items = [
       { b: fmtSigned(prof.global_bias, 1) + "ms", s: "整局偏移" },
-      { b: Number(prof.global_ur || 0).toFixed(0), s: "UR" },
       { b: prof.ceiling ? Number(prof.ceiling).toFixed(1) : "—", s: "稳定上限 NPS" },
     ];
     items.forEach((it) => {
@@ -723,26 +777,26 @@
       ["BPM", bm.bpmRange && bm.bpmRange[0] !== bm.bpmRange[1] ? bm.bpmRange[0] + "–" + bm.bpmRange[1] : String(bm.bpm)],
       ["时长", fmtTime(bm.duration)],
       ["物件 / 长条", bm.notes + " / " + bm.holds],
-      ["平均 / 峰值 NPS", bm.nps + " / " + bm.peakNps],
+      ["NPS 均 / 峰", bm.nps + " / " + bm.peakNps],
       ["Mod", rp.mods || "无"],
     ];
     // 只展示当前口径的统计：V1 不出现任何 V2 字段，V2 也不再并排显示 V1，
     // 避免同一个准确率被标成两种口径。
     if (data.judgeMode === "v2" || data.judgeMode === "classic") {
       rows.push(
-        ["准确率（" + (data.judgeMode === "classic" ? "Classic" : "ScoreV2") + " 口径）", fmtPct(sm.accuracy)],
-        ["Score V2（stable）", fmtInt(sm.scoreV2) + (sm.gradeV2 ? "　评级 " + sm.gradeV2 : "")],
-        ["Score V2（lazer 配比）", fmtInt(sm.scoreV2Lazer)]
+        ["准确率 " + (data.judgeMode === "classic" ? "Classic" : "V2"), fmtPct(sm.accuracy)],
+        ["V2 分 stable", fmtInt(sm.scoreV2) + (sm.gradeV2 ? " " + sm.gradeV2 : "")],
+        ["V2 分 lazer", fmtInt(sm.scoreV2Lazer)]
       );
     } else {
-      rows.push(["准确率（ScoreV1 口径）", fmtPct(sm.accuracy)]);
+      rows.push(["准确率 V1", fmtPct(sm.accuracy)]);
       const v1 = scoreV1Of(data);
       if (v1 !== null) rows.push(["Score V1", fmtInt(v1)]);
     }
     rows.push(
       // V1 一件物件只算一次连击，面图上这个数会明显低于游戏结算屏（那边长条头尾都算），
       // 标一下口径，免得玩家以为算漏了。
-      [data.judgeMode === "v1" ? "最大连击（重算，按物件）" : "最大连击（重算）", String(sm.maxCombo)],
+      [data.judgeMode === "v1" ? "最大连击（按物件）" : "最大连击", String(sm.maxCombo)],
       ["空按", String(sm.ghosts || 0)],
       ["分析耗时", (data.elapsedMs || 0) + " ms"]
     );
@@ -754,6 +808,8 @@
     }
     rows.forEach(([k, v]) => {
       const d = el("div");
+      // 谱面那一行的值是一条完整的「艺人 - 曲名」，独占一行才不会挤成三行
+      if (k === "谱面") d.className = "kv-wide";
       d.appendChild(el("dt", null, k));
       d.appendChild(el("dd", null, v));
       kv.appendChild(d);
@@ -863,14 +919,21 @@
     clearNode(body);
     const names = ["前段", "中段", "后段"];
     (data.sections || []).forEach((s) => {
-      const row = el("div", "bar-row");
+      const row = el("div", "bar-row is-sections");
       row.appendChild(el("span", null, names[s.index] || "第" + (s.index + 1) + "段"));
       const track = el("div", "bar-track");
       const fill = el("div", "bar-fill" + (s.acc < 90 ? " warn" : ""));
       fill.style.width = Math.max(2, s.acc) + "%";
       track.appendChild(fill);
       row.appendChild(track);
-      row.appendChild(el("span", "bar-val", fmtPct(s.acc, 1) + " · UR " + (s.ur === null ? "—" : Number(s.ur).toFixed(0))));
+      // 一行放不下（窄屏会折成「97.0% · UR」+「209」两截），改成两行：上面准确率、
+      // 下面 UR 与漏接数，数字都用等宽字体对齐
+      const val = el("span", "bar-val is-stack");
+      val.appendChild(el("b", null, fmtPct(s.acc, 1)));
+      val.appendChild(el("i", null,
+        "UR " + (s.ur === null ? "—" : Number(s.ur).toFixed(0)) +
+        " · MISS " + (s.miss === undefined ? "—" : s.miss)));
+      row.appendChild(val);
       body.appendChild(row);
     });
     if (!(data.sections || []).length) body.appendChild(el("p", "muted", "暂无分段数据"));
@@ -1044,6 +1107,40 @@
   // ---------------------------------------------------------------- 关于
   // 版本号只有一个来源：在线页是 /api/health，离线报告是 REPORT_DATA.version。
   // 拿不到就保持 "—"，不猜。
+  // 更新说明：一个版本一行，点开才展开条目。只展开最新那版——
+  // 二十多个版本全摊开的话，这页要滚很久才看得到下面「参考内容」。
+  function renderReleases(versions) {
+    const list = $("releaseList");
+    if (!list) return 0;
+    list.textContent = "";
+    (versions || []).forEach((v, i) => {
+      const row = el("details", "rel");
+      if (i === 0) row.open = true;
+
+      const sum = el("summary");
+      sum.appendChild(el("b", null, "v" + v.version));
+      if (i === 0) sum.appendChild(el("span", "rel-tag", "最新"));
+      if (v.note) sum.appendChild(el("em", "rel-note", String(v.note).replace(/^[（(]\s*|[）)]\s*$/g, "")));
+      // 1.0.0 这种只有一段话的版本，条目数会是 0，把段落也计一条
+      const items = (v.sections || []).reduce((n, s2) => n + (s2.items || []).length, 0)
+        + (v.prose || []).length;
+      if (items) sum.appendChild(el("span", "rel-count", items + " 条改动"));
+      row.appendChild(sum);
+
+      const body = el("div", "rel-body");
+      (v.sections || []).forEach((sec) => {
+        if (sec.title) body.appendChild(el("h4", null, sec.title));
+        const ul = el("ul");
+        (sec.items || []).forEach((t) => ul.appendChild(el("li", null, t)));
+        body.appendChild(ul);
+      });
+      (v.prose || []).forEach((t) => body.appendChild(el("p", "rel-prose", t)));
+      row.appendChild(body);
+      list.appendChild(row);
+    });
+    return (versions || []).length;
+  }
+
   function renderAbout(version) {
     const box = $("aboutVersion");
     if (!box) return;
@@ -1180,7 +1277,9 @@
     renderTrack,
     renderLibrary,
     renderHero,
-    applySimpleMode,
+    renderDanChange,
+    applyDanChange,
+    applySimpleMode, renderHeroText, renderHeroLists,
     renderAdviceList,
     renderMsd,
     applySunnyDan,
@@ -1190,6 +1289,7 @@
     renderMeta,
     renderSimilar,
     renderAbout,
+    renderReleases,
     renderSections,
     renderJudgeBars,
     renderRawTable,
