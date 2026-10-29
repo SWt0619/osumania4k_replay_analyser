@@ -46,6 +46,7 @@ from app.core import (  # noqa: E402
     progress,
     quick_import,
     recommend,
+    release_notes,
     report,
 )
 from app.core.analyze import (  # noqa: E402
@@ -57,8 +58,14 @@ from app.core.analyze import (  # noqa: E402
     unsupported_keys_message,
 )
 from app.core.beatmap import parse_osu_file, parse_osu_text  # noqa: E402
-from app.core import library as library_mod  # noqa: E402
-from app.core.library import default_songs_roots, get_library, reset_library, set_cache_path  # noqa: E402
+from app.core.library import (  # noqa: E402
+    default_songs_roots,
+    get_library,
+    last_build_at,
+    progress_snapshot,
+    reset_library,
+    set_cache_path,
+)
 from app.core.osr import OsrError  # noqa: E402
 from app.core.skin import find_note_images, find_skin_in_exports  # noqa: E402
 from app.version import __version__  # noqa: E402
@@ -674,9 +681,18 @@ class _ApiMixin(_SessionView):
             return self._error("dan 必须是数字")
         if not key:
             return self._error("缺少回放标识")
+        old = (history.get(key) or {}).get("dan_value")
+        # 页面在分析结果里带了 historyNew：为真说明这一局是本次刚写进库的
+        fresh = bool(req.get("fresh"))
         updated = history.update_dan_value(key, value)
         log("[dan] %s -> %.2f (%s)" % (key[:8], value, "更新" if updated else "没有对应记录"))
-        return self._json({"ok": True, "updated": updated})
+        # 成长页的综合段位是服务端折合的，所以"这一局让段位动了多少"也在这里算：
+        # 前端拿到就画在总览页，不用自己再抄一遍折合公式。
+        return self._json({
+            "ok": True,
+            "updated": updated,
+            "change": _dan_change(key, old, fresh),
+        })
 
     # ---- 游戏目录（自动探测失败时让玩家在网页里手动指定） ----------------
     def _paths_info(self):
@@ -703,27 +719,33 @@ class _ApiMixin(_SessionView):
             },
         })
 
+    def _paths_unchanged(self):
+        """两栏都空时的响应：保持原设置，形状与保存成功时一致。
+
+        以前这里走 remove 分支，把已经存好的路径删掉：页面一刷新/一重启就发现
+        "路径又没了"，其实是这个空提交干的。空表单不该有副作用，只有显式带 clear
+        才真的清除。
+        """
+        roots = default_songs_roots()
+        lib = get_library(roots[0] if roots else None)
+        log("[paths] 空表单 -> 保持原设置不变")
+        return self._json({
+            "ok": True,
+            "unchanged": True,
+            "songsRoot": roots[0] if roots else "",
+            "songsRoots": roots,
+            "count": len(lib.entries),
+            "buildMs": 0,
+            "notes": [],
+            "hint": "两栏都空着，已保留原来的设置。要清掉手动目录请点「清除手动路径」。",
+        })
+
     def _paths_save(self, req: dict):
         stable = _field(req, "stableDir").strip('"').strip()
         lazer = _field(req, "lazerDir").strip('"').strip()
 
-        # 两栏都空 = 空表单。以前这里会走 remove 分支，把已经存好的路径删掉：
-        # 页面一刷新/一重启就发现"路径又没了"，其实是这个空提交干的。
-        # 空表单不应该有副作用，只有显式带 clear 才真的清除。
         if not stable and not lazer and not req.get("clear"):
-            roots = default_songs_roots()
-            lib = get_library(roots[0] if roots else None)
-            log("[paths] 空表单 -> 保持原设置不变")
-            return self._json({
-                "ok": True,
-                "unchanged": True,
-                "songsRoot": roots[0] if roots else "",
-                "songsRoots": roots,
-                "count": len(lib.entries),
-                "buildMs": 0,
-                "notes": [],
-                "hint": "两栏都空着，已保留原来的设置。要清掉手动目录请点「清除手动路径」。",
-            })
+            return self._paths_unchanged()
 
         notes = []
         if stable:
@@ -763,14 +785,27 @@ class _ApiMixin(_SessionView):
         ms = round((time.time() - t0) * 1000, 1)
         log("[paths] stable=%s lazer=%s -> roots=%s (%d 张, %.0fms)"
             % (stable or "-", lazer or "-", roots, len(lib.entries), ms))
+        count = len(lib.entries)
+        if count:
+            hint = ""
+        elif not roots:
+            # 目录能打开，但没有可以当"根"的地方：稳定版少了 Songs，也没有
+            # osu!.<用户名>.cfg 指向别的目录。这时确实该让人去改路径。
+            hint = ("这个目录里没有可扫描的曲库：稳定版要选到含 Songs 的那一级，"
+                    "lazer 要选到含 files 的数据目录。")
+        else:
+            # 根找到了、也扫过了，只是里面没有谱面。别再说"目录选错了"——
+            # 那会让人反复去改一个本来就对的路径（issue #7 就是这么绕进去的）。
+            hint = ("目录读到了，但里面还没有谱面：先在游戏里导入这张图再回来试，"
+                    "或者直接在弹窗里手动选 .osu。")
         return self._json({
             "ok": True,
             "songsRoot": roots[0] if roots else "",
             "songsRoots": roots,
-            "count": len(lib.entries),
+            "count": count,
             "buildMs": ms,
             "notes": notes,
-            "hint": "" if lib.entries else "按这个路径还是没找到谱面，确认目录选对了吗？",
+            "hint": hint,
         })
 
     # ---- 谱面查询 -------------------------------------------------------
@@ -885,6 +920,10 @@ class _ApiMixin(_SessionView):
         data["needPlayer"] = not bool(profile.get("player"))
         return self._json(data)
 
+    def _changelog(self):
+        """关于页的更新说明：直接读仓库根的 CHANGELOG.md，不另存一份。"""
+        return self._json({"ok": True, "versions": release_notes.load()})
+
     def _profile_save(self):
         req = _parse_json(self._read_body())
         if req is None:
@@ -995,6 +1034,36 @@ class _ApiMixin(_SessionView):
         if len(text) > 4 * 1024 * 1024:
             return self._error("谱面文件异常大，已放弃估算", 413)
         return self._json({"ok": True, "name": os.path.basename(path), "text": text})
+
+
+    # ---- 导出的图片 ------------------------------------------------------
+    def card_save(self, qs):
+        """把成绩卡 / B50 存进程序目录的 card/。
+
+        前端画在 canvas 上，本来只能走浏览器下载、落到「下载」文件夹里还得自己翻。
+        本机程序不如直接写回自己目录：文件名沿用导出时那个，重名时加 (2)。
+        """
+        try:
+            body = self._read_body(limit=16 * 1024 * 1024)
+        except BodyTooLarge as e:
+            return self._error(str(e), 413)
+        if not body:
+            return self._error("没有收到图片数据", 400)
+        if not body.startswith(b"\x89PNG\r\n\x1a\n"):
+            return self._error("只接受 PNG 图片", 400)
+        name = _card_file_name((qs.get("name") or [""])[0])
+        try:
+            os.makedirs(paths.CARD_DIR, exist_ok=True)
+            dest = _unique_path(os.path.join(paths.CARD_DIR, name))
+            with open(dest, "wb") as f:
+                f.write(body)
+        except OSError as e:
+            return self._error("保存图片失败：%s" % e, 500)
+        return self._json({
+            "ok": True,
+            "dir": os.path.basename(paths.CARD_DIR),
+            "name": os.path.basename(dest),
+        })
 
 
 class _AnalyzeApiMixin(_SessionView):
@@ -1254,17 +1323,112 @@ class _AudioApiMixin(_SessionView):
 # 一次「练这一段」的中间结果：算好的 .osu 文本 + 音频路径，等浏览器把变速后的 WAV
 # 送回来再打包。它是临时票据不是缓存，所以只活一小时、最多留 20 条。
 _CUTS: dict[str, dict] = {}
+# 票据表会被多个请求线程同时读写（裁切在 POST 线程、取音频在另一个 GET 线程）
+_CUTS_LOCK = threading.Lock()
 _CUT_TTL = 3600
 _CUT_MAX = 20
+# 服务端接受的范围比 practice.cut 内部（0.1~2.0）窄：再往外就不是"练习"了，
+# 生成的谱面在游戏里也没法正常打
+_CUT_RATE_MIN = 0.5
+_CUT_RATE_MAX = 2.0
 
 
-def _prune_cuts() -> None:
+def _cut_params(req: dict) -> tuple[float, float, float, bool]:
+    """解析裁切请求，返回（起点, 终点, 倍率, 是否全曲）。
+
+    倍率由前端从建议里的 rates 取，默认 0.9：慢练 0.85~0.95、冲速度 1.05~1.1
+    都走这一条路径。服务端只管把范围夹住。
+    """
+    try:
+        t0 = float(req.get("t0"))
+        t1 = float(req.get("t1"))
+    except (TypeError, ValueError):
+        raise ValueError("缺少要裁切的时间段")
+    try:
+        rate = float(req.get("rate") or 0.9)
+    except (TypeError, ValueError):
+        rate = 0.9
+    if not _CUT_RATE_MIN <= rate <= _CUT_RATE_MAX:
+        raise ValueError("倍率超出范围（%.1f~%.1f）" % (_CUT_RATE_MIN, _CUT_RATE_MAX))
+    return t0, t1, rate, bool(req.get("full"))
+
+
+def _cut_media(text: str, path: str) -> tuple[str, str, str]:
+    """找出裁切后要用的音频与背景，返回（音频, 背景路径, 背景文件名）。
+
+    音频优先取同目录同捆的那份；lazer 的 files 存储会把它拆走，
+    这时退到补音频缓存（同一图包下过整包的音频也在那里）。
+    找不到音频时返回空串，由调用方决定怎么提示。
+    """
+    audio = ""
+    md5 = ""
+    bg_path = ""
+    bg_name = ""
+    try:
+        bm = parse_osu_text(text, path)
+        md5 = bm.md5 or ""
+        audio = bm.audio_path
+        # 切片要能显示背景：谱面里那行坐标还指着原图，包里没这张图就会是一片空白
+        bg_name = bm.background_filename
+        bg_path = bm.background_path
+    except Exception:  # noqa: BLE001 - 读不出音频信息不该让裁切整体失败
+        audio = ""
+    if not audio:
+        try:
+            audio = audio_fetch.cached_audio(CACHE_DIR, md5)
+        except Exception:  # noqa: BLE001
+            audio = ""
+    if not audio or not os.path.isfile(audio):
+        return "", bg_path, bg_name
+    return audio, bg_path, bg_name
+
+
+def _card_file_name(name: str) -> str:
+    """把前端给的文件名压成一层安全的名字。
+
+    只取基名、再替掉 Windows 的保留字符：这张图会写到 card/ 下，
+    名字里带 `..` 或盘符就不能让它跑到别的目录去。
+    """
+    base = os.path.basename(str(name or "").replace("\\", "/"))
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", base).strip(" .")
+    if not base:
+        base = "card"
+    if not base.lower().endswith(".png"):
+        base += ".png"
+    return base[:120]
+
+
+def _unique_path(path: str) -> str:
+    """同名文件已存在时加 (2)、(3)…，别把上一张悄悄覆盖掉。"""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    for i in range(2, 1000):
+        cand = "%s (%d)%s" % (stem, i, ext)
+        if not os.path.exists(cand):
+            return cand
+    return path
+
+
+def _prune_cuts_locked() -> None:
+    """按 TTL 与条数上限清理票据。调用方必须已持有 _CUTS_LOCK。"""
     now = time.time()
     for key in [k for k, v in _CUTS.items() if now - v["at"] > _CUT_TTL]:
         _CUTS.pop(key, None)
     while len(_CUTS) > _CUT_MAX:
         oldest = min(_CUTS.items(), key=lambda kv: kv[1]["at"])[0]
         _CUTS.pop(oldest, None)
+
+
+def _put_cut(cid: str, item: dict) -> None:
+    """存一张裁切票据，并把表压回上限。
+
+    插入和清理必须进同一把锁：服务端是多线程的，一边插入一边遍历会让字典
+    在扩容时抛 RuntimeError，表现是偶发的 500，且只在有人连着点两次时出现。
+    """
+    with _CUTS_LOCK:
+        _CUTS[cid] = item
+        _prune_cuts_locked()
 
 
 class _PracticeMixin(_SessionView):
@@ -1300,7 +1464,14 @@ class _PracticeMixin(_SessionView):
             "label": label,
             "dan": value,
             "simple": bool(ev.get("simple")),
-            "rates": report._practice_rates(payload, value, acc_v1),
+            "playalong": bool(ev.get("playalong")),
+            # 段位跨过 3.6 这条线时整份评价会换写法（简易 / 完整），
+            # 光换建议会留下「新手标题 + 高手短板」这种半新半旧的组合，所以文本一起回传。
+            "headline": ev.get("headline") or "",
+            "paragraphs": ev.get("paragraphs") or [],
+            "strengths": ev.get("strengths") or [],
+            "weaknesses": ev.get("weaknesses") or [],
+            "rates": report.practice_rates(payload, value, acc_v1),
             "advice": ev.get("advice") or [],
         })
 
@@ -1313,55 +1484,26 @@ class _PracticeMixin(_SessionView):
         if not path or not os.path.isfile(path):
             return self._error("找不到这张谱面的文件", 404)
         try:
-            t0 = float(req.get("t0"))
-            t1 = float(req.get("t1"))
-        except (TypeError, ValueError):
-            return self._error("缺少要裁切的时间段", 400)
-        # 固定 0.9× 一档：之前按「降 1 / 2 个半音」做的两档，0.94× 听感上几乎和原速
-        # 没差，练起来没意义，所以只留这一档，前端也只有一个按钮。
-        try:
-            rate = float(req.get("rate") or 0.9)
-        except (TypeError, ValueError):
-            rate = 0.9
-        if not 0.5 <= rate <= 2.0:
-            return self._error("倍率超出范围（0.5~2.0）", 400)
+            t0, t1, rate, full = _cut_params(req)
+        except ValueError as e:
+            return self._error(str(e), 400)
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError as e:
             return self._error("读取谱面失败：%s" % e, 500)
         try:
-            out = practice.cut(text, t0, t1, rate=rate, full=bool(req.get("full")))
+            out = practice.cut(text, t0, t1, rate=rate, full=full)
         except ValueError as e:
             return self._error(str(e), 400)
 
-        # 音频优先取同目录同捆的那份；lazer 的 files 存储会把它拆走，
-        # 这时退到补音频缓存（同一图包下过整包的音频也在那里）。
-        audio = ""
-        md5 = ""
-        bg_path = ""
-        bg_name = ""
-        try:
-            bm = parse_osu_text(text, path)
-            md5 = bm.md5 or ""
-            audio = bm.audio_path
-            # 切片要能显示背景：谱面里那行坐标还指着原图，包里没这张图就会是一片空白
-            bg_name = bm.background_filename
-            bg_path = bm.background_path
-        except Exception:
-            audio = ""
+        audio, bg_path, bg_name = _cut_media(text, path)
         if not audio:
-            try:
-                audio = audio_fetch.cached_audio(CACHE_DIR, md5)
-            except Exception:
-                audio = ""
-        if not audio or not os.path.isfile(audio):
             return self._error("这张谱面的音频不在本地，无法变速；先在设置里补一次音频再试", 409)
 
         cid = uuid.uuid4().hex[:16]
-        _CUTS[cid] = {"text": out["text"], "audio": audio, "meta": out,
-                      "bg": (bg_path, bg_name), "at": time.time()}
-        _prune_cuts()
+        _put_cut(cid, {"text": out["text"], "audio": audio, "meta": out,
+                       "bg": (bg_path, bg_name), "at": time.time()})
         payload = {k: v for k, v in out.items() if k != "text"}
         payload.update({
             "ok": True,
@@ -1523,13 +1665,16 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
               _AssetMixin, BaseHTTPRequestHandler):
     """HTTP 传输层：路由、响应头、错误码、日志。
 
-    业务分在四个 mixin 里，这个类只负责"怎么收发"与"往哪儿转"：
-      * _ApiMixin          曲库、游戏目录、谱面查询
+    业务分在六个 mixin 里，这个类只负责"怎么收发"与"往哪儿转"：
+      * _ApiMixin          曲库、游戏目录、谱面查询、更新检查
       * _AnalyzeApiMixin   分析、会话、media URL
       * _AudioApiMixin     在线补音频
+      * _PracticeMixin     裁切练习谱面、打包 .osz
       * _AssetMixin        静态文件与媒体（Range）
       * _ChunkUploadMixin  分片上传兜底通道
-    它们都只用这里定义的四个原语：_read_body / _json / _error / _send。
+    所有 mixin 共用的底层原语只有 _read_body / _json / _error / _send；
+    媒体相关的 _serve_file / _send_range / _send_download 留在 _AssetMixin 里，
+    因为只有它会碰 Range 和 Content-Disposition。
     """
 
     server_version = "ManiaReplayLab/" + __version__
@@ -1685,7 +1830,7 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
             return self._library_info()
         if path == "/api/library/progress":
             # 只读快照，不触发构建：页面在建索引期间轮询它画进度条
-            return self._json(library_mod.progress_snapshot())
+            return self._json(progress_snapshot())
         if path == "/api/local-replays":
             return self._local_replays()
         if path == "/api/quick/pending":
@@ -1698,6 +1843,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
             return self._audio_fetch_status(qs)
         if path == "/api/progress":
             return self._progress_info()
+        if path == "/api/changelog":
+            return self._changelog()
         if path == "/api/check-update":
             return self._check_update()
         if path == "/api/open-replays":
@@ -1784,6 +1931,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
                 return self._beatmap_meta()
             if path == "/api/report/advice":
                 return self.report_advice()
+            if path == "/api/card/save":
+                return self.card_save(qs)
             if path == "/api/practice/cut":
                 return self.practice_cut()
             if path == "/api/practice/pack":
@@ -1927,6 +2076,52 @@ def _profile_from_config() -> dict:
     }
 
 
+def _dan_change(key: str, old_value, fresh: bool = False) -> dict | None:
+    """这一局让成长页的综合段位动了多少；没动就返回 None。
+
+    折合在服务端做（页面只显示结果），所以这里拿两份存档各算一次：
+    当前库是「导入之后」，另一份是「导入之前」。
+
+    新建的那一局要按"库里根本没有这一局"还原，不能拿它的旧 dan_value：
+    入库时写的是 MSD 兜底值，页面回填的是 Sunny → Azusa → Roxy 的结果，
+    两者能差一两段；拿兜底值当基线，等于把这次成绩自己的估算差额算进了段位变动，
+    新成绩很容易一律显示成掉段。只有重新导入老回放时，旧值才是真的"上一版"。
+    两边都得有足够样本才给结论 —— 样本不够时成长页本来就不显示段位。
+    """
+    profile = _profile_from_config()
+    sessions = history.all_sessions()
+    after = progress.evaluate(sessions, profile).get("overall") or {}
+    if not after.get("visible"):
+        return None
+    patched = []
+    for s in sessions:
+        if s.get("key") == key:
+            s = dict(s)
+            # None = 这一局之前不存在，等于不计入
+            s["dan_value"] = None if fresh else old_value
+        patched.append(s)
+    before = progress.evaluate(patched, profile).get("overall") or {}
+    if not before.get("visible"):
+        return None
+    try:
+        to_value = float(after.get("dan"))
+        from_value = float(before.get("dan"))
+    except (TypeError, ValueError):
+        return None
+    # 显示用两位小数，差不到 0.01 就当没动：每次都弹一张 +0.00 的卡只是噪音
+    delta = round(to_value - from_value, 2)
+    if not delta:
+        return None
+    return {
+        "from": round(from_value, 2),
+        "to": round(to_value, 2),
+        "delta": delta,
+        "fromLabel": progress.dan_label(from_value),
+        "toLabel": progress.dan_label(to_value),
+        "count": after.get("count", 0),
+    }
+
+
 def _refresh_library() -> None:
     """分析/搜索前看一眼曲库有没有变化（新下载的谱面）。
 
@@ -1954,13 +2149,13 @@ def _analyze_and_store(replay_path: str, beatmap_path: str | None,
     没有手动开关：两套规则混用只会算错，选项留着也只会让人选错。
     """
     _refresh_library()
-    before = library_mod.LAST_BUILD[0]
+    before = last_build_at()
     try:
         payload = analyze(replay_path, beatmap_path=beatmap_path, songs_root=songs_root)
     finally:
         # 重扫恰好发生在"找不到这张图"这条路上，而那条路是会抛异常的，
         # 所以日志必须写在 finally 里，否则最需要它的场景反而没有记录。
-        if library_mod.LAST_BUILD[0] > before:
+        if last_build_at() > before:
             lib = get_library(songs_root)
             log("[library] 找不到谱面后重扫了曲库：%d 张，用时 %.0fms"
                 % (len(lib.entries), lib.build_ms))
@@ -1976,7 +2171,9 @@ def _analyze_and_store(replay_path: str, beatmap_path: str | None,
     payload["session"] = sid
     # 每局摘要落一份本地存档（`_cache/history.db`）。这一层只存不分析，
     # 写失败也不影响本次分析，所以走 record_safely。
-    history.record_safely(payload)
+    # 返回值要带给页面：段位变动要拿"库里有没有这一局"当基线，
+    # 新建那行的 dan_value 只是 MSD 兜底，不是上一版估算值。
+    payload["historyNew"] = bool(history.record_safely(payload))
     cols = note_skin.get("columns") or []
     payload["media"] = {
         "audio": bool(audio),
