@@ -16,6 +16,10 @@
   // 否则画面看起来比实际打的时候慢，会低估这张图。
   const reportRate = Number((data.replay && data.replay.rate) || 1) || 1;
   $("emptyState").hidden = true;
+  // 成绩卡要读服务端上的 logo，单文件报告里点了也只会导出一张没 logo 的图，
+  // 干脆不出现这个按钮
+  const shareBtn = document.getElementById("btnShareCard");
+  if (shareBtn) shareBtn.hidden = true;
   window.UI.renderTrack(data);
   window.UI.renderHero(data);
   window.UI.renderMsd(data);
@@ -197,7 +201,7 @@
     if (player || !window.ManiaPlayer) return;
     const canvas = $("playfield");
     if (!canvas) return;
-    player = window.ManiaPlayer.create(canvas, { scrollMs: 1200, judgementFilter: "all", showJudgements: true, theme: theme() });
+    player = window.ManiaPlayer.create(canvas, { scrollMs: 800, judgementFilter: "all", showJudgements: true, theme: theme() });
     player.load({ keys: data.beatmap.keys, notes: data.notes, firstObject: data.beatmap.firstObject, lastObject: data.beatmap.lastObject });
     player.resize();
     player.setTime(timeMs);
