@@ -45,6 +45,8 @@ def main() -> int:
         "--add-data", os.path.join(ROOT, "app", "web") + sep + "app/web",
         "--add-data", os.path.join(ROOT, "vendor", "minacalc") + sep + "vendor/minacalc",
         "--add-data", os.path.join(ROOT, "data") + sep + "data",
+        # 关于页的「更新说明」直接读这份文件；不带上的话单文件版里那一块会被藏起来
+        "--add-data", os.path.join(ROOT, "CHANGELOG.md") + sep + ".",
         "--distpath", args.out,
         "--workpath", args.work,
         "--specpath", args.work,
