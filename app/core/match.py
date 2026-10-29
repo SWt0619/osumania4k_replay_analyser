@@ -790,139 +790,165 @@ def _match_state_machine(
     一百多毫秒），越过了就顺延给 B，并把 A 强制判漏。stable 的事件机没有这层锁。
     """
     keys = max(1, beatmap.keys)
-    by_col: list[list[HitObject]] = [[] for _ in range(keys)]
-    for obj in beatmap.objects:
-        if 0 <= obj.column < keys:
-            by_col[obj.column].append(obj)
-    press_by_col: list[list[float]] = [[] for _ in range(keys)]
-    rel_by_col: list[list[float]] = [[] for _ in range(keys)]
-    for p in presses:
-        if 0 <= p.column < keys:
-            press_by_col[p.column].append(p.time)
-    for r in releases:
-        if 0 <= r.column < keys:
-            rel_by_col[r.column].append(r.time)
+    keys = max(1, beatmap.keys)
+    # 分组规则与 A 口径共用一份：各写一遍的话，「超出键数的按键算不算空敲」这种细节迟早分叉
+    by_col, press_by_col, rel_by_col, ghosts = _group_columns(beatmap, presses, releases, keys)
 
     out: list[JudgedNote] = []
-    ghosts: list[GhostPress] = []
-    # 超出谱面键数的按键也算空敲，不能因为按列分组就悄悄丢掉
-    for p in presses:
-        if not (0 <= p.column < keys):
-            ghosts.append(GhostPress(time=p.time, column=p.column))
-
     for col in range(keys):
-        objs = sorted(by_col[col], key=lambda o: o.time)
-        # 同一时刻先处理按下再处理松手：长条的开头总在结尾之前
-        events = [(t, 0) for t in press_by_col[col]] + [(t, 1) for t in rel_by_col[col]]
-        events.sort(key=lambda e: (e[0], e[1]))
-
-        idx = 0
-        alive = [True] * len(objs)        # 还没产生判定；note lock 会跳过一些音符，不能只看 idx
-        active: HitObject | None = None   # 当前按住的这条长条
-        active_press = 0.0                # 它的按下时刻
-        active_head = "miss"              # 它的头判（尾判要按头判封顶）
-
-        def first_alive(start: int) -> int:
-            j = start
-            while j < len(objs) and not alive[j]:
-                j += 1
-            return j
-
-        def drain(until: float) -> None:
-            """把 until 之前已经不可能再命中的物件记成漏接。
-
-            用 meh 当界限是安全的：过了 meh 就超出命中窗口，之后无论怎么按都只能判漏，
-            只是「判漏的时刻」被提前到这次事件，不影响最终判定。
-            """
-            nonlocal idx
-            limit = until - windows["meh"]
-            while idx < len(objs) and objs[idx].time < limit:
-                if alive[idx]:
-                    alive[idx] = False
-                    out.append(_make_miss(objs[idx]))
-                idx += 1
-            idx = first_alive(idx)
-
-        for t, kind in events:
-            drain(t)
-            if kind == 0:
-                # 新的一次按下：上一条还按着的长条到此为止（没有松手记录，按到结尾算）
-                if active is not None:
-                    out.append(_settle_hold(active, active_press, active_head, None,
-                                            windows, windows_v2))
-                    active = None
-                if note_lock:
-                    # 官方 OrderedHitPolicy：一个音符只有在「下一个音符的起点还没到」时才可打，
-                    # 否则这一击要顺延给后面的音符；命中时把更早未判的全部强制漏接。
-                    j = first_alive(idx)
-                    pick = -1
-                    while j < len(objs):
-                        nxt = first_alive(j + 1)
-                        if nxt < len(objs) and t >= objs[nxt].time:
-                            alive[j] = False
-                            out.append(_make_miss(objs[j]))
-                            j = nxt
-                            continue
-                        if abs(t - objs[j].time) > windows["meh"]:
-                            # 超出命中档但还在 Miss 窗内：官方 ResultFor 会返回 Miss 并**消费**这一击
-                            # （DrawableNote.CheckForResult 直接 ApplyResult(Miss)）。当成空敲留给
-                            # 下一次按键，会让这个音符被后面的按键「救回来」，那正是误差的来源。
-                            if abs(t - objs[j].time) <= windows["miss"]:
-                                pick = j
-                                break
-                            # 连 Miss 窗都过了：ResultFor 返回 None，官方返回 false 继续问下一个音符
-                            j = first_alive(j + 1)
-                            continue
-                        pick = j
-                        break
-                    if pick < 0:
-                        ghosts.append(GhostPress(time=t, column=col))
-                        continue
-                    k = idx
-                    while k < pick:
-                        if alive[k]:
-                            alive[k] = False
-                            out.append(_make_miss(objs[k]))
-                        k += 1
-                    obj = objs[pick]
-                    delta = t - obj.time
-                    alive[pick] = False
-                    idx = first_alive(idx)
-                else:
-                    if idx >= len(objs):
-                        ghosts.append(GhostPress(time=t, column=col))
-                        continue
-                    obj = objs[idx]
-                    delta = t - obj.time
-                    if abs(delta) > windows["meh"]:
-                        ghosts.append(GhostPress(time=t, column=col))
-                        continue
-                    alive[idx] = False
-                    idx = first_alive(idx + 1)
-                head = judge_with_windows(delta, windows_v2)
-                if obj.is_hold and obj.end_time is not None:
-                    active, active_press, active_head = obj, t, head
-                else:
-                    # 用传进来的 windows（可能已按 mod 缩放），不能重新按 OD 推一遍
-                    item = _make_hit(obj, t, delta, judge_with_windows(delta, windows))
-                    item.head_judgement = head
-                    item.judgement_v2 = head
-                    out.append(item)
-            elif active is not None:
-                out.append(_settle_hold(active, active_press, active_head,
-                                        t - active.end_time, windows, windows_v2))
-                active = None
-
-        drain(float("inf"))
-        if active is not None:
-            out.append(_settle_hold(active, active_press, active_head, None,
-                                    windows, windows_v2))
+        items, extra = _match_column(by_col[col], press_by_col[col], rel_by_col[col], col,
+                                     windows, windows_v2, note_lock)
+        out.extend(items)
+        ghosts.extend(extra)
 
     out.sort(key=lambda x: (x.note_time, x.column))
     for i, item in enumerate(out):
         item.index = i
     ghosts.sort(key=lambda g: g.time)
     return MatchResult(notes=out, ghosts=ghosts, beatmap=beatmap, od=od_value, windows=windows)
+
+
+def _first_alive(objs: list[HitObject], alive: list[bool], start: int) -> int:
+    """从 start 起第一个还没判定的物件下标（可能等于 len(objs)）。
+
+    note lock 会跳过一些音符，所以"下一个要判的"不能直接用下标自增推。
+    """
+    j = start
+    while j < len(objs) and not alive[j]:
+        j += 1
+    return j
+
+
+def _pick_note_locked(objs: list[HitObject], alive: list[bool], idx: int,
+                      press_time: float, windows: dict[str, float]
+                      ) -> tuple[int, list[HitObject]]:
+    """lazer 的 OrderedHitPolicy：这一次按下该落到哪个音符上。
+
+    官方规则是「一个音符只有在下一个音符的起点还没到时才可打」：玩家在 A、B 之间
+    按下时，只要还没越过 B 的起点就归 A（哪怕 A 的偏差已经一百多毫秒），越过了就
+    顺延给 B，并把 A 强制判漏。stable 的事件机没有这层锁。
+
+    返回（音符下标, 期间被强制判漏的物件）；下标 -1 表示这一击没有对应音符。
+    这里会就地修改 alive，调用方负责把这些物件记成 miss。
+    """
+    j = _first_alive(objs, alive, idx)
+    forced: list[HitObject] = []
+    while j < len(objs):
+        nxt = _first_alive(objs, alive, j + 1)
+        if nxt < len(objs) and press_time >= objs[nxt].time:
+            alive[j] = False
+            forced.append(objs[j])
+            j = nxt
+            continue
+        if abs(press_time - objs[j].time) > windows["meh"]:
+            # 超出命中档但还在 Miss 窗内：官方 ResultFor 会返回 Miss 并**消费**这一击
+            # （DrawableNote.CheckForResult 直接 ApplyResult(Miss)）。当成空敲留给
+            # 下一次按键，会让这个音符被后面的按键「救回来」，那正是误差的来源。
+            if abs(press_time - objs[j].time) <= windows["miss"]:
+                return j, forced
+            # 连 Miss 窗都过了：ResultFor 返回 None，官方返回 false 继续问下一个音符
+            j = _first_alive(objs, alive, j + 1)
+            continue
+        return j, forced
+    return -1, forced
+
+
+def _match_column(
+    objs: list[HitObject],
+    press_times: list[float],
+    release_times: list[float],
+    col: int,
+    windows: dict[str, float],
+    windows_v2: dict[str, float],
+    note_lock: bool,
+) -> tuple[list[JudgedNote], list[GhostPress]]:
+    """单列的事件流模拟，返回（这一列的判定, 这一列的空按）。
+
+    列与列之间没有共享状态：长条只能被同一列的按键按住，跨列互不影响。
+    拆成独立函数后，状态（idx / alive / active）的生命周期就限定在一次调用里。
+    """
+    objs = sorted(objs, key=lambda o: o.time)
+    # 同一时刻先处理按下再处理松手：长条的开头总在结尾之前
+    events = [(t, 0) for t in press_times] + [(t, 1) for t in release_times]
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    out: list[JudgedNote] = []
+    ghosts: list[GhostPress] = []
+    idx = 0
+    alive = [True] * len(objs)        # 还没产生判定；note lock 会跳过一些音符，不能只看 idx
+    active: HitObject | None = None   # 当前按住的这条长条
+    active_press = 0.0                # 它的按下时刻
+    active_head = "miss"              # 它的头判（尾判要按头判封顶）
+
+    def drain(until: float) -> None:
+        """把 until 之前已经不可能再命中的物件记成漏接。
+
+        用 meh 当界限是安全的：过了 meh 就超出命中窗口，之后无论怎么按都只能判漏，
+        只是「判漏的时刻」被提前到这次事件，不影响最终判定。
+        """
+        nonlocal idx
+        limit = until - windows["meh"]
+        while idx < len(objs) and objs[idx].time < limit:
+            if alive[idx]:
+                alive[idx] = False
+                out.append(_make_miss(objs[idx]))
+            idx += 1
+        idx = _first_alive(objs, alive, idx)
+
+    for t, kind in events:
+        drain(t)
+        if kind == 0:
+            # 新的一次按下：上一条还按着的长条到此为止（没有松手记录，按到结尾算）
+            if active is not None:
+                out.append(_settle_hold(active, active_press, active_head, None,
+                                        windows, windows_v2))
+                active = None
+            if note_lock:
+                pick, forced = _pick_note_locked(objs, alive, idx, t, windows)
+                out.extend(_make_miss(o) for o in forced)
+                if pick < 0:
+                    ghosts.append(GhostPress(time=t, column=col))
+                    continue
+                k = idx
+                while k < pick:
+                    if alive[k]:
+                        alive[k] = False
+                        out.append(_make_miss(objs[k]))
+                    k += 1
+                obj = objs[pick]
+                delta = t - obj.time
+                alive[pick] = False
+                idx = _first_alive(objs, alive, idx)
+            else:
+                if idx >= len(objs):
+                    ghosts.append(GhostPress(time=t, column=col))
+                    continue
+                obj = objs[idx]
+                delta = t - obj.time
+                if abs(delta) > windows["meh"]:
+                    ghosts.append(GhostPress(time=t, column=col))
+                    continue
+                alive[idx] = False
+                idx = _first_alive(objs, alive, idx + 1)
+            head = judge_with_windows(delta, windows_v2)
+            if obj.is_hold and obj.end_time is not None:
+                active, active_press, active_head = obj, t, head
+            else:
+                # 用传进来的 windows（可能已按 mod 缩放），不能重新按 OD 推一遍
+                item = _make_hit(obj, t, delta, judge_with_windows(delta, windows))
+                item.head_judgement = head
+                item.judgement_v2 = head
+                out.append(item)
+        elif active is not None:
+            out.append(_settle_hold(active, active_press, active_head,
+                                    t - active.end_time, windows, windows_v2))
+            active = None
+
+    drain(float("inf"))
+    if active is not None:
+        out.append(_settle_hold(active, active_press, active_head, None,
+                                windows, windows_v2))
+    return out, ghosts
 
 
 def _scaled_windows(windows: dict[str, float], mods: list[str] | None,
