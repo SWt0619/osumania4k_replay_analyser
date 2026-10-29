@@ -457,6 +457,20 @@ def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3,
             continue
         ds = [n.delta for n in seg if n.delta is not None]
         errors = sum(1 for n in seg if n.is_error_for(mode))
+        # 漏接数和头部「MISS」一个口径：V1 一件算一次，V2 / Classic 长条头尾各算一次，
+        # 否则三段的 MISS 加起来对不上顶部总数。
+        if mode in ("v2", "classic"):
+            classic = mode == "classic"
+            miss = 0
+            for n in seg:
+                head = ((n.head_judgement_classic or n.judgement) if classic
+                        else (n.head_judgement or n.judgement))
+                tail = ((n.tail_judgement_classic if classic else n.tail_judgement) or head)
+                miss += 1 if head == "miss" else 0
+                if n.is_hold and tail == "miss":
+                    miss += 1
+        else:
+            miss = sum(1 for n in seg if n.judgement == "miss")
         # 与顶部准确率、时间轴用同一把尺子：V2/Classic 的长条头尾各算一个判定单位。
         # 早先这里一件算一份，面图上每段都会被压出几个百分点，凭空多出"这段明显跟不上"。
         units = [u for n in seg for u in _units_of(n, mode)]
@@ -468,6 +482,7 @@ def _section_stats(match: MatchResult, rate: float = 1.0, parts: int = 3,
                 "end": round(hi),
                 "notes": len(seg),
                 "errors": errors,
+                "miss": miss,
                 "acc": round(seg_acc, 2),
                 "meanDelta": round(sum(ds) / len(ds), 2) if ds else None,
                 # 与时间轴/全局同一个口径：DT/HT 下 UR 要除以倍率
@@ -1428,6 +1443,36 @@ def _ln_stats(match: MatchResult, map_class: dict) -> dict | None:
     return _ln_release_stats(match)
 
 
+def _recent_same_beatmap(replay: Replay) -> dict | None:
+    """同一张图、同一倍率、同一个人的最近几局。没有记录时返回 None。
+
+    查询必须在写库之前：本局是接口返回后才落库的，否则会把自己算成「上一次」。
+    只取同一倍率 —— 1.0× 与 1.2× 的准确率/UR 不在同一把尺子上；
+    还要对玩家 —— 别人发来的回放也会入库，混进来就成了拿别人的 100% 当自己的「上次」。
+    优先用设置里的玩家名，没设置就按这一局回放里的名字。
+    """
+    try:
+        owner = history.configured_player() or (replay.player or "")
+        past = history.same_beatmap(replay.beatmap_md5, replay.rate, limit=10, owner=owner,
+                                    exclude_key=replay.replay_md5)
+    except Exception:  # noqa: BLE001 - 历史是附加功能，读失败不能影响分析
+        return None
+    if not past:
+        return None
+    return {"rate": round(float(replay.rate or 1.0), 3), "items": past}
+
+
+def _truncated_warning(replay: Replay) -> str:
+    """回放文件没写完（压缩块被截断）时的提示，完整文件返回空串。
+
+    不提示的话，用户会以为"这一局就这么几个音符"，把残卷当成真实成绩。
+    """
+    if not getattr(replay, "truncated", False):
+        return ""
+    return ("这个回放文件不完整（多半是在游戏保存的那一刻被读取的），只分析了能解出的 %d 个事件。"
+            "等游戏完全退出后重新拖入可以拿到完整结果。" % len(replay.frames))
+
+
 def analyze(
     replay_path: str,
     beatmap_path: str | None = None,
@@ -1468,18 +1513,9 @@ def analyze(
         **_beatmap_facts(beatmap, blocks, pattern_detail, beatmap_payload, replay, contexts),
     }
 
-    # 同图历史：这张谱面以前打过几次、走势如何。查询必须在写库之前——
-    # 本局是接口返回后才落库的，否则会把自己算成「上一次」。
-    # 只取同一倍率：1.0× 与 1.2× 的准确率/UR 不在同一把尺子上。
-    # 还要对玩家：别人发来的回放也会入库，混进来就成了拿别人的 100% 当自己的「上次」。
-    # 优先用设置里的玩家名，没设置就按这一局回放里的名字。
-    try:
-        owner = history.configured_player() or (replay.player or "")
-        past = history.same_beatmap(replay.beatmap_md5, replay.rate, limit=10, owner=owner)
-    except Exception:  # noqa: BLE001 - 历史是附加功能，读失败不能影响分析
-        past = []
-    if past:
-        common["history"] = {"rate": round(float(replay.rate or 1.0), 3), "items": past}
+    recent = _recent_same_beatmap(replay)
+    if recent:
+        common["history"] = recent
 
     judge_default = detect_judge_mode(replay.version, replay.mods, replay.score_info)
     modes = ["v1", "v2"]
@@ -1519,11 +1555,9 @@ def analyze(
     }
     payload["lnStats"] = _ln_stats(match, common.get("mapClass") or {})
     # 回放文件没写完（压缩块被截断）时，前端要明确告诉用户"这是残卷"，别让人以为数据就是这么多
-    if getattr(replay, "truncated", False):
-        payload["warning"] = (
-            "这个回放文件不完整（多半是在游戏保存的那一刻被读取的），只分析了能解出的 %d 个事件。"
-            "等游戏完全退出后重新拖入可以拿到完整结果。" % len(replay.frames)
-        )
+    warning = _truncated_warning(replay)
+    if warning:
+        payload["warning"] = warning
 
     # 相似谱面不在这里算：难度要用前端 Sunny 算出的段位，等页面拿到段位后调 /api/recommend
     return payload
