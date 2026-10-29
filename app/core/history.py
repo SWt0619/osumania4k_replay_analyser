@@ -505,7 +505,8 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 def same_beatmap(md5: str, rate: float | None = None, limit: int = 10,
                  path: str | None = None, only_me: bool = True,
-                 owner: str | None = None) -> list[dict]:
+                 owner: str | None = None,
+                 exclude_key: str | None = None) -> list[dict]:
     """同一张谱面的历史对局，按游玩时间正序（最老的在前），给报告的走势图用。
 
     只取同一倍率的记录：1.0× 和 1.2× 的准确率放到一条线上比没有意义，
@@ -531,6 +532,11 @@ def same_beatmap(md5: str, rate: float | None = None, limit: int = 10,
     if only_me and me:
         sql += " AND (player IS NULL OR TRIM(player) = '' OR LOWER(TRIM(player)) = LOWER(?))"
         args.append(me)
+    if exclude_key:
+        # 同一份回放被再次导入时，别把自己算成「上一次」——走势图会多出一个
+        # 一模一样（或者因当前口径不同而数字不同）的点。
+        sql += " AND key <> ?"
+        args.append(str(exclude_key).strip())
     sql += " ORDER BY played_at DESC, id DESC LIMIT ?"
     args.append(max(1, int(limit)))
     try:
