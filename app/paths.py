@@ -23,6 +23,8 @@ DATA_ROOT = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else ROOT
 WEB_DIR = os.path.join(APP_DIR, "web")
 LOCAL_REPLAY_DIR = os.path.join(DATA_ROOT, "_replays")
 REPORT_DIR = os.path.join(DATA_ROOT, "报告")
+# 导出的成绩卡 / B50 默认落在这里（前端生成 PNG 后 POST 回来写盘）
+CARD_DIR = os.path.join(DATA_ROOT, "card")
 
 
 def _writable(path: str) -> bool:
