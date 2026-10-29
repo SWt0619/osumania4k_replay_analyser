@@ -322,7 +322,12 @@ def _explicit_roots() -> list[str]:
         out.extend(_songs_from_install_dir(cfg_stable))
     cfg_lazer = config_lazer_dir()
     if cfg_lazer:
-        out.append(os.path.join(cfg_lazer, "Songs"))
+        # 现行 lazer 不再建 Songs 文件夹，谱面全在 files/ 里。索引是"从根出发"的：
+        # 根为空时 files/ 那套按内容识别的扫描器根本不会启动（issue #7：纯 lazer
+        # 玩家因此永远提示找不到曲库）。所以没有 Songs 就把数据目录本身当根。
+        # 老版本还有 Songs 时仍旧用它 —— 范围小，也不会把 cache/、logs/ 一起走一遍。
+        songs = os.path.join(cfg_lazer, "Songs")
+        out.append(songs if os.path.isdir(long_path(songs)) else cfg_lazer)
     return out
 
 
@@ -353,6 +358,9 @@ def detected_songs_roots() -> list[str]:
     # 3) 常见默认位置
     candidates.extend([
         os.path.join(appdata, "osu", "Songs"),
+        # 现行 lazer 的数据目录本身：那里没有 Songs，谱面都在 files/ 下。
+        # 不把这一项列进来，纯 lazer 机器的自动探测就永远是空。
+        os.path.join(appdata, "osu"),
         os.path.join(appdata, "osu!", "Songs"),
         os.path.join(localappdata, "osu!", "Songs"),
         os.path.join(home, "osu", "Songs"),
