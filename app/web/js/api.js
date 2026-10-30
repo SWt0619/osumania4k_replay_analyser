@@ -275,6 +275,16 @@
       });
     },
 
+    // 从成长页点开某一局：服务端按回放 MD5 找回 .osr 重跑分析。
+    // 文件被删/被移走时接口返回 404，错误消息会原样抛给页面。
+    historyReplay(key) {
+      return jsonFetch("/api/history/replay", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: key }),
+      });
+    },
+
     // 上传前先确认后端活着：连不上就立刻报错，别让页面干等
     health(timeoutMs) {
       const ctrl = new AbortController();
@@ -412,9 +422,16 @@
       });
     },
 
-    // 成绩卡 / B50：把 PNG 直接写进程序目录的 card/，不落浏览器的下载文件夹
-    saveCard(blob, name) {
-      return jsonFetch("/api/card/save?name=" + encodeURIComponent(name || "card.png"), {
+    // 成绩卡 / B50 存进程序目录的 card/。文件名交给服务端拼：
+    // 成绩卡是「序号_曲名_SV1|SV2_日期」，B50 是「B50_玩家_日期」，
+    // 序号要看目录里已有的图，前端拿不到这个信息。
+    saveCard(blob, params) {
+      const opts = typeof params === "string" ? { name: params } : (params || {});
+      const qs = ["kind", "title", "id", "judge", "name"]
+        .filter((k) => opts[k] !== undefined && opts[k] !== null && opts[k] !== "")
+        .map((k) => k + "=" + encodeURIComponent(String(opts[k])))
+        .join("&");
+      return jsonFetch("/api/card/save?" + qs, {
         method: "POST",
         headers: { "Content-Type": "image/png" },
         body: blob,
