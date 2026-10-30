@@ -314,6 +314,9 @@
     if (!state.data && DATA_TABS.indexOf(name) >= 0) name = "overview";
     // 只看谱面时那页叫 chartonly；点回「谱面难度」要落到它上面，否则是空壳
     if (!state.data && state.chartOnly && name === "chart") name = "chartonly";
+    // 「按…」的改键状态只在回放页有意义，切走就收掉：
+    // 否则下一次按键（哪怕是搜索框里打字）会被它吞掉并写成新键位
+    if (name !== "replay" && App.cancelPlayalongCapture) App.cancelPlayalongCapture();
     syncTabLocks();
     state.tab = name;
     document.querySelectorAll(".rail-btn").forEach((b) => {
@@ -334,6 +337,7 @@
     if (name === "settings") {
       App.loadPathSettings();
       App.loadHotkeySettings();
+      App.loadCacheSettings();
     }
     // 切到某页时补一次重绘（隐藏时 canvas 尺寸是 0）
     if (state.data || state.chartOnly) {
