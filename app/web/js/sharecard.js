@@ -563,22 +563,36 @@
     return canvas;
   }
 
-  function fileName(data) {
+  // 判定口径在文件名里的写法，跟服务端保持同一套
+  const JUDGE_TAGS = { v1: "SV1", v2: "SV2" };
+
+  // 正式文件名由服务端拼（序号要看 card/ 里已经有多少张）。
+  // 这里只负责"退回浏览器下载"时的兜底名字，所以带上「成绩卡」与口径标记便于辨认。
+  function fileName(data, judge) {
     const bm = (data && data.beatmap) || {};
-    const raw = "成绩卡_" + [bm.artist, bm.title, bm.difficulty].filter(Boolean).join("_");
-    return raw.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120) + ".png";
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const date = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+    const raw = ["成绩卡", bm.title, JUDGE_TAGS[judge] || "", date].filter(Boolean).join("_");
+    return raw.replace(/[\\/:*?"<>|]/g, "_").slice(0, 100) + ".png";
   }
 
   async function save(data, opts) {
-    const canvas = await render(data, opts);
+    const options = opts || {};
+    const canvas = await render(data, options);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) throw new Error("canvas 导出失败");
-    const name = fileName(data);
+    const name = fileName(data, options.judge);
+    const bm = (data && data.beatmap) || {};
     // 本机程序：直接写进程序目录的 card/，比让人去下载文件夹里翻更省事。
     // 服务端没这个接口（老版本）时退回浏览器下载，功能不至于不可用。
     if (window.API && window.API.saveCard) {
       try {
-        const res = await window.API.saveCard(blob, name);
+        const res = await window.API.saveCard(blob, {
+          kind: "score",
+          title: bm.title || "",
+          judge: options.judge || "",
+        });
         if (res && res.ok) return res;
       } catch (e) { /* 退回下载 */ }
     }
