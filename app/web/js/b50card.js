@@ -491,9 +491,20 @@
     return canvas;
   }
 
+  // 玩家名有三个可能的位置，和画页头用的是同一套取法
+  function playerName(data) {
+    const prof = (data && data.profile) || {};
+    return prof.player || prof.name || (data && data.owner && data.owner.name) || "玩家";
+  }
+
+  // 正式文件名由服务端拼（「B50_玩家_日期」）；
+  // 这里只负责"退回浏览器下载"时的兜底名字。
   function fileName(data) {
-    const name = (data.profile && data.profile.name) || (data.owner && data.owner.name) || "玩家";
-    return ("B50_" + name).replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) + ".png";
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const date = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+    return ("B50_" + playerName(data) + "_" + date)
+      .replace(/[\\/:*?"<>|]/g, "_").slice(0, 100) + ".png";
   }
 
   async function save(data, opts) {
@@ -505,7 +516,7 @@
     // 服务端没这个接口（老版本）时退回浏览器下载，功能不至于不可用。
     if (window.API && window.API.saveCard) {
       try {
-        const res = await window.API.saveCard(blob, name);
+        const res = await window.API.saveCard(blob, { kind: "b50", id: playerName(data) });
         if (res && res.ok) return res;
       } catch (e) { /* 退回下载 */ }
     }
