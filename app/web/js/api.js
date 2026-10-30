@@ -39,25 +39,37 @@
 
     // 在线补音频：失败是常态（镜像缺图、网络不通、用户关了开关），
     // 所以这里不抛异常，把结果原样交给调用方去决定怎么提示。
-    // 90 秒上限：服务端的镜像预算是 45 秒，加上单次请求 20 秒超时与解包，
-    // 正常不会到 90；真到了说明连接卡住，得让界面停在一个明确的结论上。
-    async fetchAudio(session) {
-      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-      const timer = ctrl ? setTimeout(() => ctrl.abort(), 90000) : 0;
+    //
+    // 超时不写死在这一层：服务端下整个谱面包可能要一分多钟，固定 90 秒会在
+    // 正常下载时误杀。调用方按「连接 / 下载」两段自己判断，把 signal 传进来；
+    // 没传 signal 时退回 90 秒兜底，避免老调用方卡死在这里。
+    async fetchAudio(session, opts) {
+      const options = opts || {};
+      const ctrl = new AbortController();
+      const onAbort = () => ctrl.abort();
+      if (options.signal) {
+        if (options.signal.aborted) ctrl.abort();
+        else options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      const timer = options.signal ? 0 : setTimeout(() => ctrl.abort(), 90000);
       try {
         const res = await fetch("/api/audio-fetch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session: session }),
-          signal: ctrl ? ctrl.signal : undefined,
+          signal: ctrl.signal,
         });
         const data = await res.json();
         return data && typeof data === "object" ? data : { ok: false, error: "返回格式异常" };
       } catch (e) {
-        const timedOut = e && e.name === "AbortError";
-        return { ok: false, error: timedOut ? "等了 90 秒没有回应" : ((e && e.message) || "网络错误") };
+        // 区分"被调用方叫停"与真正的网络错误：前者要由调用方给出具体原因
+        if (e && e.name === "AbortError") {
+          return { ok: false, aborted: true, error: "请求已中止" };
+        }
+        return { ok: false, error: (e && e.message) || "网络错误" };
       } finally {
         if (timer) clearTimeout(timer);
+        if (options.signal) options.signal.removeEventListener("abort", onAbort);
       }
     },
 
@@ -114,7 +126,13 @@
         };
         xhr.onerror = () => reject(new Error("上传请求失败（连不上本地服务）"));
         xhr.ontimeout = () => reject(new Error("上传超时（25 秒没有回应）"));
-        xhr.onabort = () => reject(new Error("上传被中止"));
+        // 主动取消要能被上层认出来：前面用 message 判断的话，
+        // 点了取消反而会弹一条红色的「上传被中止」错误
+        xhr.onabort = () => {
+          const err = new Error("上传被中止");
+          err.name = "AbortError";
+          reject(err);
+        };
         xhr.send(JSON.stringify(payload));
       });
     },
@@ -170,7 +188,13 @@
       });
     },
 
-    analyzeLocal(name) {
+    // opts 可选：beatmapPath（曲库里的 .osu）或 beatmap（本机选的 .osu 的 base64）。
+    // _replays 那条通道以前没法补谱面，曲库里没有这张图时怎么点都失败。
+    analyzeLocal(name, opts) {
+      const extra = opts || {};
+      const body = { name: name };
+      if (extra.beatmapPath) body.beatmapPath = extra.beatmapPath;
+      if (extra.beatmap) body.beatmap = extra.beatmap;
       return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open("POST", "/api/analyze-local", true);
@@ -195,7 +219,7 @@
         };
         xhr.onerror = () => reject(new Error("请求发不出去"));
         xhr.ontimeout = () => reject(new Error("分析超时"));
-        xhr.send(JSON.stringify({ name: name }));
+        xhr.send(JSON.stringify(body));
       });
     },
 
@@ -295,7 +319,9 @@
     // 分片上传兜底：把回放切成小片逐个 POST，每一片都是独立的小请求并带重试。
     // 用途：个别机器上安全软件/代理会把大 POST 体整包吞掉（表现为请求有去无回），
     // 小请求却畅通。直接上传失败时自动切到这条通道。
-    analyzeUploadChunked(base64, onProgress, onStage) {
+    // shouldStop：每片开始前问一次「还要继续吗」。取消按钮只 abort 得了直传那条
+    // XHR，分片是一串独立请求，没有这个回调就只能眼看它传完、分析完再盖上页面。
+    analyzeUploadChunked(base64, onProgress, onStage, shouldStop) {
       const CHUNK = 24 * 1024; // 24KB 原始字节/片
       return new Promise((resolve, reject) => {
         let bin;
@@ -337,12 +363,22 @@
 
         (async () => {
           try {
+            const aborted = () => {
+              if (!shouldStop || !shouldStop()) return false;
+              const err = new Error("已取消");
+              err.name = "AbortError";
+              return err;
+            };
             for (let i = 0; i < chunkCount; i++) {
+              const stop = aborted();
+              if (stop) throw stop;
               if (onStage) onStage("分片上传 " + (i + 1) + " / " + chunkCount);
               const slice = bin.slice(i * CHUNK, (i + 1) * CHUNK);
               await sendWithRetry(i, slice);
               if (onProgress) onProgress(Math.min(total, (i + 1) * CHUNK), total);
             }
+            const stopBeforeAnalyze = aborted();
+            if (stopBeforeAnalyze) throw stopBeforeAnalyze;
             if (onStage) onStage("分片传完，正在分析");
             const res = await fetch("/api/analyze-chunked", {
               method: "POST",
@@ -435,6 +471,19 @@
         method: "POST",
         headers: { "Content-Type": "image/png" },
         body: blob,
+      });
+    },
+
+    // 缓存占用与清理：设置页那块「缓存」用
+    cacheStats() {
+      return jsonFetch("/api/cache/stats");
+    },
+
+    cleanCache(targets) {
+      return jsonFetch("/api/cache/clean", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targets: targets || [] }),
       });
     },
 
