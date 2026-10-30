@@ -211,6 +211,11 @@
       (ev) => {
         if (App.isPlayalongActive && App.isPlayalongActive()) return;
         if (!App.state.data) return; // 没载入回放时保持页面正常滚动
+        // 窗口矮到一屏放不下时，滚轮先让给页面：不然想翻到下面的设置卡，
+        // 只会把时间轴推来推去。按住 Ctrl 仍然可以强制拖动时间轴。
+        const page = document.scrollingElement || document.documentElement;
+        const overflowing = page && page.scrollHeight > window.innerHeight + 2;
+        if (overflowing && !ev.ctrlKey) return;
         ev.preventDefault();
         // 鼠标一格通常是 ±100，触控板会给出几十的碎值：累加起来再走，碎值也能平滑推进
         acc += ev.deltaY;
