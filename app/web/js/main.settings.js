@@ -206,9 +206,88 @@
   }
 
 
+  // ---------------------------------------------------------------- 缓存
+  // 音频缓存是唯一会长期长大的目录（每次补音频留一个整包的音频）。
+  // 这里只显示占用与提供清理，具体删哪些由服务端决定。
+  function fmtBytes(n) {
+    const v = Number(n) || 0;
+    if (v >= 1024 * 1024 * 1024) return (v / 1024 / 1024 / 1024).toFixed(2) + " GB";
+    if (v >= 1024 * 1024) return (v / 1024 / 1024).toFixed(1) + " MB";
+    if (v >= 1024) return Math.round(v / 1024) + " KB";
+    return v + " B";
+  }
+
+  function renderCacheStats(res) {
+    const list = $("cacheList");
+    const status = $("cacheStatus");
+    if (!list) return;
+    const items = (res && res.items) || [];
+    list.replaceChildren(...items.map((it) => {
+      const li = el("li", null, it.label);
+      li.appendChild(el("b", null, fmtBytes(it.bytes)));
+      li.title = (it.files || 0) + " 个文件";
+      return li;
+    }));
+    if (status) {
+      status.className = "dir-status" + (res && res.total ? "" : " good");
+      status.textContent = res && res.total
+        ? "合计 " + fmtBytes(res.total) + "，可以随时清理"
+        : "当前没有缓存占用";
+    }
+  }
+
+  async function loadCacheSettings() {
+    const list = $("cacheList");
+    const status = $("cacheStatus");
+    if (!list) return;
+    if (status) { status.className = "dir-status"; status.textContent = "读取中…"; }
+    try {
+      renderCacheStats(await window.API.cacheStats());
+    } catch (e) {
+      if (status) {
+        status.className = "dir-status bad";
+        status.textContent = "读取失败：" + (e.message || e);
+      }
+    }
+  }
+
+  async function cleanCache(targets, btn) {
+    const status = $("cacheStatus");
+    const old = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "清理中…"; }
+    if (status) { status.className = "dir-status"; status.textContent = "正在清理…"; }
+    try {
+      const res = await window.API.cleanCache(targets);
+      renderCacheStats(res && res.stats);
+      if (status) {
+        status.className = "dir-status" + (res && res.freed ? " good" : "");
+        status.textContent = res && res.freed
+          ? "已释放 " + fmtBytes(res.freed) + "（" + res.removed + " 个文件）"
+          : "没有可清理的文件";
+      }
+      window.UI.toast(res && res.freed ? "已释放 " + fmtBytes(res.freed) : "没有需要清理的文件");
+    } catch (e) {
+      if (status) {
+        status.className = "dir-status bad";
+        status.textContent = "清理失败：" + (e.message || e);
+      }
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = old; }
+    }
+  }
+
+  function bindCache() {
+    const audio = $("btnCleanAudio");
+    const temp = $("btnCleanTemp");
+    // 临时文件三项一起清：它们都是过程产物，留着没有二次利用价值
+    if (audio) audio.addEventListener("click", () => cleanCache(["audio"], audio));
+    if (temp) temp.addEventListener("click", () => cleanCache(["chunks", "uploads", "downloads"], temp));
+  }
+
+
   // 供其它模块调用；同名冲突在这里会直接覆盖，加载顺序见 index.html
   Object.assign(App, {
     loadChangelog, bindReleaseNotes, checkUpdate, loadPathSettings, savePaths,
-    loadHotkeySettings, saveHotkeySettings,
+    loadHotkeySettings, saveHotkeySettings, loadCacheSettings, bindCache,
   });
 })(window.App = window.App || {});
