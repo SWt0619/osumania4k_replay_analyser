@@ -649,9 +649,25 @@
     renderKeyButtons();
   }
 
+  function cancelCapture() {
+    if (!captureBtn) return;
+    captureBtn = null;
+    renderKeyButtons();
+  }
+
   // ---------------------------------------------------------------- 事件
   function onKeyDown(e) {
-    if (captureBtn) { captureKey(captureBtn, e); return; }
+    if (captureBtn) {
+      // Esc 是"算了别改"：以前这里会把 Esc 本身存成键位，想退出都退不出来
+      if (e.code === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        cancelCapture();
+        return;
+      }
+      captureKey(captureBtn, e);
+      return;
+    }
     if (!pa || !pa.active) return;
     if (e.repeat) return;
     const tag = (e.target && e.target.tagName) || "";
@@ -708,6 +724,15 @@
       });
     });
 
+    // 点到别处就放弃改键：否则这个"等一个键"的状态会一直挂着，
+    // 用户切去搜索框打字，第一个字符就被吞掉当成新键位存了进去
+    document.addEventListener("click", (e) => {
+      if (!captureBtn) return;
+      const row = $("paKeyRow");
+      if (row && row.contains(e.target)) return;
+      cancelCapture();
+    }, true);
+
     renderKeyButtons();
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
@@ -729,5 +754,7 @@
     isPlayalongActive, playalongTime, updatePlayalongGate,
     // 读取本地偏好之后再画一次键位：bindEvents 那会儿用的还是默认值
     syncPlayKeys: renderKeyButtons,
+    // 切页时把"等一个键"的状态收掉，别让它跨页生效
+    cancelPlayalongCapture: cancelCapture,
   });
 })(window.App = window.App || {});
