@@ -143,6 +143,11 @@
       App.state.player.setOptions({ theme: App.readTheme() });
       App.state.player.render();
     }
+    // 对比模式的右路是另一个播放器实例，只换左边会让两块画布配色不一样
+    if (App.state.player2) {
+      App.state.player2.setOptions({ theme: App.readTheme() });
+      App.state.player2.render();
+    }
     if (App.state.data || App.state.chartOnly) App.drawChartsForTab(App.state.tab);
   }
 
@@ -199,6 +204,8 @@
   // 不回填就会出现"页面写 11.17、折合按 12.39 算"的错位。
   function saveDanToHistory(data, res) {
     if (!res || !res.ok) return;
+    // 配错图的那一局根本没写进库，回填只会返回"没有对应记录"，直接在源头跳过
+    if (data && data.historySkipped) return;
     // Sunny 只给星级，没有段位数值；只有 Azusa / Roxy 才有可比的数
     if (res.method !== "roxy" && res.method !== "azusa") return;
     const value = Number(res.numeric);
@@ -431,6 +438,11 @@
 
   async function renderAnalysis(data) {
     if (await rejectUnusableReplay(data)) return;
+    // 手动指定谱面时最容易选错难度：报告照常出，但这一局不记账，
+    // 否则 0% 的假成绩会进成长页和「本图走势」，还会挡住下次正确导入
+    if (data && data.historySkipped) {
+      window.UI.toast("所选谱面与回放对不上，这一局没有计入成长", true);
+    }
     App.closeCompare();     // 换了主回放，对比自然失效
     applyJudgeModeFromReplay(data);
     // 原始结果留着（含两套判定），当前视图按首选项挑一套；切换时只换视图
@@ -578,7 +590,10 @@
     return bits.join(" · ");
   }
 
-  function startAudioProgress(session) {
+  function startAudioProgress(session, onTick) {
+    // 同一时间只该有一个补音频轮询：再起一个会让进度数字来回跳，
+    // 而且先结束的那次请求会把后来这个 clear 掉，界面就停在半路。
+    if (audioProgressTimer) return;
     const startedAt = Date.now();
     let latest = null;
     const paint = () => {
@@ -598,6 +613,8 @@
       const p = await window.API.audioFetchStatus(session);
       if (p) latest = p;
       paint();
+      // 把这一拍交给调用方：它靠 done / stage 判断下载是不是真的在动
+      if (onTick) onTick(p);
     }, 500);
   }
 
@@ -610,15 +627,55 @@
       return;
     }
     audioFetchSession = data.session;
-    startAudioProgress(data.session);
+
+    // 两段分开看。连接阶段（连接、排队、等服务端起步）90 秒没有动静就放弃；
+    // 一旦开始下载就不再看总时长——几十 MB 的包在慢线路上要几分钟，卡死一个固定秒数
+    // 只会在正常下载时误报失败。下载阶段改看"进度有没有动"，连续 60 秒没有新字节才算卡住。
+    const ctrl = new AbortController();
+    let phase = "connect";
+    let lastDone = -1;
+    let lastStage = "";
+    let lastMoveAt = Date.now();
+    let reason = "";
+
+    const connectTimer = setTimeout(() => {
+      if (phase !== "connect") return;
+      reason = "90 秒内没能开始下载（连不上镜像站，或一直在排队）";
+      ctrl.abort();
+    }, 90000);
+
+    startAudioProgress(data.session, (p) => {
+      const done = Number(p && p.done) || 0;
+      const stage = String((p && p.stage) || "");
+      // 「准备补音频」和「排队等待」都还没真的开始传字节，仍算在连接阶段里
+      const notStarted = !stage || stage === "准备补音频" || stage.indexOf("排队等待") === 0;
+      if (phase === "connect" && (done > 0 || !notStarted)) phase = "download";
+      if (done !== lastDone || stage !== lastStage) {
+        lastDone = done;
+        lastStage = stage;
+        lastMoveAt = Date.now();
+      }
+    });
+
+    // 服务端每片最多重试三次、单次 20 秒，60 秒一点没动就是真卡住了
+    const stallTimer = setInterval(() => {
+      if (phase !== "download") return;
+      if (Date.now() - lastMoveAt < 60000) return;
+      reason = "下载停了 60 秒没有任何进展";
+      ctrl.abort();
+    }, 5000);
 
     let res = null;
     try {
-      res = await window.API.fetchAudio(data.session);
+      res = await window.API.fetchAudio(data.session, { signal: ctrl.signal });
     } finally {
+      clearTimeout(connectTimer);
+      clearInterval(stallTimer);
       audioFetchSession = "";
       stopAudioProgress();
     }
+    // 中止的具体原因只有这里知道，网络层只能说"请求已中止"
+    if (res && res.aborted && reason) res.error = reason;
 
     // 下载期间可能已经换了一份回放：结果照样进了缓存，但别拿旧结论去改新页面
     const current = isCurrentSession(data.session);
