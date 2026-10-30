@@ -952,12 +952,17 @@ def _match_column(
 
 
 def _scaled_windows(windows: dict[str, float], mods: list[str] | None,
-                    v2: bool = False) -> dict[str, float]:
-    """按 stable 的顺序缩放判定窗：HR ÷1.4（否则 EZ ×1.4），DT/NC ×1.5（否则 HT ×0.75），
+                    v2: bool = False, rate: float | None = None,
+                    half: bool = False) -> dict[str, float]:
+    """按 stable 的顺序缩放判定窗：HR ÷1.4（否则 EZ ×1.4），DT/NC ×倍率（否则 HT ×倍率），
     最后向零截断。
 
-    回放帧和谱面都在 audio clock 上，DT 下同样的手感误差在时间轴上会被放大 1.5 倍，
+    回放帧和谱面都在 audio clock 上，DT 下同样的手感误差在时间轴上会被放大同样的倍数，
     所以窗口也得跟着放大。这里不缩放的话，DT/HT 的成绩会被系统性算严/算松。
+
+    `rate` 是回放的真实倍速：stable 只有 1.5 / 0.75 两档，但 lazer 的 DT/NC/HT 能自己调
+    （比如 1.35×）。以前写死 1.5，1.35× 的回放会被多放大 11% 的窗口 —— 边界上的音
+    全被判成 PERFECT，和游戏里差出一百多个。
     """
     mods = set(mods or [])
     scale = 1.0
@@ -965,13 +970,19 @@ def _scaled_windows(windows: dict[str, float], mods: list[str] | None,
         scale /= 1.4
     elif "EZ" in mods:
         scale *= 1.4
-    if "DT" in mods or "NC" in mods:
-        scale *= 1.5
-    elif "HT" in mods:
-        scale *= 0.75
+    if "DT" in mods or "NC" in mods or "HT" in mods:
+        speed = float(rate) if rate and abs(float(rate) - 1.0) > 1e-9 else 0.0
+        if speed <= 0:
+            speed = 0.75 if "HT" in mods else 1.5
+        scale *= speed
     if scale == 1.0:
         return windows
-    out = {k: float(int(v * scale)) for k, v in windows.items()}
+    if half:
+        # lazer 的表是 `floor(区间) + 0.5`。它缩放的是**区间**，再取整、再补那半毫秒；
+        # 直接拿 16.5 × 1.35 会多出 0.8ms，边界上的音全被算宽一档（实测多 59 个 PERFECT）。
+        out = {k: float(math.floor((v - 0.5) * scale) + 0.5) for k, v in windows.items()}
+    else:
+        out = {k: float(int(v * scale)) for k, v in windows.items()}
     if v2:
         # ScoreV2 的 EarlyInputWindow（「提前按能识别」的下界）是裸值，官方的
         # computeManiaWindowSet 只在另外五档上套 adjustManiaHitWindowFor。HR/DT 下
@@ -986,6 +997,7 @@ def match_replay_frames(
     mods: list[str] | None = None,
     column_map: list[int] | None = None,
     od: float | None = None,
+    rate: float | None = None,
 ) -> MatchResult:
     """逐帧状态机的配对入口（与 stable 同构，见 mania_engine）。
 
@@ -997,8 +1009,8 @@ def match_replay_frames(
     但状态机里「头判是否产生」「破 LN 封顶 50 还是 200」都跟着口径走，只能分开跑。
     """
     od_value = beatmap.od if od is None else od
-    windows = _scaled_windows(judgement_windows(od_value), mods)
-    windows_v2 = _scaled_windows(judgement_windows(od_value, score_v2=True), mods, v2=True)
+    windows = _scaled_windows(judgement_windows(od_value), mods, rate=rate)
+    windows_v2 = _scaled_windows(judgement_windows(od_value, score_v2=True), mods, v2=True, rate=rate)
     objs = [
         {"column": o.column, "time": o.time,
          "end": o.end_time if o.is_hold else o.time, "hold": o.is_hold}
@@ -1081,6 +1093,7 @@ def match_replay(
     windows: dict[str, float] | None = None,
     windows_v2: dict[str, float] | None = None,
     note_lock: bool = False,
+    rate: float | None = None,
 ) -> MatchResult:
     """执行配对。
 
@@ -1089,12 +1102,13 @@ def match_replay(
     先全局贪心配对、再补尾判，供测试与对照实验用。
     mods：回放里带的 mod 名（HR/EZ/DT/NC/HT），用来缩放判定窗。
     windows / windows_v2：直接指定判定窗（lazer 口径要用它绕开 stable 的表）。
+    rate：真实倍速，DT/NC/HT 的窗口按它缩放（lazer 能自定义，stable 只有 1.5 / 0.75）。
     """
     od_value = beatmap.od if od is None else od
     if windows is None:
-        windows = _scaled_windows(judgement_windows(od_value), mods)
+        windows = _scaled_windows(judgement_windows(od_value), mods, rate=rate)
     if windows_v2 is None:
-        windows_v2 = _scaled_windows(judgement_windows(od_value, score_v2=True), mods, v2=True)
+        windows_v2 = _scaled_windows(judgement_windows(od_value, score_v2=True), mods, v2=True, rate=rate)
     if algo == "C":
         return _match_state_machine(beatmap, presses, releases, od_value, windows, windows_v2,
                                     note_lock=note_lock)
