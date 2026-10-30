@@ -1506,6 +1506,10 @@ def analyze(
         "ok": True,
         "version": __version__,
         "warnings": [w for w in [warn] if w],
+        # 手动指定谱面时最容易配错图：单独给一个布尔，服务端据此决定这一局记不记账。
+        # 只看 warnings 文本里有没有"MD5"太脆，改一个字就失效。
+        "md5Mismatch": bool(replay.beatmap_md5 and beatmap.md5
+                            and replay.beatmap_md5.lower() != beatmap.md5.lower()),
         # 判定用的是哪套模型：页面据此给 V1 页签加「换算」提示
         "judgeModel": model,
         "replay": _replay_block(replay, verify, column_order),
