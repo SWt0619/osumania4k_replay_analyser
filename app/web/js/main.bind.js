@@ -156,7 +156,9 @@
     $("speed").addEventListener("change", (e) => {
       App.state.speed = Number(e.target.value) || 1;
       if (App.state.audio) App.state.audio.playbackRate = App.state.speed;
-      window.UI.toast("播放速度 " + App.state.speed + "×（音频与画面同步变速）");
+      // 画面这边的下落时间不跟着倍速走，只把谱面时间轴快进/慢放
+      App.setPlaybackRate(App.state.speed);
+      window.UI.toast("播放速度 " + App.state.speed + "×（下落速度保持 " + App.state.scrollMs + "ms）");
     });
     // 打击音：关 / 正解音 / 实际击打。切换时顺手解锁 AudioContext ——
     // 浏览器只认"用户手势"这个入口，等播放再解锁会漏掉第一小节。
@@ -209,10 +211,12 @@
     $("scroll").addEventListener("input", (e) => {
       App.state.scrollMs = Number(e.target.value) || 800;
       App.syncScrollUi();
-      if (App.state.player) {
-        App.state.player.setOptions({ scrollMs: App.state.scrollMs });
-        App.state.player.render();
-      }
+      // 对比模式有两路画布：两边都跟着改，否则左右落速不一致
+      [App.state.player, App.state.player2].forEach((p) => {
+        if (!p) return;
+        p.setOptions({ scrollMs: App.state.scrollMs });
+        p.render();
+      });
       App.savePrefs();
     });
 
@@ -479,7 +483,12 @@
             // 段位算不出来就留空格子，不影响整张卡
           }
         }
-        const saved = await window.ShareCard.save(data, { danLabel, danNote });
+        const saved = await window.ShareCard.save(data, {
+          danLabel,
+          danNote,
+          // 卡片画的是当前口径的数据，文件名也带上同一套标记（SV1 / SV2）
+          judge: App.state.judgeMode,
+        });
         window.UI.toast(saved && saved.dir
           ? "成绩卡已保存到 " + saved.dir + "/" + saved.name
           : "成绩卡已保存到下载文件夹");
