@@ -115,7 +115,9 @@
   }
 
   // 上传并分析。整包 POST 失败且不是"后端已答复"时，自动改走分片通道。
-  async function uploadReplay(base64) {
+  // ticket 是这一次导入的凭据：取消时把 cancelled 置真，分片循环每片前问一次。
+  async function uploadReplay(base64, ticket) {
+    const cancelled = () => !!(ticket && ticket.cancelled);
     // 上传走 XHR：能显示"已经发出去多少字节"。卡在 0% 就是内容没离开浏览器，
     // 卡在 100% 就是后端在处理——这两种情况的处理方式完全不同，所以必须能区分。
     setStage("正在上传回放");
@@ -136,7 +138,9 @@
       // 后端已经答复过（空文件、坏回放、4K 以外、内部错误）时重发没有意义，
       // 只会把「没有收到回放文件」盖成「分片 1 被拒绝（HTTP 400）」，把真正的原因弄丢。
       const answered = !!(uploadErr && (uploadErr.payload || uploadErr.answered));
-      if (!App.state.cancelLoading || answered) throw uploadErr; // 取消过 / 后端已答复 → 不兜底
+      const isAbort = !!(uploadErr && (uploadErr.name === "AbortError" || cancelled()));
+      if (isAbort) throw uploadErr;   // 用户主动取消：别再换通道重传一遍
+      if (answered || cancelled()) throw uploadErr; // 取消过 / 后端已答复 → 不兜底
       App.beacon("fallback-chunked", { reason: (uploadErr && uploadErr.message) || "?" });
       App.state.activeXhr = null;
       return await window.API.analyzeUploadChunked(
@@ -145,7 +149,8 @@
           const pct = total ? Math.round((loaded / total) * 100) : 0;
           setStage("分片上传 " + pct + "%（" + Math.round(loaded / 1024) + " / " + Math.round(total / 1024) + " KB）");
         },
-        (text) => setStage(text)
+        (text) => setStage(text),
+        cancelled
       );
     }
   }
@@ -185,7 +190,11 @@
     App.state.lastReplay = { kind: "file", file: file };
     App.state.busy = true;
     App.state.escaped = false;
+    // 这一次导入的凭据：取消时置真，分片循环与结果渲染都会看它一眼
+    const ticket = { cancelled: false };
+    App.state.importTicket = ticket;
     showLoading("正在读取文件…", () => {
+      ticket.cancelled = true;
       App.state.busy = false;
       if (App.state.activeXhr) {
         try { App.state.activeXhr.abort(); } catch (err) { /* 忽略 */ }
@@ -204,9 +213,12 @@
       setStage("正在读取文件");
       const b64 = await window.API.fileToBase64(file);
       App.state.replayBase64 = b64;
-      App.renderAnalysis(await uploadReplay(b64));
+      const data = await uploadReplay(b64, ticket);
+      if (ticket.cancelled) return;   // 取消之后后端可能照样算完，别把结果盖回页面
+      App.renderAnalysis(data);
     } catch (e) {
       window.UI.loading(false);
+      if (ticket.cancelled) return;   // 主动取消：不再补一条红色错误
       if (e && e.name === "AbortError") {
         window.UI.toast("等了 90 秒还没结果，已经放弃。请确认启动窗口里没有报错；也可以把 app\\_cache\\server.log 发我看看", true);
       } else if (e && /Failed to fetch|NetworkError|network/i.test(e.message || "")) {
@@ -231,6 +243,21 @@
     return "";
   }
 
+  // 这一轮重跑要用的回放从哪来：拖进来的在内存里，_replays 那条只有文件名。
+  // 两个「选谱面」入口以前一律读 replayBase64，本地通道就会拿空内容、
+  // 或者拿上一次拖进来的另一份回放去分析。
+  function replaySource() {
+    const last = App.state.lastReplay || {};
+    if (last.kind === "local" && last.name) return { kind: "local", name: last.name };
+    if (App.state.replayBase64) return { kind: "file", base64: App.state.replayBase64 };
+    return null;
+  }
+
+  function noReplayToast() {
+    window.UI.loading(false);
+    window.UI.toast("这次没拿到回放内容：把 .osr 重新拖进来，或用「本地回放」里的那一份", true);
+  }
+
   async function handleBeatmapFile(file) {
     if (!file) return;
     const problem = osuFileProblem(file);
@@ -238,6 +265,8 @@
       window.UI.toast(problem, true);
       return;
     }
+    const src = replaySource();
+    if (!src) { noReplayToast(); return; }
     App.state.busy = true;
     window.UI.loading(true, "正在用你选的谱面重新分析…");
     window.__cancelLoading = function () { hideLoading(); stopWaiting(); App.state.busy = false; };
@@ -252,7 +281,10 @@
         window.UI.toast("本工具只支持 4K（4 键）谱面，你选的是 " + meta.keys + "K：" + meta.label, true);
         return;
       }
-      const data = await window.API.analyze(App.state.replayBase64, b64, null, null, null);
+      // 本地通道的回放还躺在 _replays 里，传文件名让后端自己读；拖进来的才传 base64
+      const data = src.kind === "local"
+        ? await window.API.analyzeLocal(src.name, { beatmap: b64 })
+        : await window.API.analyze(src.base64, b64, null, null, null);
       closeModal("bmModal");
       App.renderAnalysis(data);
     } catch (e) {
@@ -413,9 +445,13 @@
   }
 
   async function useLibraryBeatmap(path) {
+    const src = replaySource();
+    if (!src) { noReplayToast(); return; }
     window.UI.loading(true, "正在用曲库里的谱面分析…");
     try {
-      const data = await window.API.analyze(App.state.replayBase64, null, null, path, null);
+      const data = src.kind === "local"
+        ? await window.API.analyzeLocal(src.name, { beatmapPath: path })
+        : await window.API.analyze(src.base64, null, null, path, null);
       closeModal("bmModal");
       App.renderAnalysis(data);
     } catch (e) {
