@@ -215,6 +215,9 @@ def play_value(session: dict) -> float | None:
 def _play_row(session: dict, value: float) -> dict:
     return {
         "key": session.get("key"),
+        # 去重用：同一张谱面（谱面 MD5 相同）只算最好的一局。老记录没有 MD5 时留空，
+        # 下面按"认不出是不是同一张"处理，不参与合并。
+        "md5": (session.get("beatmap_md5") or "").strip().lower(),
         "at": session.get("played_at"),
         "artist": session.get("artist") or "",
         "title": session.get("title") or "",
@@ -290,8 +293,15 @@ def _kept_sessions(sessions: list[dict], owner: str) -> tuple[list[dict], int, i
     return kept, others, unknown, ln_hybrid
 
 
-def _play_rows(kept: list[dict]) -> tuple[list[dict], int]:
-    """把记录折算成可比较的成绩行，返回（按段位降序的行, 准确率过低的条数）。"""
+def _play_rows(kept: list[dict]) -> tuple[list[dict], int, int]:
+    """把记录折算成可比较的成绩行。
+
+    返回（按段位降序的行, 准确率过低的条数, 因同一张谱面被合并掉的条数）。
+
+    同一张谱面（MD5 相同）只留折算值最高的一局：否则一张拿手的图反复打，最好 50 局里
+    能塞进十几条一模一样的成绩，段位就被"重复次数"刷上去了 —— 那不是水平。合成图集时
+    每张图本来也只会出一份成绩。MD5 缺失的老记录分不清是不是同一张，按独立记录计入。
+    """
     plays: list[dict] = []
     low_acc = 0
     for s in kept:
@@ -306,7 +316,19 @@ def _play_rows(kept: list[dict]) -> tuple[list[dict], int]:
             continue
         plays.append(_play_row(s, v))
     plays.sort(key=lambda p: p["value"], reverse=True)
-    return plays, low_acc
+
+    unique: list[dict] = []
+    seen: set[str] = set()
+    duplicates = 0
+    for p in plays:
+        md5 = p.get("md5") or ""
+        if md5:
+            if md5 in seen:
+                duplicates += 1
+                continue
+            seen.add(md5)
+        unique.append(p)
+    return unique, low_acc, duplicates
 
 
 def _skill_blocks(plays: list[dict]) -> dict:
@@ -387,7 +409,7 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
     """
     owner = str((profile or {}).get("player") or "").strip()
     kept, others, unknown, ln_hybrid = _kept_sessions(sessions, owner)
-    plays, low_acc = _play_rows(kept)
+    plays, low_acc, duplicates = _play_rows(kept)
 
     top = plays[:TOP_PLAYS]
     overall_dan = _average(top)
@@ -411,7 +433,7 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
         "profile": profile or {},
         "owner": {"name": owner, "mine": len(kept), "others": others, "unknown": unknown},
         "filters": {"others": others, "unknown": unknown, "lnHybrid": ln_hybrid,
-                    "lowAcc": low_acc},
+                    "lowAcc": low_acc, "duplicates": duplicates},
         "beyond": beyond,
         "overall": overall,
         "skills": _skill_blocks(plays),
