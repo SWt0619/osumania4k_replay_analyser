@@ -22,8 +22,10 @@ from .. import paths
 from . import osr, osu_dirs
 from .beatmap import long_path
 
-# 回放 MD5 是 32 位；少数老回放的这个字段是空的，历史库会退回文件 sha1（40 位）。
-_KEY = re.compile(r"^[0-9a-f]{32,40}$")
+# 回放 MD5 是 32 位；少数老回放的这个字段是空的，历史库会退回文件 sha1。
+# sha1 只取前 16 位（见 analyze._file_hash），所以这里下限放到 16：
+# 早先按 32 位校验，那批回放会被判成"编号不完整"，永远点不开。
+_KEY = re.compile(r"^[0-9a-f]{16,40}$")
 
 ARCHIVE_DIR = os.path.join(paths.CACHE_DIR, "replays")
 
