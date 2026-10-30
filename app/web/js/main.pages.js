@@ -81,7 +81,43 @@
     side.append(cap, val);
 
     cell.append(body, side);
+
+    // 这一格能点：按回放 MD5 找回当时那份 .osr，重新铺一遍分析。
+    // 回放没留底（删了 / 移走了）时接口会回 404，这里只负责把话说清楚。
+    if (p.key) {
+      cell.classList.add("is-link");
+      cell.tabIndex = 0;
+      cell.setAttribute("role", "button");
+      cell.title += " · 点击回到这一局的分析";
+      const open = () => openHistoryReplay(p.key);
+      cell.addEventListener("click", open);
+      cell.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          open();
+        }
+      });
+    }
     return cell;
+  }
+
+  // 点开某一局：服务端找回 .osr 重跑分析，成功后直接铺到总览页。
+  async function openHistoryReplay(key) {
+    if (!key) return;
+    const id = "history-replay";
+    window.UI.tasks.start(id, "正在找回这份回放…");
+    try {
+      const data = await window.API.historyReplay(key);
+      window.UI.tasks.update(id, { label: "正在还原这一局的分析…" });
+      await App.renderAnalysis(data);
+      App.switchTab("overview");
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      window.UI.tasks.end(id, { label: "已打开", after: 600 });
+    } catch (err) {
+      const msg = (err && err.message) || "回放不存在";
+      window.UI.tasks.end(id, { error: true, message: msg });
+      window.UI.toast(msg, true);
+    }
   }
 
   function emptyCell() {
@@ -119,6 +155,8 @@
     const skillGrid = $("pgSkillGrid");
     const note = $("pgSkillNote");
     if (grid) grid.hidden = next !== "overall";
+    const gridHint = $("pgGridHint");
+    if (gridHint) gridHint.hidden = next !== "overall";
     const skillOpen = next !== null && next !== "overall";
     if (skillGrid) skillGrid.hidden = !skillOpen;
     if (note) note.hidden = !skillOpen;
@@ -184,6 +222,8 @@
       if (f.others) tip.push("已排除别人 " + f.others + " 局");
       if (f.unknown) tip.push(f.unknown + " 局认不出玩家");
       if (f.lnHybrid) tip.push("LN / Hybrid " + f.lnHybrid + " 局暂不计入");
+      // 同一张谱面打很多遍不会被重复计入：只取折算值最高的那一局
+      if (f.duplicates) tip.push("同一张谱面只取最好一局（合并 " + f.duplicates + " 局）");
       // 这条是规则说明，不是统计：低于门槛的局直接不进估算，数字放括号里就够
       tip.push("仅 v1acc 高于 91% 的成绩进入个人段位估算"
         + (f.lowAcc ? "（已排除 " + f.lowAcc + " 局）" : ""));
@@ -666,7 +706,7 @@
 
   // 供其它模块调用；同名冲突在这里会直接覆盖，加载顺序见 index.html
   Object.assign(App, {
-    fillDanOptions, playCell, emptyCell, renderCells, showGrid, renderProgress,
+    fillDanOptions, playCell, emptyCell, renderCells, showGrid, renderProgress, openHistoryReplay,
     loadFinderPrefs, saveFinderPrefs, fillFinderDanOptions, syncFinderUi, readFinderInputs,
     finderCard, finderRangeText, renderFinder, runFinder, bindFinder, loadProgress,
     saveProfile, mirrorLevel, renderMirrorResults, testMirrors, bindProgress,
