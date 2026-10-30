@@ -386,6 +386,7 @@
     bindShareCard();
     bindB50Export();
     App.bindReleaseNotes();
+    App.bindCache();
     bindDropzone();
     bindPlaybackControls();
     bindErrorFilter();
