@@ -33,6 +33,7 @@ sys.path.insert(0, ROOT)
 from app import paths  # noqa: E402
 from app.core import (  # noqa: E402
     audio_fetch,
+    cache_admin,
     config_store,
     crashreport,
     dan,
@@ -58,7 +59,7 @@ from app.core.analyze import (  # noqa: E402
     set_msd_cache_path,
     unsupported_keys_message,
 )
-from app.core.beatmap import parse_osu_file, parse_osu_text  # noqa: E402
+from app.core.beatmap import long_path, parse_osu_file, parse_osu_text  # noqa: E402
 from app.core.library import (  # noqa: E402
     default_songs_roots,
     get_library,
@@ -158,8 +159,18 @@ FAVICON = (
     b'</svg>'
 )
 
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
 def log(msg: str) -> None:
     line = "%s %s\n" % (time.strftime("%H:%M:%S"), msg)
+    try:
+        # 超过 5MB 就轮转成 .1，只留上一份：这份日志每个请求写一行，
+        # 不轮转的话开几个月就是几十兆，出问题时反而不好翻
+        if os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+    except OSError:
+        pass
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(line)
@@ -703,7 +714,8 @@ class _ApiMixin(_SessionView):
         因为摘要里没有逐音数据，画不出回放页。
         """
         key = re.sub(r"[^0-9a-fA-F]", "", _field(req, "key"))[:40].lower()
-        if len(key) < 32:
+        # 16 位是 sha1 前缀（replayMd5 为空的老回放），放宽到这一档才找得回
+        if len(key) < 16:
             return self._error("回放编号不完整")
         src = replay_store.find(key)
         if not src:
@@ -1094,6 +1106,26 @@ class _ApiMixin(_SessionView):
             "name": os.path.basename(dest),
         })
 
+    def _cache_clean(self):
+        """清掉设置页勾选的缓存项，返回释放了多少并带上新的占用。
+
+        只认 cache_admin 里登记过的名字：拼错或老前端传了别的键就忽略，
+        免得一个手滑的参数把整个 _cache 删掉。
+        """
+        req = _parse_json(self._read_body())
+        if req is None:
+            return self._error("请求体不是合法 JSON")
+        targets = req.get("targets")
+        if not isinstance(targets, list):
+            return self._error("targets 需要是数组")
+        result = cache_admin.clean(CACHE_DIR, [str(t) for t in targets])
+        log("[cache] 清理 %s：释放 %.1f MB / %d 个文件"
+            % (",".join(result["names"]) or "（无匹配项）",
+               result["freed"] / 1048576.0, result["removed"]))
+        result["ok"] = True
+        result["stats"] = cache_admin.stats(CACHE_DIR)
+        return self._json(result)
+
 
 class _AnalyzeApiMixin(_SessionView):
     """分析接口：上传（整包 / 分片 / 本地目录）→ analyze() → 建会话 → 带 media URL 的 JSON。
@@ -1126,7 +1158,9 @@ class _AnalyzeApiMixin(_SessionView):
         # 允许直接指定曲库里的 .osu 路径（本机工具，只校验后缀与存在性）
         requested_path = _field(req, "beatmapPath")
         if requested_path:
-            if not requested_path.lower().endswith(".osu") or not os.path.isfile(requested_path):
+            # 用 long_path 判存在：真实曲库里确实有超过 260 字符的路径，
+            # 直接 isfile 会把工具自己刚索引到的谱面判成"不存在"
+            if not requested_path.lower().endswith(".osu") or not os.path.isfile(long_path(requested_path)):
                 return self._error("指定的谱面路径无效：%s" % requested_path)
             beatmap_path = requested_path
 
@@ -1261,10 +1295,28 @@ class _AnalyzeApiMixin(_SessionView):
         replay_path = os.path.join(LOCAL_REPLAY_DIR, name)
         if not os.path.isfile(replay_path):
             return self._error("找不到这个文件：" + name)
+
+        # 这条通道以前只能靠曲库自己认谱面；曲库里没有时，用户选了 .osu 也没处传，
+        # 只能看着「没有收到回放文件」。现在两种指定方式都收：
+        # beatmapPath 是曲库里的路径，beatmap 是从本机选的 .osu（base64）。
+        beatmap_path = None
+        beatmap_b64 = req.get("beatmap") or ""
+        if beatmap_b64:
+            try:
+                bm_bytes = base64.b64decode(beatmap_b64, validate=True)
+            except Exception:  # noqa: BLE001
+                return self._error("谱面文件的 base64 解码失败")
+            beatmap_path = _write_temp(os.path.join(CACHE_DIR, "uploads"), ".osu", bm_bytes)
+        requested_path = _field(req, "beatmapPath")
+        if requested_path:
+            if not requested_path.lower().endswith(".osu") or not os.path.isfile(long_path(requested_path)):
+                return self._error("指定的谱面路径无效：%s" % requested_path)
+            beatmap_path = requested_path
+
         t0 = time.time()
         log("[analyze-local] " + name)
         resp = self._finish_analyze(
-            replay_path, None, _field(req, "songsRoot") or None
+            replay_path, beatmap_path, _field(req, "songsRoot") or None
         )
         log("[analyze-local] 完成 用时 %.0f ms" % ((time.time() - t0) * 1000))
         return resp
@@ -1932,6 +1984,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
             return self._progress_info()
         if path == "/api/changelog":
             return self._changelog()
+        if path == "/api/cache/stats":
+            return self._json(cache_admin.stats(CACHE_DIR))
         if path == "/api/check-update":
             return self._check_update()
         if path == "/api/open-replays":
@@ -2022,6 +2076,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
                 return self.report_advice()
             if path == "/api/card/save":
                 return self.card_save(qs)
+            if path == "/api/cache/clean":
+                return self._cache_clean()
             if path == "/api/practice/cut":
                 return self.practice_cut()
             if path == "/api/practice/pack":
@@ -2165,6 +2221,27 @@ def _profile_from_config() -> dict:
     }
 
 
+def _is_fallback_dan(session: dict, value) -> bool:
+    """这条记录是不是还停在入库时那个 MSD 标定值上。
+
+    页面算完 Roxy 会回填真正的估算段位；要是那次回填没成功（分析完直接关页面、
+    回填请求失败），库里就只剩 MSD 值。重导入时拿它当「导入前」的基线，
+    会凭空算出一段掉段 —— 那种卡片比不显示更误导。
+    """
+    try:
+        msd_value = float(session.get("msd") or 0)
+        current = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not msd_value or current <= 0:
+        return False
+    try:
+        fallback = float((dan.estimate(msd_value) or {}).get("dan"))
+    except (TypeError, ValueError):
+        return False
+    return abs(current - fallback) < 0.005
+
+
 def _dan_change(key: str, old_value, fresh: bool = False) -> dict | None:
     """这一局让成长页的综合段位动了多少；没动就返回 None。
 
@@ -2186,8 +2263,10 @@ def _dan_change(key: str, old_value, fresh: bool = False) -> dict | None:
     for s in sessions:
         if s.get("key") == key:
             s = dict(s)
-            # None = 这一局之前不存在，等于不计入
-            s["dan_value"] = None if fresh else old_value
+            # None = 这一局之前不存在，等于不计入。两种情况下按"不存在"处理：
+            # 本次刚入库（fresh），以及库里那条只剩 MSD 兜底值（从没回填过）。
+            drop = fresh or _is_fallback_dan(s, old_value)
+            s["dan_value"] = None if drop else old_value
         patched.append(s)
     before = progress.evaluate(patched, profile).get("overall") or {}
     if not before.get("visible"):
@@ -2270,10 +2349,15 @@ def _analyze_and_store(replay_path: str, beatmap_path: str | None,
     # 写失败也不影响本次分析，所以走 record_safely。
     # 返回值要带给页面：段位变动要拿"库里有没有这一局"当基线，
     # 新建那行的 dan_value 只是 MSD 兜底，不是上一版估算值。
-    if store:
+    #
+    # 配错图（MD5 对不上）的不记账：那种结果通常是一整排漏接，进了历史会污染
+    # 成长页和「本图走势」，而且下次正确导入同一份回放还会撞上这条脏记录。
+    mismatch = bool(payload.get("md5Mismatch"))
+    if store and not mismatch:
         payload["historyNew"] = bool(history.record_safely(payload))
     else:
         payload["historyNew"] = False
+    payload["historySkipped"] = bool(mismatch and store)
     cols = note_skin.get("columns") or []
     payload["media"] = {
         "audio": bool(audio),
@@ -2436,6 +2520,14 @@ def _clean_chunks() -> None:
     except OSError:
         pass
 
+    # 音频目录里的下载碎片（.part / .pN）：只有进程被硬关掉才会留下，正常流程自己会删
+    try:
+        dropped = cache_admin.sweep_parts(CACHE_DIR)
+        if dropped:
+            log("[startup] 清掉 %d 个下载碎片" % dropped)
+    except OSError:
+        pass
+
 
 def _probe_port(port: int) -> bool:
     """这个端口上是不是已经跑着本程序（而不是别的什么服务）。"""
@@ -2539,6 +2631,23 @@ def _warm_library() -> None:
         log("[startup] 曲库预热失败：%r" % (e,))
 
 
+def _warm_history() -> None:
+    """后台打开历史存档：建表、补字段、迁移老库。
+
+    以前这件事排在绑定端口之前，而升级老库要重建曲库索引、逐行解析谱面，
+    几十秒都正常；启动器只等 20 秒端口，等不到就弹「服务没能启动」并退出进程，
+    迁移事务跟着回滚，下次启动又从头来一遍。现在先让端口通，再在后台慢慢迁。
+    """
+    try:
+        warm = history.warmup()
+        if warm.get("ok"):
+            log("[startup] 历史存档就绪：%d 局，%d 个字段" % (warm["sessions"], warm["columns"]))
+        else:
+            log("[startup] 历史存档打开失败：%s" % warm.get("error"))
+    except Exception:  # noqa: BLE001
+        log("[startup] 历史存档初始化异常：\n" + traceback.format_exc())
+
+
 def _watch_pages(httpd) -> None:
     """页面关掉就退出：每 5 秒看一次有没有活着的页面。"""
     while True:
@@ -2581,18 +2690,6 @@ def main() -> int:
 
     _clean_chunks()
 
-    # 历史存档在启动时就打开一次：建表、补字段都在这里做完。
-    # 这样「换版本之后数据还在」这件事在启动日志里就能看到，
-    # 而不是等用户点开成长页才发现字段缺了。
-    try:
-        warm = history.warmup()
-        if warm.get("ok"):
-            log("[startup] 历史存档就绪：%d 局，%d 个字段" % (warm["sessions"], warm["columns"]))
-        else:
-            log("[startup] 历史存档打开失败：%s" % warm.get("error"))
-    except Exception:  # noqa: BLE001
-        log("[startup] 历史存档初始化异常：\n" + traceback.format_exc())
-
     if _reuse_running_instance(args):
         return 0
 
@@ -2608,6 +2705,7 @@ def main() -> int:
     print("[mania-replay-lab] 曲库：%s" % (", ".join(default_songs_roots()) or "未找到"), flush=True)
 
     threading.Thread(target=_warm_library, daemon=True).start()
+    threading.Thread(target=_warm_history, daemon=True).start()
 
     if not args.no_hotkey:
         # 设置里存过就以设置为准（存空串表示用户关掉了），没存过才用默认值；
