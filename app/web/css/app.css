@@ -783,6 +783,9 @@ body.is-simple .cat-meta { grid-column: 1 / -1; flex: none; }
    和评分并排放在顶栏，一眼能看出这一局是赚了还是亏了。 */
 .badge-dan {
   position: relative;
+  /* 正文是「12.69 → 12.70」，比别的卡长一截。等分的话中等宽度下只有它被截成
+     「12.69 ...」，所以一直多分 1/4，不等到窄屏才给；再多就比别的卡宽得太显眼。 */
+  flex-grow: 1.25;
   background: linear-gradient(135deg, rgba(126, 242, 208, .16), rgba(34, 211, 238, .08));
   border-color: rgba(126, 242, 208, .45);
 }
@@ -1464,12 +1467,26 @@ html[data-theme="sakura"] .task-row {
 
 /* 徽章在窄窗口里六个挤一行：收内边距和数值字号，尽量让完整数字露出来。
    段位卡片的正文是「12.85 → 12.61」，比别的长一截，额外多分一点宽度、字号再小半档。 */
-@media (max-width: 1100px) {
+@media (max-width: 1240px) {
   .badge { padding: 7px 9px; }
   .badge strong { font-size: 14px; }
-  .badge-v1 strong { font-size: 15.5px; }
+  /* V1 / V2 的数值一直是 17px 那档里最大的两个；只收 V1 会留下一张比谁都需要
+     宽度的卡（Score V2 的七位数），中等宽度下就它被截成「784,...」。 */
+  .badge-v1 strong, .badge-v2 strong { font-size: 15.5px; }
   .badge-dan { flex-grow: 1.6; }
   .badge-dan strong { font-size: 12.5px; }
+}
+
+/* 一行放不下六张时（含七位数的 Score V2）排成 3×2：两行三张是看得懂的版式，
+   截断的数字是坏数据。判据要用**卡片的实际宽度**，不能用窗口宽度 —— 主卡左边
+   还有评级圈，窗口 1100 的时候这排只剩 600 出头，按窗口判断就永远不触发。 */
+.hero-copy { container-type: inline-size; }
+@container (max-width: 640px) {
+  .badges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+/* 老浏览器不认容器查询时的兜底：按窗口宽度先挡一道 */
+@media (max-width: 1040px) {
+  .badges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 /* ---------------------------------------------------------------- 响应式 */
@@ -1883,6 +1900,10 @@ html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
 }
 .pg-cell-unit { font-size: 9px; font-weight: 400; color: var(--faint); margin-left: 1px; }
 .pg-cell.is-empty { border-style: dashed; background: transparent; opacity: .55; }
+/* 能点开的成绩格：光标与悬停给一点暗示，否则没人知道这排格子是入口 */
+.pg-cell.is-link { cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.pg-cell.is-link:hover { border-color: var(--accent); background: var(--raise); }
+.pg-cell.is-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pg-cell-title {
   font-size: 11.5px; font-weight: 600; color: var(--text); line-height: 1.35;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
