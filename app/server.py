@@ -47,6 +47,7 @@ from app.core import (  # noqa: E402
     quick_import,
     recommend,
     release_notes,
+    replay_store,
     report,
 )
 from app.core.analyze import (  # noqa: E402
@@ -694,6 +695,23 @@ class _ApiMixin(_SessionView):
             "change": _dan_change(key, old, fresh),
         })
 
+    def _history_replay(self, req: dict):
+        """按回放 MD5 找回 .osr 并重跑一遍分析：成长页点一格就回到那一局的页面。
+
+        找不到文件就是找不到 —— 回放被删掉、被移走、或者当初根本没留底，
+        都返回 404 让页面提示"回放不存在"。这里不猜、不降级成只看摘要，
+        因为摘要里没有逐音数据，画不出回放页。
+        """
+        key = re.sub(r"[^0-9a-fA-F]", "", _field(req, "key"))[:40].lower()
+        if len(key) < 32:
+            return self._error("回放编号不完整")
+        src = replay_store.find(key)
+        if not src:
+            return self._error("回放不存在：原文件可能已被删除或移走", 404)
+        log("[history-replay] %s <- %s" % (key[:8], os.path.basename(src)))
+        # store=False：库里已经有这一局，重算只给页面看，不再改写存档
+        return self._json(_analyze_and_store(src, None, None, store=False))
+
     # ---- 游戏目录（自动探测失败时让玩家在网页里手动指定） ----------------
     def _paths_info(self):
         roots = default_songs_roots()
@@ -1041,7 +1059,8 @@ class _ApiMixin(_SessionView):
         """把成绩卡 / B50 存进程序目录的 card/。
 
         前端画在 canvas 上，本来只能走浏览器下载、落到「下载」文件夹里还得自己翻。
-        本机程序不如直接写回自己目录：文件名沿用导出时那个，重名时加 (2)。
+        本机程序不如直接写回自己目录：成绩卡按「序号_曲名_日期」命名，B50 按
+        「B50_玩家_日期」命名；万一撞名（同一天导两次 B50）再补 (2)。
         """
         try:
             body = self._read_body(limit=16 * 1024 * 1024)
@@ -1051,7 +1070,17 @@ class _ApiMixin(_SessionView):
             return self._error("没有收到图片数据", 400)
         if not body.startswith(b"\x89PNG\r\n\x1a\n"):
             return self._error("只接受 PNG 图片", 400)
-        name = _card_file_name((qs.get("name") or [""])[0])
+        kind = ((qs.get("kind") or [""])[0] or "").strip().lower()
+        if kind in ("score", "b50"):
+            # 序号只在成绩卡上用：B50 是同一天的汇总图，没有逐张递增的含义
+            name = _card_name(kind,
+                              title=(qs.get("title") or [""])[0],
+                              ident=(qs.get("id") or [""])[0],
+                              seq=_card_seq(paths.CARD_DIR),
+                              judge=(qs.get("judge") or [""])[0])
+        else:
+            # 老前端只传 name，保留这条路径，升级到一半也不会存不进去
+            name = _card_file_name((qs.get("name") or [""])[0])
         try:
             os.makedirs(paths.CARD_DIR, exist_ok=True)
             dest = _unique_path(os.path.join(paths.CARD_DIR, name))
@@ -1396,6 +1425,64 @@ def _card_file_name(name: str) -> str:
     if not base.lower().endswith(".png"):
         base += ".png"
     return base[:120]
+
+
+def _card_text(value: str, fallback: str) -> str:
+    """把曲名 / 玩家名压成能进文件名的样子。
+
+    这里特意不取 basename：曲名里带 `/`（「1/2」这种写法）很常见，
+    取了基名会把前半截丢掉，换成下划线更接近原意。
+    """
+    # 连同替换点两侧的空格一起吃掉：「Destiny / Instrumental」出来是
+    # 「Destiny_Instrumental」，而不是带着一串空格的「Destiny _ Instrumental」
+    text = re.sub(r'\s*[<>:"/\\|?*\x00-\x1f]\s*', "_", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip(" ._")
+    return text or fallback
+
+
+def _card_seq(folder: str) -> int:
+    """card/ 里下一个序号：已有「001_」前缀的最大值 +1。
+
+    只认三位以上、后面紧跟下划线的名字：说明.txt 与 B50_… 不参与编号，
+    用户手动塞进这个文件夹的其它图片也不会把序号顶飞。
+    """
+    top = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 1
+    for name in names:
+        m = re.match(r"^(\d{3,4})_", name)
+        if m:
+            top = max(top, int(m.group(1)))
+    return top + 1
+
+
+# 判定口径在文件名里的写法：圈内习惯叫 ScoreV1 / ScoreV2，缩写成 SV1 / SV2。
+# classic 是 stable 老回放那套混合口径，没有对应的社区叫法，就不往名字里塞标记。
+_JUDGE_TAGS = {"v1": "SV1", "v2": "SV2"}
+
+
+def _card_name(kind: str, title: str = "", ident: str = "", seq: int = 1,
+               today: str = "", judge: str = "") -> str:
+    """按类型拼文件名：成绩卡「序号_曲名_SV1|SV2_日期」，B50「B50_玩家_日期」。
+
+    日期默认取本机当天，测试可以传 today 固定下来。
+    """
+    date = today or time.strftime("%Y-%m-%d")
+    if kind == "b50":
+        name = "B50_%s_%s.png" % (_card_text(ident, "玩家"), date)
+    else:
+        parts = ["%03d" % max(1, int(seq)), _card_text(title, "成绩")]
+        tag = _JUDGE_TAGS.get((judge or "").strip().lower(), "")
+        if tag:
+            parts.append(tag)
+        parts.append(date)
+        name = "_".join(parts) + ".png"
+    if len(name) > 120:
+        # 曲名过长时优先保前缀和日期，Windows 的整条路径还有 260 字符的限制
+        name = name[:-4][:116] + ".png"
+    return name
 
 
 def _unique_path(path: str) -> str:
@@ -1927,6 +2014,8 @@ class Handler(_ChunkUploadMixin, _AnalyzeApiMixin, _ApiMixin, _AudioApiMixin, _P
                 return self._paths_save(_parse_json(self._read_body()) or {})
             if path == "/api/history/dan":
                 return self._history_dan(_parse_json(self._read_body()) or {})
+            if path == "/api/history/replay":
+                return self._history_replay(_parse_json(self._read_body()) or {})
             if path == "/api/beatmap-meta":
                 return self._beatmap_meta()
             if path == "/api/report/advice":
@@ -2142,8 +2231,11 @@ def _refresh_library() -> None:
 
 
 def _analyze_and_store(replay_path: str, beatmap_path: str | None,
-                       songs_root: str | None) -> dict:
+                       songs_root: str | None, store: bool = True) -> dict:
     """跑完分析、建会话、记历史，返回完整结果。HTTP 入口与热键共用这一份。
+
+    store=False 用于"从成长页点回来重看"：回放要重新分析，但库里已经有这一局了，
+    再把摘要写一遍只会把 recorded_at 和 dan_value 刷成新值，属于不该有的副作用。
 
     判定模型由回放里的客户端版本决定（stable 逐帧状态机 / lazer 事件式），
     没有手动开关：两套规则混用只会算错，选项留着也只会让人选错。
@@ -2169,11 +2261,19 @@ def _analyze_and_store(replay_path: str, beatmap_path: str | None,
                           beatmap_path=resolved_bm or "",
                           beatmap_md5=(payload.get("replay") or {}).get("beatmapMd5") or "")
     payload["session"] = sid
+    # 回放本体也留一份（`_cache/replays/<回放MD5>.osr`）：成长页的 B50 点开时要靠它重放。
+    # .osr 只有几十 KB，写失败也不影响分析，所以不看返回值。
+    replay_info = payload.get("replay") or {}
+    replay_store.save(str(replay_info.get("replayMd5") or replay_info.get("fileHash") or ""),
+                      replay_path)
     # 每局摘要落一份本地存档（`_cache/history.db`）。这一层只存不分析，
     # 写失败也不影响本次分析，所以走 record_safely。
     # 返回值要带给页面：段位变动要拿"库里有没有这一局"当基线，
     # 新建那行的 dan_value 只是 MSD 兜底，不是上一版估算值。
-    payload["historyNew"] = bool(history.record_safely(payload))
+    if store:
+        payload["historyNew"] = bool(history.record_safely(payload))
+    else:
+        payload["historyNew"] = False
     cols = note_skin.get("columns") or []
     payload["media"] = {
         "audio": bool(audio),
