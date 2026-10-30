@@ -330,6 +330,8 @@
     player.load({ keys: 4, notes, firstObject: first, lastObject: last });
     player.setOptions({
       scrollMs: state.scrollMs,
+      // 跟打固定 1.0×（音频和时钟都不变速），窗口不需要折算
+      rate: 1,
       showPresses: false,
       deviationBars: false,
       showJudgements: true,
