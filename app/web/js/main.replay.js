@@ -142,6 +142,7 @@
 
     App.state.player2 = window.ManiaPlayer.create($("playfield2"), {
       scrollMs: App.state.scrollMs,
+      rate: App.state.speed,
       judgementFilter: App.state.errorsOnly ? "errors" : "all",
       showJudgements: true,
       // 标杆这一路：判定色固定成白/黄/绿/蓝/紫/红，并且不画"实际击打位置"——
@@ -314,6 +315,8 @@
     if (!canvas) return;
     const opts = {
       scrollMs: App.state.scrollMs,
+      // 倍速交给播放器折算窗口：谱面时间走得快，落速不该跟着快
+      rate: App.state.speed,
       judgementFilter: App.state.errorsOnly ? "errors" : "all",
       showJudgements: true,
       theme: App.readTheme(),
@@ -348,6 +351,17 @@
     App.state.player.resize();
     App.state.player.setTime(currentTimeMs());
     App.state.player.render();
+  }
+
+  // 变速时把倍速同步给播放器（含对比那一路）。播放器拿它把 scrollMs 折回真实时间：
+  // 只改谱面时间与音频，音符在屏幕上的下落速度保持不变。
+  function setPlaybackRate(rate) {
+    const r = Number(rate) > 0 ? Number(rate) : 1;
+    [App.state.player, App.state.player2].forEach((p) => {
+      if (!p || typeof p.setOptions !== "function") return;
+      p.setOptions({ rate: r });
+      p.render();
+    });
   }
 
   // 把服务端找好的皮肤素材（每列一张图 + 长按条）交给播放器。
@@ -934,7 +948,7 @@
 
   // 供其它模块调用；同名冲突在这里会直接覆盖，加载顺序见 index.html
   Object.assign(App, {
-    jCodeOf, buildProgress, progressAt, closeCompare, startCompare, findErrorAt,
+    jCodeOf, buildProgress, progressAt, closeCompare, startCompare, findErrorAt, setPlaybackRate,
     bindReplayHover, bindReplayWheel, revealErrorRow, selectError, clearSelection,
     repaintPlayer, ensureHitsound, syncHitsound, ensurePlayer, applyNoteSkin, resizePlayer,
     songEndMs, songStartMs, durationMs, audioUsable, currentTimeMs, seekTo, togglePlay, play,
