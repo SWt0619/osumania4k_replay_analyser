@@ -74,17 +74,49 @@ class Replay:
 
     @property
     def rate(self) -> float:
-        """速度倍率（DT/NC=1.5，HT=0.75）。
+        """速度倍率。lazer 的自定义倍速优先，没有才按 legacy mod 位给默认值。
 
         回放帧时间与谱面时间都处在**谱面时间轴**上（audio clock），所以配对时
         **不需要**按倍率换算。它还有两个真实用途：UR 要按官方口径除以倍率
         （见 analyze._summary / _section_stats），以及页面上的「等效难度」说明。
+
+        stable 的 DT/NC 固定 1.5、HT 固定 0.75，但 lazer 的这几个 mod 都能在
+        0.5~2.0 之间自己调。以前一律按 1.5 算：UR 偏低约一成、段位估计偏高、
+        播放器也跟着快了一截。回放扩展信息里记着真实值（`settings.speed_change`），
+        读它就行。
         """
+        custom = self.custom_rate
+        if custom:
+            return custom
         if self.mods & MOD_DT or self.mods & MOD_NC:
             return 1.5
         if self.mods & MOD_HT:
             return 0.75
         return 1.0
+
+    @property
+    def custom_rate(self) -> float:
+        """lazer 回放里记的自定义倍速；没记或读不出数字时返回 0。
+
+        DT / NC 可以调快也能调慢（0.5~2.0），HT / DC 同理，所以不能按 mod 名
+        猜方向，只认 `speed_change` 这个数。不是字典、缺字段、值不是数字都算
+        "没记"，交给 `rate` 的 legacy 兜底。
+        """
+        for item in (self.score_info or {}).get("mods") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("acronym") or "").upper() not in _RATE_MODS:
+                continue
+            settings = item.get("settings")
+            if not isinstance(settings, dict):
+                continue
+            try:
+                speed = float(settings.get("speed_change"))
+            except (TypeError, ValueError):
+                continue
+            if speed > 0:
+                return speed
+        return 0.0
 
     @property
     def header_judgements(self) -> dict[str, int]:
@@ -136,6 +168,10 @@ MOD_RANDOM = 1 << 21
 MOD_MR = 1 << 30
 # ScoreV2：stable 端开这个 mod 才是 V2 计分；lazer 默认就是 V2，不会带这个位。
 MOD_SCORE_V2 = 1 << 29
+
+# 能带自定义倍速的 mod：DT / NC 一档，HT / DC（Daycore）一档。
+# lazer 把它们都做成 RateAdjust 的衍生，`speed_change` 可以落在 0.5~2.0。
+_RATE_MODS = ("DT", "NC", "HT", "DC")
 
 MOD_KEY_BITS = {
     1 << 15: "1K",
@@ -265,11 +301,29 @@ def decode_mods(mods: int) -> list[str]:
     return out
 
 
-def mods_human(mods: int) -> str:
+def mods_human(mods: int, rate: float | None = None) -> str:
+    """人话的 mod 说明。给了 rate 且和该 mod 的默认档位不同时，按真实倍速写。
+
+    默认文案写死成「加速 1.5×」「减速 0.75×」，lazer 把 DT 调到 1.35× 时
+    这句就是错的 —— 界面上明明按 1.35 算 UR，说明却写着 1.5。
+    """
     names = decode_mods(mods)
     if not names:
         return "无 Mod"
-    detail = [MOD_DESC.get(n, "") for n in names]
+    detail = []
+    for n in names:
+        d = MOD_DESC.get(n, "")
+        if rate and n in ("DT", "NC", "HT"):
+            speed = float(rate)
+            default = 0.75 if n == "HT" else 1.5
+            if abs(speed - default) > 1e-9:
+                if n == "NC":
+                    d = "夜核 %g×" % speed
+                elif speed < 1:
+                    d = "减速 %g×" % speed
+                else:
+                    d = "加速 %g×" % speed
+        detail.append(d)
     parts = [n + ("（" + d + "）" if d else "") for n, d in zip(names, detail)]
     return " + ".join(parts)
 
@@ -668,6 +722,24 @@ class PressEvent:
 class ReleaseEvent:
     time: float
     column: int
+
+
+def read_replay_key(path: str) -> tuple[str, str] | None:
+    """只读文件头，返回（回放 MD5, 谱面 MD5）；读不出来返回 None。
+
+    成长页要判断"这一局的回放还在不在"，只需要头里的两个哈希。整份解压一遍没必要，
+    而 .osr 本身也就几十 KB，读整个文件比按字段分段读省事，也不会漏掉末尾的
+    lazer 扩展块（这里根本不解它）。
+    """
+    try:
+        # 头只有两百来字节，读 64 KB 足够；帧数据不解压，扫目录时几百份也不会卡。
+        with open(long_path(path), "rb") as f:
+            data = f.read(65536)
+        head = _read_header(_Reader(data))
+    except (OSError, OsrError):
+        return None
+    return (str(head.replay_md5 or "").strip().lower(),
+            str(head.beatmap_md5 or "").strip().lower())
 
 
 def extract_events(frames: list[RawFrame]) -> tuple[list[PressEvent], list[ReleaseEvent]]:
