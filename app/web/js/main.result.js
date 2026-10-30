@@ -473,26 +473,37 @@
     window.UI.toast("分析完成：" + data.beatmap.title + " [" + data.beatmap.difficulty + "]");
   }
 
-  // 回放倍率（DT 1.5× / HT 0.75×）要直接当播放速度用。
-  // 否则 DT 的回放会用原速播一遍：音符间距看着比当时宽，像是在说"这张图没那么难"。
-  // 仍然保留速度下拉框，玩家想按原速看细节可以自己改回去。
+  // 回放一律按**原速**（1.0×）打开：谱面就是它本来的样子，音符间距、下落速度都按用户设定走。
+  // 以前这里直接把 mod 倍率（DT 1.5× / HT 0.75×）当播放速度，导入一份 DT 回放就整段快 1.5 倍，
+  // 谱面读起来比当时还挤、下落也跟着变 —— 那只是把音频加快，并没有按原速重建谱面。
+  // 本局倍率仍然放进下拉框（想按当时的速度看可以自己选），选中后只改时间轴与音频：
+  // 播放器会把下落窗口折回真实时间，落速不受影响。
   function applyReplaySpeed(replay) {
     const rate = Number(replay && replay.rate) || 1;
-    App.state.speed = rate;
+    App.state.speed = 1;
     const sel = $("speed");
     if (sel) {
-      // 自定义倍率（比如 1.33×）不在选项里就补一条，否则下拉框会跳回 1×
-      if (!Array.from(sel.options).some((o) => Math.abs(Number(o.value) - rate) < 1e-6)) {
+      // 上一局补进来的自定义倍率要清掉，否则连看几份不同倍速的回放，选项会越积越多
+      Array.from(sel.options).forEach((o) => {
+        if (o.dataset && o.dataset.replayRate) o.remove();
+      });
+      // 自定义倍率（比如 1.35×）不在选项里就补一条，标上来源，方便下一局清掉
+      if (Math.abs(rate - 1) > 1e-6 &&
+          !Array.from(sel.options).some((o) => Math.abs(Number(o.value) - rate) < 1e-6)) {
         const opt = document.createElement("option");
         opt.value = String(rate);
         opt.textContent = rate + "×";
+        opt.dataset.replayRate = "1";
+        opt.title = "本局游玩时的倍速";
         sel.appendChild(opt);
       }
-      sel.value = String(rate);
+      sel.value = "1";
     }
     if (App.state.audio) {
-      try { App.state.audio.playbackRate = rate; } catch (e) { /* 元数据还没就绪，忽略 */ }
+      try { App.state.audio.playbackRate = 1; } catch (e) { /* 元数据还没就绪，忽略 */ }
     }
+    // 播放器可能已经在（切判定口径会重建视图），倍速要跟着复位
+    if (App.setPlaybackRate) App.setPlaybackRate(1);
   }
 
   function setupAudio(data) {
