@@ -1085,7 +1085,7 @@ def _replay_block(replay: Replay, verify: dict, column_order: list[int] | None =
         "player": replay.player or "(未知玩家)",
         "score": replay.score,
         "maxCombo": replay.max_combo,
-        "mods": mods_human(replay.mods),
+        "mods": mods_human(replay.mods, replay.rate),
         "modsList": replay.mod_names,
         "rate": replay.rate,
         "date": replay.timestamp.strftime("%Y-%m-%d %H:%M") if replay.timestamp else "",
@@ -1257,9 +1257,9 @@ def _merge_converted_v1(laz: MatchResult, stable: MatchResult) -> None:
 def _pair(beatmap: Beatmap, presses, releases, algo: str = "C",
           mods: list[str] | None = None, frames=None,
           column_map: list[int] | None = None,
-          model: str = "stable") -> MatchResult:
+          model: str = "stable", rate: float | None = None) -> MatchResult:
     if frames:
-        stable = match_replay_frames(beatmap, frames, mods=mods, column_map=column_map)
+        stable = match_replay_frames(beatmap, frames, mods=mods, column_map=column_map, rate=rate)
         if model != "lazer":
             match = stable
         else:
@@ -1269,11 +1269,11 @@ def _pair(beatmap: Beatmap, presses, releases, algo: str = "C",
             # 密集单点上归属与结算都靠它对齐，stable 没有这层锁。
             # lazer 的判定粒度与 stable 不同（头 / 尾 / body 三个单元，尾判在最后一次
             # 松手时结算），所以走 lazer_engine 的逐帧状态机，而不是事件式配对。
-            win = _scaled_windows(lazer_windows(beatmap.od), mods)
+            win = _scaled_windows(lazer_windows(beatmap.od), mods, rate=rate, half=True)
             match = lazer_engine.match_lazer(beatmap, frames, win, column_map=column_map)
             _merge_converted_v1(match, stable)
     else:
-        match = match_replay(beatmap, presses, releases, algo=algo, mods=mods)
+        match = match_replay(beatmap, presses, releases, algo=algo, mods=mods, rate=rate)
     if not match.notes:
         raise AnalyzeError("谱面里没有可分析的物件，或者回放与谱面完全不匹配。")
     return match
@@ -1489,7 +1489,7 @@ def analyze(
     column_map = _column_map(replay, column_order, max(1, beatmap.keys))
     model = _judge_model(replay)
     match = _pair(beatmap, presses, releases, "C", replay.mod_names,
-                  frames=frames, column_map=column_map, model=model)
+                  frames=frames, column_map=column_map, model=model, rate=replay.rate)
     watch.mark("match")
 
     contexts, blocks = _build_contexts(beatmap)
