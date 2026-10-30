@@ -36,7 +36,18 @@
       return opt;
     }));
     const keep = list.find((o) => String(o.v) === String(current));
-    if (keep) sel.value = String(keep.v);
+    if (keep) {
+      sel.value = String(keep.v);
+      return;
+    }
+    // 两种类型的段位值域不一样（REFORM 有 INTRO 负值，Malody 从 Regular 0 起），
+    // 换过去之后原值可能根本不在列表里。这时候退到"数值最接近的一档"，
+    // 而不是让浏览器默认停在第一项 —— 否则用户切个类型，段位就悄悄变成 INTRO-1 了。
+    const target = Number(current);
+    if (Number.isFinite(target)) {
+      const near = list.reduce((a, b) => (Math.abs(b.v - target) < Math.abs(a.v - target) ? b : a));
+      sel.value = String(near.v);
+    }
   }
 
   // 计入评估的回放：综合是 50 格（5×10），单个练法 10 格。没填满的格子留空，
@@ -690,7 +701,16 @@
   }
 
   function bindProgress() {
-    App.on("pgType", "change", () => fillDanOptions($("pgType").value, null));
+    App.on("pgType", "change", () => {
+      const sel = $("pgValue");
+      const before = sel ? String(sel.value) : "";
+      fillDanOptions($("pgType").value, before);
+      // 值域不同、原值换不过去时要明说一声，免得用户以为段位还是原来那个就点了保存
+      if (sel && before && String(sel.value) !== before) {
+        const text = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value;
+        window.UI.toast("类型换了，段位已改成最接近的「" + text + "」，确认后再保存");
+      }
+    });
     App.on("btnSaveProfile", "click", saveProfile);
     // 综合卡片整块可点：展开 5×10 的明细
     App.on("pgHero", "click", () => showGrid("overall"));
