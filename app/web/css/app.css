@@ -1641,6 +1641,25 @@ html[data-theme="sakura"] .task-row {
 .mirror-item.is-slow .m-ms,
 .mirror-item.is-fail .m-ms { color: var(--bad); }
 .mirror-item.is-fail { border-color: rgba(255, 107, 138, .35); }
+
+/* 缓存占用：一行一项，左边说明右边数值；数字用等宽数位，几项对齐才好比 */
+.cache-list {
+  list-style: none; margin: 12px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.cache-list li {
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 11px; border-radius: 9px;
+  font-size: 12px;
+  background: var(--raise);
+  border: 1px solid var(--stroke);
+  color: var(--text);
+}
+.cache-list li b {
+  margin-left: auto; flex: none;
+  font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
 #panel-settings .settings-sep {
   border: 0;
   border-top: 1px solid rgba(127, 127, 127, .18);
