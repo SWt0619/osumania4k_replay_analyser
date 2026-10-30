@@ -868,6 +868,17 @@
             <button class="btn btn-ghost" id="btnMirrorTest">测试连接</button>
           </div>
           <ul class="mirror-list" id="mirrorResult" hidden></ul>
+
+          <hr class="settings-sep">
+
+          <h3>缓存</h3>
+          <p class="muted">补音频时会从镜像站下载整包，时间久了能占几个 GB。这里能看到各项占多少，也可以一键清掉；音频清掉后下次用到会重新下载。</p>
+          <ul class="cache-list" id="cacheList"></ul>
+          <p class="dir-status" id="cacheStatus"></p>
+          <div class="settings-actions">
+            <button class="btn btn-ghost" id="btnCleanAudio">清理音频缓存</button>
+            <button class="btn btn-ghost" id="btnCleanTemp">清理临时文件</button>
+          </div>
           </div>
           </div>
         </div>
