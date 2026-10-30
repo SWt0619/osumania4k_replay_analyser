@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -310,13 +311,19 @@ def db_path() -> str:
     return os.path.join(paths.CACHE_DIR, DB_NAME)
 
 
+# 建表与迁移串行化：升级老库时迁移要跑几秒，而这段时间里页面可能已经来读成长页了。
+# 没有这把锁，两个连接会同时改同一张表，结果是 "database is locked" 或者迁移半途被打断。
+_MIGRATE_LOCK = threading.Lock()
+
+
 def _connect(path: str | None = None) -> sqlite3.Connection:
     target = path or db_path()
     os.makedirs(os.path.dirname(os.path.abspath(target)) or ".", exist_ok=True)
     conn = sqlite3.connect(target, timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
-    _migrate(conn)
+    with _MIGRATE_LOCK:
+        conn.executescript(SCHEMA)
+        _migrate(conn)
     return conn
 
 
