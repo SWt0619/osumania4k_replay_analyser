@@ -469,10 +469,10 @@
             <div class="card-head"><h2>设置</h2></div>
             <div class="card-body">
               <div class="transport transport-extra">
-                <label class="mini-field" title="音符从画布顶端落到判定线花多少毫秒。数字越小 = 下落越快、一屏里音符越稀；按 25ms 一档调">
+                <label class="mini-field" title="音符从画布顶端落到判定线花多少毫秒（真实时间）。数字越小 = 下落越快、一屏里音符越稀；按 25ms 一档调，变速播放也按这个数走">
                   <span>下落</span>
                   <input type="range" id="scroll" class="mini-range" min="250" max="800" step="25" value="800" aria-label="下落速度">
-                  <b id="scrollVal">1200 ms</b>
+                  <b id="scrollVal">800 ms</b>
                 </label>
                 <div class="pa-key-field">
                   <span>跟打键位</span>
@@ -741,6 +741,7 @@
             <p class="pg-hint" id="pgHint"></p>
             <p class="pg-open-hint" id="pgHeroHint">点这里看计入评估的 50 局</p>
           </div>
+          <p class="pg-open-hint" id="pgGridHint" hidden>点任意一格，回到那一局的分析</p>
           <div class="pg-grid" id="pgGrid" hidden></div>
 
           <h3 class="pg-sub">分练法评估</h3>
@@ -1119,7 +1120,7 @@
           <p class="tut-lead">边听边看，判断是手慢、听错，还是根本读不出来。</p>
           <ul class="help-list">
             <li><b>播放</b>：按空格或点按钮播放/暂停（在回放页和时间轴页都有效），进度条可拖，倍速 0.5× ~ 1.5×。</li>
-            <li><b>下落</b>：音符从画布顶端落到判定线花多少毫秒，越小越快；250 ~ 800ms 可调。</li>
+            <li><b>下落</b>：音符从画布顶端落到判定线花多少毫秒，越小越快；250 ~ 800ms 可调。变速播放只改谱面时间轴，这一项始终按设定的毫秒数走。</li>
             <li><b>音画</b>：画面整体提前/延后，±500ms，用来对齐你自己设备的延迟。</li>
             <li><b>打击音</b>：选「正解音」听到的是谱面要求的时间，选「实际击打」听到的是你真正按下的时间。两个交替听，抢拍和拖拍会立刻暴露。打击音量最高 300%，回放音量仍然最多 100%。</li>
             <li><b>没有声音时</b>：本地找不到这张图的音频，程序会按图集 id 去镜像站补一份（要下整个谱面包，几十 MB）。右上角会出现一条「补音频」进度条，写着下到多少、当前是下载还是校验；补好了自动接上原来的音频，补不到就用虚拟时钟照常播画面。</li>
