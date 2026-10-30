@@ -23,6 +23,9 @@
   // 调用方都会显式传 scrollMs，这个值只在没人传参时兜底。
   var DEFAULTS = {
     scrollMs: 800,
+    // 播放倍速。它**不参与**音符位置的计算，只用来把 scrollMs 折回真实时间：
+    // 谱面时间在变速播放时走得更快，窗口不乘回倍速，落速就会跟着一起变。
+    rate: 1,
     judgementFilter: 'all',
     showJudgements: true,
     deviationBars: true,
@@ -256,6 +259,7 @@
 
     var opts = {
       scrollMs: DEFAULTS.scrollMs,
+      rate: DEFAULTS.rate,
       judgementFilter: DEFAULTS.judgementFilter,
       showJudgements: DEFAULTS.showJudgements,
       deviationBars: DEFAULTS.deviationBars,
@@ -378,6 +382,7 @@
     function mergeOptions(partial) {
       if (!partial || typeof partial !== 'object') return;
       if (typeof partial.scrollMs === 'number' && partial.scrollMs > 0) opts.scrollMs = partial.scrollMs;
+      if (typeof partial.rate === 'number' && isFinite(partial.rate) && partial.rate > 0) opts.rate = partial.rate;
       if (typeof partial.judgementFilter === 'string') {
         opts.judgementFilter = (partial.judgementFilter === 'errors') ? 'errors' : 'all';
       }
@@ -444,6 +449,21 @@
       layout();
     }
 
+    // 可见窗口，单位是**谱面时间**。scrollMs 的语义是「一颗音符从画布顶端落到
+    // 判定线要多久」的真实毫秒数，而变速播放时谱面时间比真实时间快 rate 倍，
+    // 所以窗口要乘回 rate。否则选 1.35× 时音符跟着快 1.35 倍 —— 滑杆写 800ms，
+    // 实际 593ms 就落到底，切回原速又变回 800ms，同一个滑杆两种手感。
+    function viewMs() {
+      return realMs(opts.scrollMs);
+    }
+
+    // 同一个折算也用在「判定闪光」「判定线以下的尾巴」上：它们和下落速度一样是屏幕上的
+    // 时间感，变速播放时不该变成一闪而过（快）或者拖很久（慢）。
+    function realMs(chartMs) {
+      var r = opts.rate > 0 ? opts.rate : 1;
+      return chartMs * r;
+    }
+
     function layout() {
       if (!(W > 0 && H > 0)) {
         needMeasure = true;
@@ -454,8 +474,9 @@
       stageLeft = Math.max(0, (W - keys * laneW) * 0.5);
       noteW = laneW * NOTE_W_RATIO;
       // 时间 -> y 的换算：y = judgeY - (t - now) * pxPerMs。
-      // 于是“现在”正好落在判定线上，“now + scrollMs”正好落在画布顶端。
-      pxPerMs = opts.scrollMs > 0 ? judgeY / opts.scrollMs : 0;
+      // 于是“现在”正好落在判定线上，“now + viewMs()”正好落在画布顶端。
+      var span = viewMs();
+      pxPerMs = span > 0 ? judgeY / span : 0;
       rebuildGradients();
     }
 
@@ -1016,13 +1037,13 @@
       }
 
       var onlyErrors = opts.judgementFilter === 'errors';
-      var pastEdge = now - PAST_MS;
-      var futureEdge = now + opts.scrollMs + 1; // +1 让刚出现在顶端的音符也能进来
+      var pastEdge = now - realMs(PAST_MS);
+      var futureEdge = now + viewMs() + 1; // +1 让刚出现在顶端的音符也能进来
 
       // 二分起点要把“最长长按”退回去：一个很长的 LN 的头部可能早就过了
       // 判定线，但它的身体还在画面上（正在按住），不能因为 t < pastEdge 就漏掉。
       // 另外判定闪光（120ms）比音符尾巴（80ms）长，所以起点还要再兜住闪光那 40ms。
-      var startT = Math.min(pastEdge - maxHoldMs, now - IMPACT_MS - 1);
+      var startT = Math.min(pastEdge - maxHoldMs, now - realMs(IMPACT_MS) - 1);
       var i = lowerBound(startT);
 
       for (; i < n; i += 1) {
@@ -1045,8 +1066,8 @@
             ? note._jt
             : note.t + (typeof note.d === 'number' ? note.d : 0);
           var since = now - hitAt;
-          if (opts.showJudgements && since >= -8 && since <= IMPACT_MS) {
-            drawImpact(cx, Math.max(0, since) / IMPACT_MS, judgeColor(note.j | 0), laneW);
+          if (opts.showJudgements && since >= -8 && since <= realMs(IMPACT_MS)) {
+            drawImpact(cx, Math.max(0, since) / realMs(IMPACT_MS), judgeColor(note.j | 0), laneW);
           }
           continue;
         }
@@ -1055,7 +1076,7 @@
         var activeHold = isHold && note.h > now;
 
         var age = now - note.t;
-        var flashing = opts.showJudgements && age >= 0 && age <= IMPACT_MS;
+        var flashing = opts.showJudgements && age >= 0 && age <= realMs(IMPACT_MS);
 
         // 已过去：超过 80ms 就整条不画。但“正在按住的长按”不算已过去
         // （它的身体还连着判定线），否则长条会在按住的中途突然消失。
@@ -1082,7 +1103,7 @@
         }
 
         // 判定闪光：只在“刚判完”这 120ms 内出现（MISS 也给一个，提示这一下没接上）
-        if (flashing) drawImpact(cx, age / IMPACT_MS, color, laneW);
+        if (flashing) drawImpact(cx, age / realMs(IMPACT_MS), color, laneW);
       }
     }
 
@@ -1095,8 +1116,8 @@
     // 用途是看"按早了还是按晚了、偏多少"——音符是谱面给的位置，横条是手落下的位置。
     function drawPresses(now) {
       if (!notes.length || !(pxPerMs > 0)) return;
-      var left = now - PAST_MS;
-      var right = now + opts.scrollMs;
+      var left = now - realMs(PAST_MS);
+      var right = now + viewMs();
       ctx.save();
       ctx.globalAlpha = 0.5;
       // 按下位置 = 音符头 + 误差，误差通常几百毫秒以内；从可见窗口往前退一点开始，
@@ -1127,8 +1148,8 @@
     // 但它的位置不在音符头上，得单独画。样式比"按下"更淡更细，避免和按下线混淆。
     function drawReleases(now) {
       if (!notes.length || !(pxPerMs > 0)) return;
-      var left = now - PAST_MS;
-      var right = now + opts.scrollMs;
+      var left = now - realMs(PAST_MS);
+      var right = now + viewMs();
       ctx.save();
       ctx.globalAlpha = 0.55;
       // 松手位置跟着长条尾走：一个很长的 LN 头可能早就过去了，所以回退 maxHoldMs
@@ -1405,7 +1426,7 @@
         if (partial && typeof partial === 'object') {
           mergeOptions(partial);
           if (partial.theme) applyThemePatch(theme, partial.theme);
-          // scrollMs 变了 -> 每毫秒像素变了；主题变了 -> 渐变得重建
+          // scrollMs / rate 变了 -> 每毫秒像素变了；主题变了 -> 渐变得重建
           layout();
         }
         return api;
@@ -1505,6 +1526,8 @@
           showPresses: opts.showPresses,
           fixedJudgeColors: opts.fixedJudgeColors,
           scrollMs: opts.scrollMs,
+          rate: opts.rate,
+          viewMs: viewMs(),
           judgementFilter: opts.judgementFilter,
           showJudgements: opts.showJudgements,
           deviationBars: opts.deviationBars,
