@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 _HERE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCALE_PATH = os.path.join(_HERE, "data", "dan_scale.json")
@@ -76,6 +77,30 @@ def from_label(label: str | None) -> float | None:
     if low in _EXTRA:
         return _EXTRA[low] + offset
     return None
+
+
+def from_ln_label(label: str | None) -> float | None:
+    """把面条段位标签换成连续值（LN 6 mid → 6.0，Hypersovae LN 16 high → 16.4）。
+
+    面条是 5~17 的另一套刻度，和 RC 的 Reform 不是同一张表，所以不能复用
+    `from_label`：它的分支只认 Intro / Reform / Alpha 那些名字。
+    面图的完整标签形如 "Reform 8 mid || LN 6 mid"，带 `||` 时取后半段。
+    """
+    text = (label or "").strip()
+    if "||" in text:
+        text = text.split("||")[1].strip()
+    if text.startswith("<") or text.startswith("不到"):
+        # "低于 LN 5" / "不到 LN 5" 是 5 段以下的统称，给一个能排序的近似值
+        return 4.6
+    text = text.lstrip(">").strip()
+    if not text:
+        return None
+    hit = re.search(r"LN\s*(\d+)", text, re.IGNORECASE)
+    if not hit:
+        return None
+    base = float(hit.group(1))
+    head, _, sub = text.rpartition(" ")
+    return base + _SUB.get(sub.strip().lower(), 0.0)
 
 
 def to_label(dan: float | None) -> str:
