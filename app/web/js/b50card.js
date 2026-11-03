@@ -288,7 +288,9 @@
     ctx.fillText("Can I get a better score?", x, 76);
     ctx.fillStyle = P.dim;
     ctx.font = "400 12.5px " + FONT;
-    ctx.fillText("osu!mania 4K 回放分析 · 个人 B50", x, 100);
+    ctx.fillText(data.lnMode
+      ? "osu!mania 4K 回放分析 · LN 专区 B50"
+      : "osu!mania 4K 回放分析 · 个人 B50", x, 100);
 
     const d = new Date();
     const date = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-"
@@ -354,30 +356,32 @@
       ctx.fill();
     }
 
-    // 右侧 2×2 练法
-    const keys = ["jack", "tech", "speed", "stamina"];
-    const chipW = 206;
-    const chipH = 64;
-    const cx0 = W - PAD - chipW * 2 - 12;
-    const cy0 = 196;
-    keys.forEach((key, i) => {
-      const s = skills[key] || {};
-      const x = cx0 + (i % 2) * (chipW + 12);
-      const y = cy0 + Math.floor(i / 2) * (chipH + 12);
-      ctx.fillStyle = P.chipFill;
-      roundRect(ctx, x, y, chipW, chipH, 12);
-      ctx.fill();
-      ctx.strokeStyle = P.chipStroke;
-      ctx.lineWidth = 1;
-      ctx.stroke();
+    // 右侧 2×2 练法：LN 专区不分叠切乱，这四块在 LN 卡上只会显示四个「—」，直接不画
+    if (!data.lnMode) {
+      const keys = ["jack", "tech", "speed", "stamina"];
+      const chipW = 206;
+      const chipH = 64;
+      const cx0 = W - PAD - chipW * 2 - 12;
+      const cy0 = 196;
+      keys.forEach((key, i) => {
+        const s = skills[key] || {};
+        const x = cx0 + (i % 2) * (chipW + 12);
+        const y = cy0 + Math.floor(i / 2) * (chipH + 12);
+        ctx.fillStyle = P.chipFill;
+        roundRect(ctx, x, y, chipW, chipH, 12);
+        ctx.fill();
+        ctx.strokeStyle = P.chipStroke;
+        ctx.lineWidth = 1;
+        ctx.stroke();
 
-      ctx.fillStyle = P.dim;
-      ctx.font = "400 11.5px " + FONT;
-      ctx.fillText(s.label || key, x + 14, y + 25);
-      ctx.fillStyle = P.ink;
-      ctx.font = "600 19px " + FONT;
-      ctx.fillText(s.dan == null ? "—" : num(s.dan, 2), x + 14, y + 50);
-    });
+        ctx.fillStyle = P.dim;
+        ctx.font = "400 11.5px " + FONT;
+        ctx.fillText(s.label || key, x + 14, y + 25);
+        ctx.fillStyle = P.ink;
+        ctx.font = "600 19px " + FONT;
+        ctx.fillText(s.dan == null ? "—" : num(s.dan, 2), x + 14, y + 50);
+      });
+    }
   }
 
   // targetDan 是「目标」那一档的数值；折算段位够到它的分卡单独换底
@@ -453,14 +457,16 @@
     }
   }
 
-  function paintFooter(ctx, version) {
+  function paintFooter(ctx, version, lnMode) {
     ctx.fillStyle = P.divider;
     ctx.fillRect(PAD, H - 74, INNER, 1);
 
     ctx.textAlign = "left";
     ctx.fillStyle = P.dim;
     ctx.font = "400 12px " + FONT;
-    ctx.fillText("osumania4k_replay_analyser by [Crz]Renjie Lan" + (version ? "  ·  v" + version : ""),
+    // LN 卡在署名前面标一句口径，两张图并排放时一眼能分清
+    ctx.fillText((lnMode ? "LN 专区 · v2 97% 基准  ·  " : "")
+      + "osumania4k_replay_analyser by [Crz]Renjie Lan" + (version ? "  ·  v" + version : ""),
       PAD, H - 34);
 
     ctx.textAlign = "right";
@@ -468,8 +474,33 @@
     ctx.textAlign = "left";
   }
 
+  // LN 专区导出：把 ln 块当成 overall 用，其余字段沿用成长页那份。
+  // target 只留一个口径说明——LN 专区没有"下一段还差多少"这回事。
+  function lnView(data) {
+    const ln = (data && data.ln) || {};
+    // LN 专区没有"下一段目标"，进度条按综合段位的小数部分填：
+    // 12.5 填一半、11.3 填三成，读起来就是"这一段里走到了几成"
+    const value = Number(ln.dan);
+    const frac = Number.isFinite(value) ? value - Math.floor(value) : 0;
+    return Object.assign({}, data, {
+      overall: {
+        count: ln.count || 0,
+        visible: !!ln.visible,
+        dan: ln.dan,
+        plays: ln.plays || [],
+        preliminary: !!ln.preliminary,
+      },
+      target: { label: "v2 97% 基准", progress: Math.min(1, Math.max(0, frac)) },
+      skills: {},
+      fullSessions: ln.fullSessions || 30,
+      minSessions: ln.minSessions || 10,
+      lnMode: true,
+    });
+  }
+
   async function render(data, opts) {
     const options = opts || {};
+    const view = options.scope === "ln" ? lnView(data) : data;
     const canvas = document.createElement("canvas");
     canvas.width = W * S;
     canvas.height = H * S;
@@ -484,10 +515,10 @@
     P = light ? LIGHT : DARK;
     paintBackground(ctx);
     paintDecor(ctx);
-    paintHeader(ctx, logo, data);
-    paintSummary(ctx, data);
-    paintGrid(ctx, data);
-    paintFooter(ctx, options.version);
+    paintHeader(ctx, logo, view);
+    paintSummary(ctx, view);
+    paintGrid(ctx, view);
+    paintFooter(ctx, options.version, !!view.lnMode);
     return canvas;
   }
 
@@ -498,20 +529,22 @@
   }
 
   // 正式文件名由服务端拼（「B50_玩家_日期」）；
-  // 这里只负责"退回浏览器下载"时的兜底名字。
-  function fileName(data) {
+  // 这里只负责"退回浏览器下载"时的兜底名字。LN 专区加前缀，免得两张图混在一起。
+  function fileName(data, scope) {
     const d = new Date();
     const pad = (n) => String(n).padStart(2, "0");
     const date = d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
-    return ("B50_" + playerName(data) + "_" + date)
+    const head = scope === "ln" ? "LN_B50_" : "B50_";
+    return (head + playerName(data) + "_" + date)
       .replace(/[\\/:*?"<>|]/g, "_").slice(0, 100) + ".png";
   }
 
   async function save(data, opts) {
-    const canvas = await render(data, opts);
+    const options = opts || {};
+    const canvas = await render(data, options);
     const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
     if (!blob) throw new Error("canvas 导出失败");
-    const name = fileName(data);
+    const name = fileName(data, options.scope);
     // 本机程序：直接写进程序目录的 card/，比让人去下载文件夹里翻更省事。
     // 服务端没这个接口（老版本）时退回浏览器下载，功能不至于不可用。
     if (window.API && window.API.saveCard) {
