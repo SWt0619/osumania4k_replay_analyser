@@ -57,6 +57,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_map ON sessions(beatmap_md5);
 # 版本升级只改代码、不动 `_cache/history.db`，所以这一步在每次连接时都跑一遍（很快）。
 MIGRATIONS = (
     ("dan_value", "ALTER TABLE sessions ADD COLUMN dan_value REAL"),
+    # 面条段的独立段位：LN 专区的 B50 按它折算，和 RC 的 dan_value 互不干扰。
+    # 老记录没有这一列的值，成长页会把它们标成"LN 段位待补"。
+    ("ln_dan_value", "ALTER TABLE sessions ADD COLUMN ln_dan_value REAL"),
     ("skill", "ALTER TABLE sessions ADD COLUMN skill TEXT"),
     ("pattern_label", "ALTER TABLE sessions ADD COLUMN pattern_label TEXT"),
     # 谁打的这一局：name 存回放头里的玩家名，is_me 是"是不是本人"（1/0，NULL 表示认不出来）
@@ -476,23 +479,49 @@ def update_dan(key: str, dan: str, path: str | None = None) -> bool:
         return False
 
 
-def update_dan_value(key: str, value: float, path: str | None = None) -> bool:
+def update_dan_value(key: str, value: float | None, path: str | None = None,
+                     ln_value: float | None = None) -> bool:
     """把估算器算出的段位写回这一局。
 
     写入时用的是 MSD 标定值；谱面难度卡片用的是 Sunny → Azusa → Roxy 那一套，
     两者会差一到两段。成长页折合要以卡片上显示的数为准，所以页面算完要回填。
+
+    两个值可以只给一个：面图的 RC 段位是 Sunny 查表得来的、没有 numeric，
+    但它的 `||` 后半段有面条段位，这时 value 传 None，只更新 ln_dan_value。
     """
     if not key:
         return False
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
+    v = None
+    if value is not None:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return False
+        if v <= 0:
+            v = None
+    ln_v = None
+    if ln_value is not None:
+        try:
+            ln_v = float(ln_value)
+        except (TypeError, ValueError):
+            ln_v = None
+        if ln_v is not None and ln_v <= 0:
+            ln_v = None
+    if v is None and ln_v is None:
         return False
-    if v <= 0:
-        return False
+
+    sets, args = [], []
+    if v is not None:
+        sets.append("dan_value = ?")
+        args.append(v)
+    if ln_v is not None:
+        sets.append("ln_dan_value = ?")
+        args.append(ln_v)
+    args.append(key)
     try:
         with _db(path) as conn:
-            cur = conn.execute("UPDATE sessions SET dan_value = ? WHERE key = ?", (v, key))
+            cur = conn.execute(
+                "UPDATE sessions SET " + ", ".join(sets) + " WHERE key = ?", tuple(args))
             return cur.rowcount > 0
     except sqlite3.Error:
         return False
