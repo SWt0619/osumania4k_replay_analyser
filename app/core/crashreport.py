@@ -102,7 +102,7 @@ def _render(event: str, exc: BaseException | None, context: dict,
     rows = [
         ("时间", time.strftime("%Y-%m-%d %H:%M:%S")),
         ("版本", __version__),
-        ("运行形态", "exe（PyInstaller 冻结）" if paths.FROZEN else "源码"),
+        ("运行形态", "源码 / 便携版"),
         ("Python", "%s（%s）" % (platform.python_version(), sys.executable or "?")),
         ("系统", "%s %s" % (platform.system(), platform.release())),
         ("架构", platform.machine() or "?"),
