@@ -725,11 +725,15 @@
           <p class="dir-status" id="pgStatus"></p>
 
           <div id="pgBody" hidden>
+            <div class="pg-scope" id="pgScope">
+              <button class="pg-scope-btn is-active" data-scope="rc" type="button">常规 B50</button>
+              <button class="pg-scope-btn" data-scope="ln" type="button">LN 专区</button>
+            </div>
             <p class="pg-warn" id="pgWarn" hidden></p>
             <div class="pg-hero" id="pgHero" hidden>
             <div class="pg-hero-top">
               <div>
-                <span class="pg-kicker">综合段位</span>
+                <span class="pg-kicker" id="pgKicker">综合段位</span>
                 <span class="pg-dan" id="pgDan">—</span>
               </div>
               <div class="pg-side">
@@ -744,11 +748,13 @@
           <p class="pg-open-hint" id="pgGridHint" hidden>点任意一格，回到那一局的分析</p>
           <div class="pg-grid" id="pgGrid" hidden></div>
 
+          <div class="pg-skill-block" id="pgSkillBlock">
           <h3 class="pg-sub">分练法评估</h3>
           <p class="muted">只看键型归属明显的图（纯切、纯叠、纯乱这类），每类取最好的 10 局。</p>
           <div class="pg-skills" id="pgSkills"></div>
           <p class="pg-open-hint" id="pgSkillNote" hidden></p>
           <div class="pg-grid" id="pgSkillGrid" hidden></div>
+          </div>
           </div>
         </div>
       </article>
