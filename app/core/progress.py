@@ -158,6 +158,36 @@ def malody_label(value: float) -> str:
     return "Regular %d" % v
 
 
+def malody_view(value: float | None) -> dict:
+    """把 REFORM 连续段位放回 Malody 自己的档位刻度。
+
+    Malody 的段位是离散的（Regular 1~10、Extra 1~9、Extra Final），实测表给了每一档
+    对应的 REFORM 值。这里找出当前值落在哪两档之间，算「距下一档还差多少」，
+    进度条就按这一段填 —— 以前一律折成 REFORM 显示，Malody 玩家看不到自己的段位名。
+    """
+    if value is None or not _MALODY_MEASURED:
+        return {}
+    rows = sorted((float(row["dan"]), key, row["label"])
+                  for key, row in _MALODY_MEASURED.items())
+    v = float(value)
+    if v < rows[0][0]:
+        return {"label": rows[0][2], "next": rows[0][2], "nextDan": rows[0][0],
+                "gap": round(rows[0][0] - v, 2), "progress": 0.0}
+    for i in range(len(rows) - 1):
+        lo, hi = rows[i][0], rows[i + 1][0]
+        if lo <= v < hi:
+            span = hi - lo
+            return {
+                "label": rows[i][2],
+                "next": rows[i + 1][2],
+                "nextDan": hi,
+                "gap": round(hi - v, 2),
+                "progress": round((v - lo) / span, 3) if span > 0 else 0.0,
+            }
+    return {"label": rows[-1][2], "next": "", "nextDan": rows[-1][0],
+            "gap": 0.0, "progress": 1.0}
+
+
 def curve_offset(acc: float) -> float:
     """按对照表插值出「这个准确率在 Alpha 之前值多少段偏移」。
 
@@ -331,6 +361,138 @@ def _play_rows(kept: list[dict]) -> tuple[list[dict], int, int]:
     return unique, low_acc, duplicates
 
 
+def _ln_sessions(sessions: list[dict], owner: str) -> tuple[list[dict], int, int]:
+    """挑出 LN / Hybrid 的记录（仍然只认本人），给 LN 专区用。
+
+    常规 B50 会把这两类排除在外：它们的准确率口径和 RC 的 96% 过段线不是一回事。
+    但排除不等于不该看，所以单独一页按 v2 的 97% 折算。
+    返回（记录, 别人的, 认不出玩家的）。
+    """
+    kept: list[dict] = []
+    others = 0
+    unknown = 0
+    for s in sessions:
+        if owner:
+            flag = s.get("is_me")
+            if flag == 0:
+                others += 1
+                continue
+            if flag is None:
+                unknown += 1
+                continue
+        cls = (s.get("map_class") or "rc").strip().lower()
+        if cls in ("ln", "hybrid"):
+            kept.append(s)
+    return kept, others, unknown
+
+
+# ---------------------------------------------------------------- LN 专区口径
+# score v2 的判定窗比 v1 严一档：97% 相当于 v1 的 96%，所以整条对照表右移 1 个百分点。
+# 折合上限固定 ±1.5 段 —— LN 图之间可比性差，不打分段位，一刀切更省事也更好读。
+# score v2 的判定窗比 v1 严一档：97% 相当于 v1 的 96%，所以整条曲线以 97 为原点。
+# 下限 91 正好扣满 −2、上限 100 正好加满 +2，再乘 LN_SPAN/CURVE_FULL 就落在 ±1.5 内。
+# 形状沿用 v1 那套"越靠近满分越陡"：99→100 涨 0.8，比 97→98 的 0.5 更值钱。
+LN_ACC_CURVE: tuple[tuple[float, float], ...] = (
+    (91.0, -2.0), (93.0, -1.2), (95.0, -0.5), (96.0, -0.25),
+    (97.0, 0.0), (98.0, 0.5), (99.0, 1.2), (100.0, 2.0),
+)
+LN_PASS_ACC = 97.0
+LN_MIN_ACC = 91.0
+LN_SPAN = 1.5
+LN_MIN_SESSIONS = 10      # LN 图本来就少，门槛比常规 B50 低一档
+LN_FULL_SESSIONS = 30
+
+
+def ln_curve_offset(acc: float) -> float:
+    """v2 口径的准确率偏移：97% 记 0，100% 记 +2，91% 记 −2。"""
+    a = float(acc)
+    if a <= LN_ACC_CURVE[0][0]:
+        return LN_ACC_CURVE[0][1]
+    if a >= LN_ACC_CURVE[-1][0]:
+        return LN_ACC_CURVE[-1][1]
+    for i in range(1, len(LN_ACC_CURVE)):
+        x1, y1 = LN_ACC_CURVE[i]
+        if a <= x1:
+            x0, y0 = LN_ACC_CURVE[i - 1]
+            return y0 + (a - x0) * (y1 - y0) / (x1 - x0)
+    return LN_ACC_CURVE[-1][1]
+
+
+def ln_play_value(session: dict) -> float | None:
+    """一局 LN / Hybrid 折算成有效段位。
+
+    原始段位取 `ln_dan_value`（面条标尺，Sunny 给的 LN 段位），准确率按 v2 口径。
+    上下限固定 ±1.5，不再按段位分档：LN 谱面样本少，分档只会让读数更飘。
+    """
+    try:
+        base = float(session.get("ln_dan_value") or 0)
+        acc = float(session.get("accuracy") or 0)
+    except (TypeError, ValueError):
+        return None
+    if base <= 0 or not acc:
+        return None
+    if acc < LN_MIN_ACC:
+        return None
+    offset = ln_curve_offset(acc)
+    scale = LN_SPAN / CURVE_FULL
+    value = base + offset * scale
+    return max(base - LN_SPAN, min(base + LN_SPAN, value))
+
+
+def _ln_play_row(session: dict, value: float) -> dict:
+    row = _play_row(session, value)
+    # 卡片上要显示"这张图本身是几段"，LN 专区用的是面条段位
+    row["dan"] = round(float(session.get("ln_dan_value") or 0), 2)
+    row["label"] = dan.ln_label(session.get("ln_dan_value"))
+    # 倍率进键里：同一张图开 HT 与 1.0× 是两个难度，不能当成同一局合并
+    row["rate"] = round(float(session.get("rate") or 1), 3)
+    return row
+
+
+def _ln_play_rows(kept: list[dict]) -> tuple[list[dict], int, int, int]:
+    """LN 专区的成绩行，返回（行, 准确率太低, 同图合并, 缺 LN 段位）。
+
+    去重规则和常规 B50 一样：同一张谱面只留折算值最高的一局，
+    否则一张拿手的 LN 图反复打就能把专区段位刷上去。
+    """
+    plays: list[dict] = []
+    low_acc = 0
+    no_dan = 0
+    for s in kept:
+        try:
+            acc = float(s.get("accuracy") or 0)
+        except (TypeError, ValueError):
+            acc = 0.0
+        if acc < LN_MIN_ACC:
+            low_acc += 1
+            continue
+        if not (float(s.get("ln_dan_value") or 0) > 0):
+            # 老记录只有 RC 段位：算不出面条折合，先记一笔，页面上会提示重新导入
+            no_dan += 1
+            continue
+        v = ln_play_value(s)
+        if v is None:
+            continue
+        plays.append(_ln_play_row(s, v))
+    plays.sort(key=lambda p: p["value"], reverse=True)
+
+    unique: list[dict] = []
+    seen: set[str] = set()
+    duplicates = 0
+    for p in plays:
+        md5 = p.get("md5") or ""
+        if md5:
+            # 倍率一起进键：HT 0.75× 打出的 13 段和 1.0× 的 17 段本来就是两张不同的图，
+            # 只按 MD5 合并会把开 HT 那局当成"同一张图的低分版本"直接丢掉
+            key = "%s|%g" % (md5, p.get("rate") or 1)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+        unique.append(p)
+    return unique, low_acc, duplicates, no_dan
+
+
 def _skill_blocks(plays: list[dict]) -> dict:
     """按练法分组，各自取最好的若干局。样本不够的组只给局数，不出段位。"""
     by_skill: dict[str, list[dict]] = defaultdict(list)
@@ -427,6 +589,40 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
 
     target, beyond = _target_block(profile, overall_dan, count, top)
 
+    # Malody 玩家看自己的档位：REFORM 数值仍然留在 overall.dan 里当标尺，
+    # 这里额外给一份「Extra 4、距 Extra 5 还差 0.02」的视图。
+    malody = {}
+    if str((profile or {}).get("type") or "").lower() == "malody" and overall_dan is not None:
+        malody = malody_view(overall_dan)
+
+    # LN 专区：常规 B50 排除掉的 LN / Hybrid，在这里按 v2 口径单独折一次。
+    # 两套数据一起返回，页面切换时不用重新请求。
+    ln_kept, ln_others, ln_unknown = _ln_sessions(sessions, owner)
+    ln_plays, ln_low, ln_dup, ln_no_dan = _ln_play_rows(ln_kept)
+    ln_top = ln_plays[:TOP_PLAYS]
+    ln_avg = _average(ln_top)
+    ln_count = len(ln_plays)
+    ln = {
+        "count": ln_count,
+        "visible": ln_count >= LN_MIN_SESSIONS,
+        "preliminary": LN_MIN_SESSIONS <= ln_count < LN_FULL_SESSIONS,
+        "need": max(0, LN_MIN_SESSIONS - ln_count),
+        "dan": (round(ln_avg, 2)
+                if (ln_avg is not None and ln_count >= LN_MIN_SESSIONS) else None),
+        "plays": ln_top,
+        "lowAcc": ln_low,
+        "duplicates": ln_dup,
+        # 老记录只有 RC 段位、算不出面条折合的条数
+        "noDan": ln_no_dan,
+        "others": ln_others,
+        "unknown": ln_unknown,
+        "passAcc": LN_PASS_ACC,
+        "minAcc": LN_MIN_ACC,
+        "span": LN_SPAN,
+        "minSessions": LN_MIN_SESSIONS,
+        "fullSessions": LN_FULL_SESSIONS,
+    }
+
     return {
         "ok": True,
         "count": count,
@@ -438,6 +634,8 @@ def evaluate(sessions: list[dict], profile: dict | None = None) -> dict:
         "overall": overall,
         "skills": _skill_blocks(plays),
         "target": target,
+        "malody": malody,
+        "ln": ln,
         "minSessions": MIN_SESSIONS,
         "fullSessions": FULL_SESSIONS,
         "minSkill": MIN_SKILL,
