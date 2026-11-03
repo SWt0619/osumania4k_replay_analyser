@@ -52,7 +52,7 @@
 
   // 计入评估的回放：综合是 50 格（5×10），单个练法 10 格。没填满的格子留空，
   // 玩家一眼就能看出"还差多少局"，也看得见具体是哪几把在算数。
-  let pgState = { open: null, data: null };
+  let pgState = { open: null, data: null, scope: "rc" };
 
   function playCell(p) {
     const cell = document.createElement("div");
@@ -152,6 +152,8 @@
   function showGrid(which) {
     const data = pgState.data;
     if (!data) return;
+    // LN 专区的网格是常驻的，点 hero 只会在两套数据之间来回切，这里直接不响应
+    if (pgState.scope === "ln") return;
     const next = pgState.open === which ? null : which;
     pgState.open = next;
 
@@ -198,7 +200,7 @@
     if (need) return;
 
     // 每次重绘都收起展开面：数据可能变了，留着旧的会误导
-    pgState = { open: null, data: data };
+    pgState = { open: null, data: data, scope: pgState.scope || "rc" };
     if ($("pgGrid")) $("pgGrid").hidden = true;
     if ($("pgSkillGrid")) $("pgSkillGrid").hidden = true;
     if ($("pgSkillNote")) $("pgSkillNote").hidden = true;
@@ -218,8 +220,13 @@
     }
 
     if ($("pgDan")) {
+      // Malody 体系把档位名放在括号里：数值仍是折合后的 REFORM 段位，当标尺用
+      const mal = data.malody;
       $("pgDan").textContent = overall.visible && overall.dan != null
-        ? Number(overall.dan).toFixed(2) + " 段" : "—";
+        ? (mal && mal.label
+            ? Number(overall.dan).toFixed(2) + " 段（" + mal.label + "）"
+            : Number(overall.dan).toFixed(2) + " 段")
+        : "—";
     }
     if ($("pgSample")) {
       // 只留最要紧的一条：参与评估的局数，以及为什么有些图不算。
@@ -232,24 +239,40 @@
       const tip = ["参与评估 " + overall.count + " / " + denom + " 局"];
       if (f.others) tip.push("已排除别人 " + f.others + " 局");
       if (f.unknown) tip.push(f.unknown + " 局认不出玩家");
-      if (f.lnHybrid) tip.push("LN / Hybrid " + f.lnHybrid + " 局暂不计入");
+      if (f.lnHybrid) tip.push("LN / Hybrid " + f.lnHybrid + " 局在 LN 专区单独评估");
       // 同一张谱面打很多遍不会被重复计入：只取折算值最高的那一局
       if (f.duplicates) tip.push("同一张谱面只取最好一局（合并 " + f.duplicates + " 局）");
       // 这条是规则说明，不是统计：低于门槛的局直接不进估算，数字放括号里就够
       tip.push("仅 v1acc 高于 91% 的成绩进入个人段位估算"
         + (f.lowAcc ? "（已排除 " + f.lowAcc + " 局）" : ""));
       $("pgSample").textContent = overall.count + " / " + denom
-        + " 局（LN Hybrid 图暂不进入评价体系）";
+        + " 局（LN / Hybrid 到 LN 专区看）";
       $("pgSample").title = tip.join(" · ");
     }
-    if ($("pgTarget")) $("pgTarget").textContent = target.label ? "目标 " + target.label : "";
+    if ($("pgTarget")) {
+      const mal = data.malody;
+      $("pgTarget").textContent = (mal && mal.next)
+        ? "目标 " + mal.next
+        : (target.label ? "目标 " + target.label : "");
+    }
     const fill = $("pgBarFill");
-    if (fill) fill.style.width = Math.round(Math.min(1, Math.max(0, target.progress || 0)) * 100) + "%";
+    if (fill) {
+      // Malody 体系按"离下一档还有多远"填，和页面上的读数同一套口径
+      const mal = data.malody;
+      const ratio = (mal && overall.visible) ? (mal.progress || 0) : (target.progress || 0);
+      fill.style.width = Math.round(Math.min(1, Math.max(0, ratio)) * 100) + "%";
+    }
 
     const hint = $("pgHint");
     if (hint) {
       hint.className = "pg-hint";
-      if (!overall.visible) {
+      const mal = data.malody;
+      if (overall.visible && mal && mal.label) {
+        // Malody 体系先说自己的档位，再说还差多少，REFORM 数值留在上面当标尺
+        hint.textContent = mal.next
+          ? "离 " + mal.next + " 还有 " + Number(mal.gap).toFixed(2) + " 段，把这一段稳住就能过段。"
+          : "已经是 Malody 的最高段位。";
+      } else if (!overall.visible) {
         hint.textContent = "已记录 " + overall.count + " 局，再打 " + overall.need
           + " 局才能出综合评估。样本少的时候结果不稳，先按感觉练。";
         hint.classList.add("warn");
@@ -294,6 +317,107 @@
       card.append(head, big, sub);
       return card;
     }));
+
+    paintScope();
+  }
+
+  // ---------------------------------------------------------------- LN 专区
+  // 常规 B50 收的是 RC 图；LN / Hybrid 因为准确率口径不同被排除在外，
+  // 这里单独一页按 score v2 的 97% 折算，上下限固定 ±1.5 段。
+  let lastScope = "rc";
+
+  function paintScope() {
+    const data = pgState.data;
+    if (!data) return;
+    const lnMode = pgState.scope === "ln";
+    const panel = $("panel-progress");
+    if (panel) panel.classList.toggle("is-ln", lnMode);
+    document.querySelectorAll(".pg-scope-btn").forEach((btn) => {
+      const on = btn.dataset.scope === (lnMode ? "ln" : "rc");
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    const kicker = $("pgKicker");
+    if (kicker) kicker.textContent = lnMode ? "LN 综合段位" : "综合段位";
+    const block = $("pgSkillBlock");
+    if (block) block.hidden = lnMode;
+    // 导出按钮跟着当前页走：LN 那份没有记录时就别让人点
+    const exportBtn = $("btnExportB50");
+    if (exportBtn) {
+      const cur = lnMode ? (data.ln || {}) : (data.overall || {});
+      exportBtn.disabled = !!data.needPlayer || !cur.count;
+      exportBtn.title = lnMode
+        ? "把 LN 专区的综合段位和计入的成绩导成一张图"
+        : "把综合段位和计入评估的 50 局导成一张图";
+    }
+
+    if (lnMode) {
+      renderLnScope(data);
+      lastScope = "ln";
+    } else if (lastScope === "ln") {
+      // 从 LN 切回常规：hero 上的数字被 LN 覆盖过，重画一遍
+      lastScope = "rc";
+      renderProgress(data);
+    }
+  }
+
+  function renderLnScope(data) {
+    const ln = data.ln || {};
+    const visible = !!(ln.visible && ln.dan != null);
+    const min = ln.minSessions || 10;
+    const full = ln.fullSessions || 30;
+    // LN 图本来就少，进度条按"离最低样本门槛还差多少"画，别用 50 局那套分母
+    const denom = ln.count > min ? full : min;
+
+    if ($("pgWarn")) $("pgWarn").hidden = true;
+    if ($("pgHero")) $("pgHero").hidden = false;
+    if ($("pgDan")) $("pgDan").textContent = visible ? Number(ln.dan).toFixed(2) + " 段" : "—";
+    if ($("pgTarget")) $("pgTarget").textContent = "基准 97%";
+    if ($("pgSample")) {
+      const tip = ["LN / Hybrid 计入 " + ln.count + " 局"];
+      if (ln.lowAcc) tip.push("低于 91% 的 " + ln.lowAcc + " 局已排除");
+      if (ln.duplicates) tip.push("同一张谱面只取最好一局（合并 " + ln.duplicates + " 局）");
+      if (ln.noDan) tip.push(ln.noDan + " 局缺面条段位，重新导入后才会算进来");
+      tip.push("v2 口径：97% 不加不减，91% 扣满 1.5 段，100% 加满 1.5 段");
+      $("pgSample").textContent = ln.count + " / " + denom + " 局（v2 口径）";
+      $("pgSample").title = tip.join(" · ");
+    }
+    const fill = $("pgBarFill");
+    if (fill) {
+      // LN 专区没有"下一段"可以当目标，进度条按综合段位的小数部分填：
+      // 12.5 填一半、11.3 填三成，看得出"这一段里走到了几成"
+      const v = Number(ln.dan);
+      const frac = Number.isFinite(v) ? v - Math.floor(v) : 0;
+      fill.style.width = Math.round(Math.min(1, Math.max(0, frac)) * 100) + "%";
+    }
+
+    const hint = $("pgHint");
+    if (hint) {
+      hint.className = "pg-hint";
+      if (!ln.count) {
+        hint.textContent = "还没有 LN / Hybrid 的记录。打过面条图并导入回放后，会自动出现在这里。";
+        hint.classList.add("warn");
+      } else if (!visible) {
+        hint.textContent = "LN 专区已记录 " + ln.count + " 局，再打 " + (ln.need || 0)
+          + " 局才能出综合段位。";
+        hint.classList.add("warn");
+      } else {
+        hint.textContent = "按 score v2 口径折算：97% 不加不减，准确率每高 1 个点大约多 0.7 段，"
+          + "上下限各 1.5 段。";
+      }
+    }
+
+    const grid = $("pgGrid");
+    if (grid) {
+      grid.hidden = false;
+      renderCells(grid, ln.plays || [], 50);
+    }
+    const hintGrid = $("pgGridHint");
+    if (hintGrid) {
+      hintGrid.hidden = false;
+      hintGrid.textContent = "点任意一格，回到那一局的分析";
+    }
+    if ($("pgHeroHint")) $("pgHeroHint").textContent = "LN 专区列出全部计入的记录，点格子回到那一局";
   }
 
   // ---------------------------------------------------------------- 随机找图
@@ -714,6 +838,18 @@
     App.on("btnSaveProfile", "click", saveProfile);
     // 综合卡片整块可点：展开 5×10 的明细
     App.on("pgHero", "click", () => showGrid("overall"));
+    // 常规 B50 / LN 专区切换：两套数据都在同一份响应里，切换只重画，不发请求
+    const scope = $("pgScope");
+    if (scope) {
+      scope.addEventListener("click", (e) => {
+        const btn = e.target.closest(".pg-scope-btn");
+        if (!btn) return;
+        const next = btn.dataset.scope === "ln" ? "ln" : "rc";
+        if (pgState.scope === next) return;
+        pgState.scope = next;
+        paintScope();
+      });
+    }
     fillDanOptions("reform", 7);
   }
 
