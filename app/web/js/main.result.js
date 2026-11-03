@@ -206,14 +206,18 @@
     if (!res || !res.ok) return;
     // 配错图的那一局根本没写进库，回填只会返回"没有对应记录"，直接在源头跳过
     if (data && data.historySkipped) return;
-    // Sunny 只给星级，没有段位数值；只有 Azusa / Roxy 才有可比的数
-    if (res.method !== "roxy" && res.method !== "azusa") return;
-    const value = Number(res.numeric);
-    if (!Number.isFinite(value) || value <= 0) return;
+    // Sunny 只给星级，没有 RC 数值；只有 Azusa / Roxy 才有可比的数。
+    // 但面图的标签后半段带着面条段位（"Reform 8 mid || LN 6 mid"），
+    // LN 专区要用它折算，所以即使没有 RC 数值也要回填一次。
+    const numeric = (res.method === "roxy" || res.method === "azusa") ? Number(res.numeric) : NaN;
+    const rcValue = Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+    const lnPart = String(res.label || "").split("||")[1];
+    const lnText = lnPart ? lnPart.trim() : "";
+    if (rcValue === null && !lnText) return;
     const replay = (data && data.replay) || {};
     const key = String(replay.replayMd5 || replay.fileHash || "").trim();
     if (!key) return;
-    window.API.setHistoryDan(key, value, !!(data && data.historyNew))
+    window.API.setHistoryDan(key, rcValue, !!(data && data.historyNew), lnText)
       .then((resp) => {
         const change = (resp && resp.change) || null;
         if (!change) return;
