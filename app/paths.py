@@ -1,24 +1,20 @@
-"""运行路径：源码运行与 PyInstaller 打包后都能找到资源、也能找到可写目录。
+"""运行路径：源码运行与便携版（解压即用）共用同一套。
 
-两种形态的差别只有一处：
-  * 源码运行：`_MEIPASS` 不存在，资源与可写目录都在项目根；
-  * exe 运行：资源在 PyInstaller 的临时解压目录（`sys._MEIPASS`，只读、退出即删），
-    缓存、端口号、报告这些必须写到 exe 旁边，否则重启一次就全丢了。
+两种发布形态的目录布局是一样的：资源与可写目录都在程序根目录下。
+以前还支持 PyInstaller 打出来的单文件 exe，那时资源在临时解压目录、缓存必须写到
+exe 旁边；单文件 exe 已经不再发行，这层分支也就一起删掉了。
 """
 
 from __future__ import annotations
 
 import os
-import sys
 
-FROZEN = bool(getattr(sys, "frozen", False))
-
-# app 包所在目录；打包后是 _MEIPASS\app
+# app 包所在目录
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # 资源根：web / vendor / data 都在它下面
 ROOT = os.path.dirname(APP_DIR)
-# 可写根：exe 所在目录，或源码模式下的项目根
-DATA_ROOT = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else ROOT
+# 可写根：源码模式与便携版都是项目根
+DATA_ROOT = ROOT
 
 WEB_DIR = os.path.join(APP_DIR, "web")
 LOCAL_REPLAY_DIR = os.path.join(DATA_ROOT, "_replays")
@@ -63,7 +59,7 @@ def _pick_cache_dir() -> tuple[str, bool]:
     这一层必须在模块导入时做完：config_store 等模块是按值 `from ..paths import CACHE_DIR`
     拿走的，等到 server 起来再改就晚了。
     """
-    primary = os.path.join(DATA_ROOT, "_cache") if FROZEN else os.path.join(ROOT, "app", "_cache")
+    primary = os.path.join(ROOT, "app", "_cache")
     if _writable(primary) and not _in_temp_dir(primary):
         return primary, False
     import tempfile
