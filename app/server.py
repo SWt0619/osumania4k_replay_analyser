@@ -143,10 +143,9 @@ _STALE_WATCHER = _StaleCodeWatcher((paths.APP_DIR, os.path.join(paths.APP_DIR, "
 def stale_code() -> bool:
     """进程启动后有没有 .py 被改过（供 /api/health 使用）。
 
-    exe 形态下没有可改的 .py，解压时间戳还会被误判成"改过"，直接报 False。
+    只有源码运行才谈得上"文件被改"：便携版里那套 .py 也是真实文件，
+    同样适用，所以不再区分运行形态。
     """
-    if paths.FROZEN:
-        return False
     return _STALE_WATCHER.stale()
 
 # 站点图标（内联 SVG，省得浏览器每次开页面都在控制台刷一条 favicon 404）
@@ -686,24 +685,39 @@ class _ApiMixin(_SessionView):
         12.39 去算，用户会以为折合虚高。所以页面算完就回填，成长页直接读库。
         """
         key = str(_field(req, "key") or "").strip()
-        # dan 是 JSON 数字，_field 只认字符串，这里直接取原值
+        # dan 是 JSON 数字，_field 只认字符串，这里直接取原值。
+        # 面图（Sunny 查表）没有 numeric，这时只回填面条段位，dan 允许缺省。
         try:
-            value = float(req.get("dan"))
+            value = float(req.get("dan")) if req.get("dan") not in (None, "") else None
         except (TypeError, ValueError):
             return self._error("dan 必须是数字")
         if not key:
             return self._error("缺少回放标识")
         old = (history.get(key) or {}).get("dan_value")
+        # 面图的标签是 "Reform 8 mid || LN 6 mid"：后半段单独换算成面条段位存起来，
+        # LN 专区的 B50 要用它折算。拿不到就传空，保留库里原来的值。
+        raw_ln = req.get("ln")
+        ln_value = None
+        if raw_ln not in (None, ""):
+            try:
+                ln_value = float(raw_ln)
+            except (TypeError, ValueError):
+                ln_value = dan.from_ln_label(str(raw_ln))
         # 页面在分析结果里带了 historyNew：为真说明这一局是本次刚写进库的
         fresh = bool(req.get("fresh"))
-        updated = history.update_dan_value(key, value)
-        log("[dan] %s -> %.2f (%s)" % (key[:8], value, "更新" if updated else "没有对应记录"))
+        updated = history.update_dan_value(key, value, ln_value=ln_value)
+        log("[dan] %s -> %s%s" % (
+            key[:8],
+            "%.2f" % value if value is not None else "（只回填面条段位）",
+            ("" if not ln_value else " / LN %.2f" % ln_value),
+        ))
         # 成长页的综合段位是服务端折合的，所以"这一局让段位动了多少"也在这里算：
         # 前端拿到就画在总览页，不用自己再抄一遍折合公式。
+        # 只回填 LN 时 RC 段位没变，不产生变动卡。
         return self._json({
             "ok": True,
             "updated": updated,
-            "change": _dan_change(key, old, fresh),
+            "change": _dan_change(key, old, fresh) if value is not None else None,
         })
 
     def _history_replay(self, req: dict):
