@@ -291,11 +291,12 @@
     // 把估算器算出的段位写回这一局，成长页折合要用同一个数。
     // fresh = 这一局是本次刚入库的：服务端据此把"导入前"还原成"库里没有这一局"，
     // 否则会拿入库时的 MSD 兜底值当基线，新成绩容易一律显示掉段。
-    setHistoryDan(key, dan, fresh) {
+    // ln 是面图标签后半段的面条段位（"LN 6 mid"），LN 专区要用；没有就传空
+    setHistoryDan(key, dan, fresh, ln) {
       return jsonFetch("/api/history/dan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: key, dan: dan, fresh: !!fresh }),
+        body: JSON.stringify({ key: key, dan: dan, fresh: !!fresh, ln: ln || "" }),
       });
     },
 
