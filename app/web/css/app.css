@@ -1887,6 +1887,39 @@ html[data-theme="sakura"] .pg-bar { background: rgba(0, 0, 0, 0.08); }
 }
 html[data-theme="sakura"] .pg-warn { border-color: rgba(150, 90, 20, 0.35); }
 
+/* 常规 B50 / LN 专区切换。LN 那一栏用青蓝，和主色的紫粉拉开距离，
+   一眼能看出「现在看的是另一套口径」。 */
+.pg-scope {
+  display: inline-flex; gap: 4px; padding: 3px; margin-top: 14px;
+  border-radius: 999px; background: var(--glass); border: 1px solid var(--stroke);
+}
+.pg-scope-btn {
+  padding: 6px 14px; border-radius: 999px; font-size: 12.5px; line-height: 1;
+  color: var(--dim); background: transparent; border: 0; cursor: pointer;
+  transition: color .18s ease, background .18s ease;
+}
+.pg-scope-btn:hover { color: var(--text); }
+.pg-scope-btn.is-active { color: var(--text); background: var(--accent-soft); }
+
+#panel-progress.is-ln .pg-scope-btn.is-active {
+  background: rgba(86, 182, 255, 0.20); color: #bfe6ff;
+}
+#panel-progress.is-ln .pg-hero {
+  border-color: rgba(86, 182, 255, 0.42);
+  background: linear-gradient(180deg, rgba(86, 182, 255, 0.10), var(--glass-2));
+  cursor: default;
+}
+#panel-progress.is-ln .pg-kicker { color: rgba(126, 202, 255, 0.92); }
+#panel-progress.is-ln .pg-bar i { background: linear-gradient(90deg, #4fc3f7, #7c9cff); }
+html[data-theme="sakura"] #panel-progress.is-ln .pg-scope-btn.is-active {
+  background: rgba(30, 120, 190, 0.16); color: #14507a;
+}
+html[data-theme="sakura"] #panel-progress.is-ln .pg-hero {
+  border-color: rgba(40, 120, 190, 0.35);
+  background: linear-gradient(180deg, rgba(40, 120, 190, 0.08), var(--glass-2));
+}
+html[data-theme="sakura"] #panel-progress.is-ln .pg-kicker { color: rgba(24, 96, 150, 0.9); }
+
 /* 计入评估的回放：5 列 × 10 行的小卡片。空位也要占着，玩家一眼能看出还差多少。 */
 .pg-hero { cursor: pointer; transition: border-color .2s ease, background .2s ease; }
 .pg-hero:hover { border-color: var(--stroke-2); }
