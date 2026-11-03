@@ -403,8 +403,11 @@
     btn.addEventListener("click", async () => {
       if (!window.B50Card) return;
       const data = App.pgState.data;
-      if (!data || !data.overall || !data.overall.count) {
-        window.UI.toast("先在成长页填上名字，等评估出来再导");
+      // 导出跟着当前那一页走：LN 专区导 LN 那份，常规导 RC 那份
+      const scope = (App.pgState && App.pgState.scope) === "ln" ? "ln" : "rc";
+      const block = scope === "ln" ? (data && data.ln) : (data && data.overall);
+      if (!data || !block || !block.count) {
+        window.UI.toast(scope === "ln" ? "LN 专区还没有记录" : "先在成长页填上名字，等评估出来再导");
         return;
       }
       if (btn.disabled) return;
@@ -415,9 +418,11 @@
         const ver = String(($("aboutVersion") && $("aboutVersion").textContent) || "")
           .replace(/^v/i, "").trim();
         // 跟着界面主题走：浅粉主题导浅色版（够到目标的卡是金底），其余导深色版（浅粉底）
-        const saved = await window.B50Card.save(data, { version: ver, light: App.state.theme === "sakura" });
+        const saved = await window.B50Card.save(data, {
+          version: ver, light: App.state.theme === "sakura", scope: scope,
+        });
         window.UI.toast(saved && saved.dir
-          ? "B50 已保存到 " + saved.dir + "/" + saved.name
+          ? (scope === "ln" ? "LN B50 已保存到 " : "B50 已保存到 ") + saved.dir + "/" + saved.name
           : "B50 已保存到下载文件夹");
       } catch (e) {
         window.UI.toast("B50 导出失败：" + (e && e.message ? e.message : e), true);
